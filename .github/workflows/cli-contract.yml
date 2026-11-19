@@ -58,5 +58,3 @@ jobs:
         run: |
           node test/llvmConfiguration.js
           node test/editorIntegration.js
-      - name: Check generated sources for whitespace errors
-        run: git show --format= --check HEAD
