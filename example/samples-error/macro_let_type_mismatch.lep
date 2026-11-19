@@ -1,0 +1,7 @@
+$macro BAD() -> expr {
+$let<bool> small = 1
+small
+}
+void main() {
+    let value = $BAD();
+}

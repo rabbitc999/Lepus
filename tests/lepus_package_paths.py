@@ -1,0 +1,77 @@
+"""验证模块搜索优先级、工程导入命令和文本包含指令拒绝行为。"""
+from compiler_path import compiler_path
+from pathlib import Path
+import os
+import re
+import subprocess
+from project_temp import tempfile
+ROOT = Path(__file__).resolve().parents[1]
+COMPILER = compiler_path()
+
+
+def run(args, success=True):
+    result = subprocess.run(list(map(str, args)), cwd=ROOT, capture_output=True, text=True, encoding="utf-8", env=dict(os.environ, LEPUS_LANG="zh"))
+    assert (result.returncode == 0) == success, result.stdout + result.stderr
+    return result
+
+
+def main():
+    (ROOT / "tmp").mkdir(exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="lepus-package-paths-", dir=ROOT / "tmp") as directory:
+        work = Path(directory)
+        project, first, second = work / "project", work / "first", work / "second"
+        for folder in (project / "src", first, second):
+            folder.mkdir(parents=True)
+        for folder, value in ((first, 20), (second, 90)):
+            (folder / "settings.lep").write_text(f'module settings;\nint64 value() {{ return {value}; }}\n', encoding="utf-8")
+        (first / "extra.lep").write_text('module extra;\nint64 value() { return 2; }\n', encoding="utf-8")
+        source = project / "src/main.lep"
+        source.write_text('module app;\nvoid main() { std::core::println("{} {}", settings::value(), extra::value()); return; }\n', encoding="utf-8")
+        manifest = project / "lepus.toml"
+        config = '''[package]
+name = "paths-demo"
+version = "0.1.0"
+[lepus]
+import_paths = ['../first', '../second']
+import = ['settings']
+commands = ['import extra;']
+'''
+        manifest.write_text(config, encoding="utf-8")
+        args = [COMPILER, 'run', source, "--out", work / "program"]
+        assert run(args).stdout == "20 2\n"
+        emitted = [args[0], "build", *args[2:], "--emit-llvm", "--incremental"]
+        run(emitted)
+        # BUILD 重用模块预处理；原生输出不采用已删除的四元式产物缓存。
+        repeated = run(emitted).stderr
+        assert re.search(r"增量编译：[1-9][0-9]* 个模块复用", repeated), repeated
+        manifest.write_text(config.replace("['../first', '../second']", "['../second', '../first']"), encoding="utf-8")
+        run(emitted)
+        assert run(args).stdout == "90 2\n"
+        (second / "settings.lep").write_text('module settings;\nint64 value() { return 88; }\n', encoding="utf-8")
+        run(emitted)
+        assert run(args).stdout == "88 2\n"
+        for invalid in ('include = ["missing.lep"]', 'commands = [\'%include "extra.lep"\']'):
+            manifest.write_text('[lepus]\n' + invalid + '\n', encoding="utf-8")
+            run(args, False)
+        manifest.write_text(config.replace('import_paths', 'search_paths'), encoding="utf-8")
+        assert run(args).stdout == "20 2\n"
+        deps = run([*args, "--deps"]).stdout.replace("\\", "/")
+        assert (first / "settings.lep").as_posix() in deps
+        assert (first / "extra.lep").as_posix() in deps
+        plain = work / "plain"
+        plain.mkdir()
+        main = plain / "main.lep"
+        main.write_text('import settings;\nvoid main() { std::core::println("{}", settings::value()); return; }\n', encoding="utf-8")
+        cli = [COMPILER, 'run', main, "--out", work / "cli"]
+        assert run([*cli, "--import-dir", first]).stdout == "20\n"
+        assert run([*cli, "-I", first]).stdout == "20\n"
+        assert "找不到模块 settings" in run(cli, False).stderr
+        for directive in ('include', 'include_once', 'import'):
+            main.write_text(f'%{directive} "missing.lep"\nvoid main() {{ return; }}\n', encoding="utf-8")
+            error = run(cli, False).stderr
+            assert '语法错误' in error and '取余(%)' in error, error
+    print("LEPUS module paths and removed inclusion checks passed")
+
+
+if __name__ == "__main__":
+    main()

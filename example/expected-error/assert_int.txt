@@ -1,0 +1,1 @@
+lepus: example/samples-error/assert_int.lep 第 2 行第 5 列：调用 函数 std::core::assert 找不到匹配的重载：(int64)；没有参数类型能对上的重载（候选：std::core::assert$bool、std::core::assert$bool$std::core::String、std::core::assert$bool$int64、std::core::assert$bool$std::core::String$int64）

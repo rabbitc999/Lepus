@@ -1,0 +1,157 @@
+module std::path;
+
+/* 纯词法路径处理。原来下沉在宿主 C++（glue/std_path.hpp），现已改由本文件用 Lepus 表达，
+ * 宿主签名 `__pathJoin` / `__pathFileName` / `__pathExtension` / `__pathNormalize` 一并删除。
+ *
+ * 语义逐条照搬原实现：反斜杠一律归一成 `/`，`..` 只回退上一段、顶到绝对路径开头就保留，
+ * 不访问文件系统。
+ *
+ * String 下标读取要求位置落在 UTF-8 字符边界；字节切片允许任意端点。
+ * 这里先经 std::core::stringBytes 取得字节表来扫描分隔符，再按已识别的路径段切片，
+ * 保留非 ASCII 路径段的原始字节。 */
+
+/** 该字节是不是路径分隔符（`/` 或 `\`）。 */
+inline bool __pathIsSeparator(uint8 byte)
+{
+    return byte == (uint8)47 || byte == (uint8)92;
+}
+
+/** 该字节是不是 ASCII 字母（与 C 局部环境下的 `isalpha` 同集合；其余字节一律不是）。 */
+inline bool __pathIsAlpha(uint8 byte)
+{
+    return (byte >= (uint8)65 && byte <= (uint8)90) || (byte >= (uint8)97 && byte <= (uint8)122);
+}
+
+/** 归一化路径文本：反斜杠转正斜杠、消掉 `.` 与可回退的 `..`；空结果给 `.`。 */
+inline String __pathNormalize(String path)
+{
+    List<uint8> bytes = stringBytes(path);
+    int64 size = bytes.len();
+
+    String prefix = "";
+    int64 begin = 0;
+    bool absolute = false;
+    if (size >= 2 && __pathIsAlpha(bytes[0]) && bytes[1] == (uint8)58) {
+        prefix = path[0:2];
+        begin = 2;
+        if (begin < size && __pathIsSeparator(bytes[begin])) {
+            absolute = true;
+            begin = begin + 1;
+        }
+    } elif (size > 0 && __pathIsSeparator(bytes[0])) {
+        absolute = true;
+        begin = 1;
+    }
+
+    List<String> parts;
+    while (begin <= size) {
+        int64 end = begin;
+        while (end < size && !__pathIsSeparator(bytes[end])) { end = end + 1; }
+        if (end > begin) {
+            String part = path[begin:end];
+            if (part != ".") {
+                if (part == ".." && parts.len() > 0 && parts[parts.len() - 1] != "..") {
+                    parts.pop();
+                } elif (part != ".." || !absolute) {
+                    parts.push(part);
+                }
+            }
+        }
+        if (end >= size) { break; }
+        begin = end + 1;
+    }
+
+    /* 拼接时用状态位代替「看 result 的最后一个字节」——末字节可能落在多字节字符中间。 */
+    String result = prefix;
+    if (absolute) { result = result + "/"; }
+    bool needsSlash = len(prefix) > 0 && !absolute;
+    for (int64 index = 0; index < parts.len(); index = index + 1) {
+
+        if (needsSlash) { result = result + "/"; }
+        result = result + parts[index];
+        needsSlash = true;
+
+    }
+    if (len(result) == 0) { return "."; }
+    return result;
+}
+
+/** 归一化后的最后一段（文件名）；没有分隔符就是整串。 */
+inline String __pathFileName(String path)
+{
+    String normalized = __pathNormalize(path);
+    List<uint8> bytes = stringBytes(normalized);
+    int64 slash = 0 - 1;
+    int64 index = 0;
+    while (index < bytes.len()) {
+        if (bytes[index] == (uint8)47) { slash = index; }
+        index = index + 1;
+    }
+    if (slash < 0) { return normalized; }
+    return normalized[slash + 1:];
+}
+
+/** 扩展名（含点）；没有点或点在开头给空串。 */
+inline String __pathExtension(String path)
+{
+    String name = __pathFileName(path);
+    List<uint8> bytes = stringBytes(name);
+    int64 dot = 0 - 1;
+    int64 index = 0;
+    while (index < bytes.len()) {
+        if (bytes[index] == (uint8)46) { dot = index; }
+        index = index + 1;
+    }
+    if (dot < 0 || dot == 0) { return ""; }
+    return name[dot:];
+}
+
+/** 拼两段路径；`right` 是绝对路径时直接取代 `left`，结果一律归一化。 */
+inline String __pathJoin(String left, String right)
+{
+    List<uint8> bytes = stringBytes(right);
+    bool rightAbsolute = false;
+    if (bytes.len() > 0) {
+        if (__pathIsSeparator(bytes[0])) { rightAbsolute = true; }
+        elif (bytes.len() >= 2 && __pathIsAlpha(bytes[0]) && bytes[1] == (uint8)58) { rightAbsolute = true; }
+    }
+    String joined;
+    if (rightAbsolute) {
+        joined = right;
+    } else {
+        joined = left;
+        if (len(left) > 0) { joined = joined + "/"; }
+        joined = joined + right;
+    }
+    return __pathNormalize(joined);
+}
+
+struct PathString {
+    static String join(String left, String right) { return __pathJoin(left, right); }
+    static String fileName(String path) { return __pathFileName(path); }
+    static String extension(String path) { return __pathExtension(path); }
+    static String normalize(String path) { return __pathNormalize(path); }
+
+    /** 返回归一化后的父路径；单段相对路径的父路径为点。 */
+    static String parent(String path) {
+        String normalized = __pathNormalize(path);
+        List<uint8> bytes = stringBytes(normalized);
+        int64 slash = bytes.len() - 1;
+        while (slash >= 0 && bytes[slash] != (uint8)47) { slash = slash - 1; }
+        bool drive = bytes.len() >= 2 && __pathIsAlpha(bytes[0]) && bytes[1] == (uint8)58;
+        if (slash < 0) {
+            if (drive) { return normalized[0:2]; }
+            return ".";
+        }
+        if (slash == 0) { return "/"; }
+        if (drive && slash == 2) { return normalized[0:3]; }
+        return normalized[0:slash];
+    }
+
+    /** 返回末段名称去掉最后一个扩展名后的文本。 */
+    static String stem(String path) {
+        String name = __pathFileName(path);
+        String suffix = __pathExtension(path);
+        return name[0:len(name)-len(suffix)];
+    }
+};

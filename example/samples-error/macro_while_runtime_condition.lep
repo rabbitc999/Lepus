@@ -1,0 +1,10 @@
+$macro invalid(value: expr) -> stmt {
+$while (value) {
+    $break;
+}
+}
+
+void main() {
+    bool flag = true;
+    $invalid(flag);
+}

@@ -1,0 +1,68 @@
+import std::collections;
+
+import std::memory;
+
+import std::algorithms;
+
+bool positive(int64 value) { return value > 0; }
+int64 addValues(int64 left, int64 right) { return left + right; }
+
+void main() {
+    List<int64> values;
+    values.push(4);
+    values.push(1);
+    values.push(3);
+    List<int64> sorted = sortValue(values);
+    println("{} {} {} {} {}", sorted[0], sorted[1], sorted[2],
+    binarySearchValue(sorted, 3),
+    foldValue(sorted, 0, addValues));
+    println("{} {} {}", values[0], values[1], values[2]);
+
+    List<float64> stableValues;
+    stableValues.push(-0.0);
+    stableValues.push(2.0);
+    stableValues.push(0.0);
+    stableValues.push(1.0);
+    List<float64> stableSorted = sortValue(stableValues);
+    println("{1:1F} {2:1F} {3:1F} {4:1F}", stableSorted[0], stableSorted[1],
+    stableSorted[2], stableSorted[3]);
+    println("{} {} {} {} {}", findValue(sorted, 4),
+    minValue(9, 2), maxValue(9, 2),
+    clampValue(12, 0, 10),
+    allValue(sorted, positive));
+    println("{} {} {} {}", minValue(9, 2, 7, -1),
+    maxValue(9, 2, 12, 7),
+    minValue(5), maxValue(6));
+
+    Deque<int64> deque = Deque<int64>::create();
+    deque.pushBack(2);
+    deque.pushFront(1);
+    println("{} {} {}", deque.len(), deque.popFront().unwrap(),
+    deque.popBack().unwrap());
+
+    Queue<int64> queue = Queue<int64>::create();
+    queue.push(7);
+    queue.push(8);
+    println("{} {}", queue.peek().unwrap(), queue.pop().unwrap());
+
+    RingBuffer<int64> ring = RingBuffer<int64>::withCapacity(2);
+    println("{} {} {}", ring.push(5), ring.push(6), ring.push(7));
+    println("{} {}", ring.pop().unwrap(), ring.available());
+
+    FixedVector<int64> fixed = FixedVector<int64>::withCapacity(1);
+    println("{} {} {}", fixed.push(9), fixed.push(10), fixed[0]);
+
+    int64 raw[] = new[2];
+    raw[0] = 11;
+    raw[1] = 12;
+    Span<int64> span = Span<int64>::from(&raw[0], len(raw));
+    println("{} {} {}", span.len(), span[0], span[1]);
+
+    Channel<int64> channel = Channel<int64>::create();
+    channel.send(21);
+    println("{} {}", channel.len(), channel.receive().unwrap());
+
+    Pair<int64, String> pair = Pair<int64, String>::create(7, "seven");
+    println("{} {}", pair.first, pair.second);
+    raw.drop();
+}

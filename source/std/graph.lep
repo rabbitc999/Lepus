@@ -1,0 +1,124 @@
+module std::graph;
+
+/** 图算法的兼容回执类型；算法直接返回语言值，不再依赖宿主填写槽。 */
+struct GraphReply { String error; int64 value; int64 flag; List<int64> order; List<int64> dist; };
+/** 完整、独立的链式前向星邻接快照。 */
+struct GraphSnapshot { int64 vertexCount; bool directed; int64 edgeCount; List<int64> head; List<int64> edgeTo; List<int64> edgeNext; List<int64> edgeWeight; };
+
+/** Lepus 并查集，路径压缩与按大小合并直接更新拥有数组。 */
+struct UnionFind: Copy<UnionFind> {
+    List<int64> __parents;List<int64> __sizes;int64 __components;
+    /** 创建 n 个独立集合，保持原容量边界。 */
+    static UnionFind create(int64 n){assert(n>=0 && n<=16777216,"并查集容量必须在 0..16777216 之间");int64 i=0;while(i<n){self.__parents.push(i);self.__sizes.push(1);i=i+1;}self.__components=n;}
+    /** 返回独立数组副本。 */
+    UnionFind copy(){return self;}
+    /** 先找到根，再原地压缩路径。 */
+    int64 find(int64 x){assert(x>=0 && x<self.__parents.len(),"并查集元素下标越界");int64 root=x;while(self.__parents[root]!=root){root=self.__parents[root];}while(x!=root){int64 next=self.__parents[x];self.__parents[x]=root;x=next;}return root;}
+    /** 按集合大小合并，已连通时返回 false。 */
+    bool unionSets(int64 a,int64 b){int64 left=self.find(a);int64 right=self.find(b);if(left==right){return false;}if(self.__sizes[left]<self.__sizes[right]){int64 swap=left;left=right;right=swap;}self.__parents[right]=left;self.__sizes[left]=self.__sizes[left]+self.__sizes[right];self.__components=self.__components-1;return true;}
+    /** 判断是否连通。 */
+    bool connected(int64 a,int64 b){return self.find(a)==self.find(b);}
+    /** 返回元素所在集合大小。 */
+    int64 sizeOf(int64 x){return self.__sizes[self.find(x)];}
+    /** 返回连通分量数。 */
+    int64 count(){return self.__components;}
+    /** 返回元素总数。 */
+    int64 len(){return self.__parents.len();}
+    /** 返回独立父指针列表。 */
+    List<int64> parents(){return self.__parents;}
+    /** 返回独立集合大小列表。 */
+    List<int64> sizes(){return self.__sizes;}
+};
+
+/** 最小生成树堆返回的独立边记录。 */
+struct __GraphEdge { int64 from;int64 to;int64 weight; };
+/** 三个平行数组组成的边权最小堆，不复制整个图。 */
+struct __GraphHeap {
+    List<int64> from;List<int64> to;List<int64> weight;
+    /** 返回堆元素数量。 */
+    int64 len(){return self.weight.len();}
+    /** 插入边并沿父路径调整。 */
+    void push(int64 from,int64 to,int64 weight){
+        self.from.push(from);self.to.push(to);self.weight.push(weight);int64 i=self.weight.len()-1;
+        while(i>0){int64 parent=(i-1)/2;if(self.weight[parent]<=weight){break;}self.from[i]=self.from[parent];self.to[i]=self.to[parent];self.weight[i]=self.weight[parent];i=parent;}
+        self.from[i]=from;self.to[i]=to;self.weight[i]=weight;
+    }
+    /** 弹出最小权边，调用方保证非空。 */
+    __GraphEdge pop(){
+        __GraphEdge result;result.from=self.from[0];result.to=self.to[0];result.weight=self.weight[0];
+        int64 from=self.from.pop();int64 to=self.to.pop();int64 weight=self.weight.pop();int64 size=self.weight.len();
+        if(size>0){int64 i=0;while(i<size/2){int64 child=i*2+1;if(child+1<size && self.weight[child+1]<self.weight[child]){child=child+1;}if(weight<=self.weight[child]){break;}self.from[i]=self.from[child];self.to[i]=self.to[child];self.weight[i]=self.weight[child];i=child;}self.from[i]=from;self.to[i]=to;self.weight[i]=weight;}
+        return result;
+    }
+};
+
+/** Lepus 有向或无向带权图；邻接顺序和独立快照保持现有约定。 */
+struct Graph: Copy<Graph> {
+    List<int64> __head;List<int64> __to;List<int64> __next;List<int64> __weight;
+    bool __directed;int64 __edges;
+    /** 创建指定规模的空图。 */
+    static Graph create(int64 vertexCount,bool directed){assert(vertexCount>=0 && vertexCount<=16777216,"图顶点数必须在 0..16777216 之间");self.__directed=directed;int64 i=0;while(i<vertexCount){self.__head.push(0-1);i=i+1;}}
+    /** 返回完整邻接状态的独立副本。 */
+    Graph copy(){return self;}
+    /** 返回顶点数。 */
+    int64 vertexCount(){return self.__head.len();}
+    /** 返回是否为有向图。 */
+    bool isDirected(){return self.__directed;}
+    /** 返回逻辑边数，不计无向镜像记录。 */
+    int64 len(){return self.__edges;}
+    /** 向邻接表头追加一条记录。 */
+    void __append(int64 from,int64 to,int64 weight){int64 edge=self.__to.len();self.__to.push(to);self.__next.push(self.__head[from]);self.__weight.push(weight);self.__head[from]=edge;}
+    /** 添加逻辑边，无向且不是自环时追加反向记录。 */
+    void addEdge(int64 from,int64 to,int64 weight){assert(from>=0 && from<self.__head.len() && to>=0 && to<self.__head.len(),"图顶点下标越界");self.__append(from,to,weight);if(!self.__directed && from!=to){self.__append(to,from,weight);}self.__edges=self.__edges+1;}
+    /** 生成顶点数个零值的独立工作数组。 */
+    List<int64> __zeros(){List<int64> result;int64 i=0;while(i<self.__head.len()){result.push(0);i=i+1;}return result;}
+    /** 广度优先访问；无效起点返回空列表。 */
+    List<int64> bfs(int64 start){
+        List<int64> order;if(start<0 || start>=self.__head.len()){return order;}List<int64> seen=self.__zeros();order.push(start);seen[start]=1;int64 cursor=0;
+        while(cursor<order.len()){int64 node=order[cursor];int64 edge=self.__head[node];while(edge>=0){int64 next=self.__to[edge];if(seen[next]==0){seen[next]=1;order.push(next);}edge=self.__next[edge];}cursor=cursor+1;}return order;
+    }
+    /** 显式栈深度优先访问，保持原邻接访问顺序。 */
+    List<int64> dfs(int64 start){
+        List<int64> result;if(start<0 || start>=self.__head.len()){return result;}List<int64> seen=self.__zeros();List<int64> pending;pending.push(start);
+        while(pending.len()>0){int64 node=pending.pop();if(seen[node]==0){seen[node]=1;result.push(node);List<int64> neighbors;int64 edge=self.__head[node];while(edge>=0){neighbors.push(self.__to[edge]);edge=self.__next[edge];}int64 i=neighbors.len();while(i>0){i=i-1;if(seen[neighbors[i]]==0){pending.push(neighbors[i]);}}}}
+        return result;
+    }
+    /** 忽略方向，用并查集计算弱连通分量。 */
+    int64 connectedComponents(){UnionFind sets=UnionFind::create(self.__head.len());int64 from=0;while(from<self.__head.len()){int64 edge=self.__head[from];while(edge>=0){sets.unionSets(from,self.__to[edge]);edge=self.__next[edge];}from=from+1;}return sets.count();}
+    /** Kahn 拓扑排序；有环返回空列表。 */
+    List<int64> topologicalSort(){
+        List<int64> degree=self.__zeros();int64 edge=0;while(edge<self.__to.len()){degree[self.__to[edge]]=degree[self.__to[edge]]+1;edge=edge+1;}
+        List<int64> order;int64 node=0;while(node<self.__head.len()){if(degree[node]==0){order.push(node);}node=node+1;}
+        int64 cursor=0;while(cursor<order.len()){node=order[cursor];edge=self.__head[node];while(edge>=0){int64 next=self.__to[edge];degree[next]=degree[next]-1;if(degree[next]==0){order.push(next);}edge=self.__next[edge];}cursor=cursor+1;}
+        if(order.len()!=self.__head.len()){order.clear();}return order;
+    }
+    /** O(V²+E) Dijkstra；先拒绝所有负权边，不可达距离为 -1。 */
+    List<int64> dijkstra(int64 start){
+        int64 edge=0;while(edge<self.__weight.len()){assert(self.__weight[edge]>=0,"图论：Dijkstra 不支持负边权");edge=edge+1;}
+        List<int64> distance;List<int64> done=self.__zeros();int64 i=0;while(i<self.__head.len()){distance.push(0-1);i=i+1;}
+        if(start>=0 && start<self.__head.len()){distance[start]=0;}
+        int64 round=0;while(round<self.__head.len()){
+            int64 best=0-1;int64 bestDistance=0;i=0;
+            while(i<self.__head.len()){if(done[i]==0 && distance[i]>=0){if(best<0 || distance[i]<bestDistance){best=i;bestDistance=distance[i];}}i=i+1;}
+            if(best<0){break;}done[best]=1;edge=self.__head[best];
+            while(edge>=0){int64 next=self.__to[edge];if(done[next]==0){int64 candidate=bestDistance+self.__weight[edge];if(distance[next]<0 || candidate<distance[next]){distance[next]=candidate;}}edge=self.__next[edge];}round=round+1;
+        }
+        return distance;
+    }
+    /** 有向图按拓扑计数判环，无向图按逻辑边并查集判环，包含自环和重边。 */
+    bool hasCycle(){
+        if(self.__directed){return self.topologicalSort().len()!=self.__head.len();}
+        UnionFind sets=UnionFind::create(self.__head.len());int64 from=0;
+        while(from<self.__head.len()){int64 edge=self.__head[from];while(edge>=0){int64 to=self.__to[edge];if(from<=to){if(!sets.unionSets(from,to)){return true;}}edge=self.__next[edge];}from=from+1;}return false;
+    }
+    /** 以边权堆执行 Kruskal；无向镜像只取一次，不连通返回 -1。 */
+    int64 minimumSpanningTreeWeight(){
+        __GraphHeap edges;int64 from=0;
+        while(from<self.__head.len()){int64 edge=self.__head[from];while(edge>=0){int64 to=self.__to[edge];if(from<to){edges.push(from,to,self.__weight[edge]);}edge=self.__next[edge];}from=from+1;}
+        UnionFind sets=UnionFind::create(self.__head.len());int64 used=0;int64 weight=0;
+        while(edges.len()>0 && used+1<self.__head.len()){__GraphEdge edge=edges.pop();if(sets.unionSets(edge.from,edge.to)){weight=weight+edge.weight;used=used+1;}}
+        if(used+1==self.__head.len()){return weight;}return 0-1;
+    }
+    /** 导出完整独立邻接快照。 */
+    GraphSnapshot snapshot(){GraphSnapshot result;result.vertexCount=self.__head.len();result.directed=self.__directed;result.edgeCount=self.__edges;result.head=self.__head;result.edgeTo=self.__to;result.edgeNext=self.__next;result.edgeWeight=self.__weight;return result;}
+};

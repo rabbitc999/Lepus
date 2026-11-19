@@ -1,0 +1,247 @@
+{
+  "name": "Lepus",
+  "scopeName": "source.lepus",
+  "patterns": [
+    {
+      "include": "#macroDefinition"
+    },
+    {
+      "include": "#language"
+    }
+  ],
+  "repository": {
+    "interpolationBlock": {
+      "name": "meta.block.lepus",
+      "begin": "\\{",
+      "end": "\\}",
+      "patterns": [
+        {
+          "include": "#interpolationBlock"
+        },
+        {
+          "include": "$self"
+        }
+      ]
+    },
+    "language": {
+      "patterns": [
+        {
+          "name": "keyword.control.lepus",
+          "match": "#abi\\b|#export\\b|#NonCopyable\\b|#MoveOnly\\b|#CopyOnly\\b|#borrow\\b|#static\\b|#ret\\b"
+        },
+        {
+          "name": "comment.block.lepus",
+          "begin": "/\\*",
+          "end": "\\*/"
+        },
+        {
+          "name": "comment.line.double-slash.lepus",
+          "match": "//.*$"
+        },
+        {
+          "name": "string.interpolated.lepus",
+          "begin": "\\bf\"",
+          "end": "\"",
+          "patterns": [
+            {
+              "match": "\\\\.",
+              "name": "constant.character.escape.lepus"
+            },
+            {
+              "begin": "(?<!\\\\)\\{",
+              "end": "\\}",
+              "name": "meta.interpolation.lepus",
+              "patterns": [
+                {
+                  "include": "#interpolationBlock"
+                },
+                {
+                  "include": "$self"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "string.quoted.double.lepus",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            {
+              "match": "\\\\.",
+              "name": "constant.character.escape.lepus"
+            }
+          ]
+        },
+        {
+          "name": "string.quoted.single.lepus",
+          "begin": "'",
+          "end": "'",
+          "patterns": [
+            {
+              "match": "\\\\.",
+              "name": "constant.character.escape.lepus"
+            }
+          ]
+        },
+        {
+          "match": "^(\\s*)(\\$replace)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "2": {
+              "name": "keyword.control.macro.lepus"
+            },
+            "3": {
+              "name": "entity.name.function.macro.lepus"
+            }
+          }
+        },
+        {
+          "name": "meta.function-call.macro.lepus",
+          "match": "(\\$)((?:[A-Za-z_][A-Za-z0-9_]*::)+)([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "punctuation.definition.variable.lepus" },
+            "2": { "name": "entity.name.namespace.lepus" },
+            "3": { "name": "entity.name.function.macro.lepus" }
+          }
+        },
+        {
+          "name": "keyword.control.macro.lepus",
+          "match": "\\$(?:while|loop|break|continue|let|set|if|elif|else_if|implement|match|regex|else)\\b"
+        },
+        {
+          "name": "keyword.control.for.lepus",
+          "match": "^\\s*\\$for\\b"
+        },
+        {
+          "name": "variable.language.lepus",
+          "match": "\\$![A-Za-z_][A-Za-z0-9_]*\\b"
+        },
+        {
+          "name": "variable.language.lepus",
+          "match": "\\$(?:line|file|module|concat|stringify|fields|variants|methods|interfaces|member|compile_assert|compile_error|argc|count|typecheck)\\b"
+        },
+        {
+          "name": "entity.name.function.macro.lepus",
+          "match": "\\$[A-Za-z_][A-Za-z0-9_]*(?=\\s*[<({\\[])"
+        },
+        {
+          "name": "keyword.control.lepus",
+          "match": "\\b(fn)(?:\\s*<[^>]*>)?\\s+(copy)\\b"
+        },
+        {
+          "name": "keyword.declaration.lepus",
+          "match": "\\btype\\s+alias(?=\\s+[A-Za-z_])"
+        },
+        {
+          "name": "keyword.control.lepus",
+          "match": "\\b(?:_|unsafe|__rawSize|__rawAlign|break|cast|const|continue|defer|drop|elif|else|enum|export|fn|for|if|impl|import|in|inline|interface|let|loop|match|module|move|mut|new|opcode|return|scope|static|struct|type|while|yield)\\b"
+        },
+        {
+          "name": "keyword.declaration.annotation.lepus",
+          "match": "@annotation\\b"
+        },
+        {
+          "match": "(@[A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": {
+              "name": "entity.name.tag.lepus"
+            }
+          }
+        },
+        {
+          "name": "storage.type.lepus",
+          "match": "\\b(?:bool|char|float32|float64|int8|int16|int32|int64|uint8|uint16|uint32|uint64|void)\\b"
+        },
+        {
+          "name": "constant.language.lepus",
+          "match": "\\b(?:true|false|null)\\b"
+        },
+        {
+          "name": "constant.numeric.lepus",
+          "match": "\\b(?:0[xX][0-9A-Fa-f_]+u?|[bB]_?[01][01_]*u?|\\d+u|\\d+(?:\\.\\d+)?(?:[eE][+-]?\\d+)?f?)\\b"
+        }
+      ]
+    },
+    "macroParameters": {
+      "patterns": [
+        {
+          "name": "variable.parameter.macro.lepus",
+          "match": "\\b[A-Za-z_][A-Za-z0-9_]*\\b"
+        },
+        {
+          "name": "keyword.operator.variadic.macro.lepus",
+          "match": "\\.{2,3}"
+        },
+        {
+          "name": "punctuation.definition.parameters.macro.lepus",
+          "match": "[<>()\\[\\]{},]"
+        }
+      ]
+    },
+    "macroBodyBraces": {
+      "begin": "\\{",
+      "end": "\\}",
+      "patterns": [{ "include": "#macroBody" }]
+    },
+    "macroDefinition": {
+      "name": "meta.preprocessor.macro.lepus",
+      "contentName": "meta.preprocessor.macro.body.lepus",
+      "begin": "^(\\s*)(\\$macro)\\b\\s+([A-Za-z_][A-Za-z0-9_]*)([^\\r\\n]*?->\\s*(?:(?:expr|stmt|item|member)\\b)?)\\s*\\{",
+      "beginCaptures": {
+        "2": {
+          "name": "keyword.control.macro.lepus"
+        },
+        "3": {
+          "name": "entity.name.function.macro.lepus"
+        },
+        "4": {
+          "name": "meta.parameters.macro.lepus",
+          "patterns": [
+            {
+              "include": "#macroParameters"
+            }
+          ]
+        }
+      },
+      "end": "\\}",
+      "patterns": [{ "include": "#macroBody" }]
+    },
+    "macroBody": {
+      "patterns": [
+        { "include": "#macroBodyBraces" },
+        {
+          "match": "^(\\s*)(\\$for)\\s*\\(?\\s*([A-Za-z_][A-Za-z0-9_]*)\\s+(in)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "2": {
+              "name": "keyword.control.macro.lepus"
+            },
+            "3": {
+              "name": "variable.other.macro-loop.lepus"
+            },
+            "4": {
+              "name": "keyword.control.macro.lepus"
+            },
+            "5": {
+              "name": "variable.parameter.macro.lepus"
+            }
+          }
+        },
+        {
+          "include": "#language"
+        },
+        {
+          "name": "entity.name.function.macro-body.lepus",
+          "match": "\\b[A-Za-z_][A-Za-z0-9_]*(?=\\s*\\()"
+        },
+        {
+          "name": "variable.function.macro.lepus",
+          "match": "\\$[A-Za-z_][A-Za-z0-9_]*"
+        },
+        {
+          "name": "variable.other.macro-body.lepus",
+          "match": "\\b[A-Za-z_][A-Za-z0-9_]*\\b"
+        }
+      ]
+    }
+  }
+}

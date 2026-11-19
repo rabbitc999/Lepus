@@ -1,0 +1,379 @@
+'use strict';
+
+/**
+ * 版本化调试布局的只读解码：按逻辑地址读取目标内存，不调用目标函数或用户方法。
+ * 布局文本与编译器 NativeDebugInfo 登记、运行时 value_text 使用同一格式：
+ * 类别、名称长度、名称、偏移、数量、宽度、回调占位、子节点数量，子节点按声明顺序递归。
+ */
+
+const MAX_DEPTH = 32;
+const MAX_NODES = 65536;
+const MAX_TEXT = 4096;
+const MAX_PAGE = 1000;
+const DEFAULT_PAGE = 100;
+
+/** 顺序解析布局文本的游标，拒绝截断、溢出和超出预算的节点。 */
+class Cursor {
+  constructor(text) {
+    if (typeof text !== 'string' || text.length > 1048576) throw new Error('调试布局超过预算');
+    this.text = Buffer.from(text, 'utf8'); this.at = 0; this.nodes = 0;
+  }
+  /** 读取一个非负整数及分隔冒号。 */
+  number() {
+    const start = this.at;
+    let value = 0;
+    while (this.at < this.text.length && this.text[this.at] >= 0x30 && this.text[this.at] <= 0x39) {
+      value = value * 10 + (this.text[this.at] - 0x30);
+      if (!Number.isSafeInteger(value) || value > 0x7fffffff) throw new Error('调试布局数值溢出');
+      ++this.at;
+    }
+    if (this.at === start || this.text[this.at] !== 0x3a) throw new Error('调试布局缺少长度前缀');
+    ++this.at;
+    return value;
+  }
+  /** 读取按 UTF-8 字节长度前缀编码的名称。 */
+  name(length) {
+    if (length > this.text.length - this.at) throw new Error('调试布局名称被截断');
+    const value = this.text.subarray(this.at, this.at + length).toString('utf8');
+    this.at += length;
+    return value;
+  }
+}
+
+/**
+ * 解析一份布局文本。
+ * @param {string} text 编译器登记的布局文本。
+ * @returns {{kind:string,name:string,offset:number,count:number,width:number,children:object[]}}
+ */
+function parseLayout(text) {
+  const cursor = new Cursor(text);
+  const parse = (depth) => {
+    if (depth > MAX_DEPTH || ++cursor.nodes > MAX_NODES) throw new Error('调试布局超过深度或节点预算');
+    if (cursor.at >= cursor.text.length) throw new Error('调试布局被截断');
+    const kind = String.fromCharCode(cursor.text[cursor.at++]);
+    if (!/^[iufbcsRSTAaNVLEMXFHIOD]$/.test(kind)) throw new Error('调试布局节点类别无效');
+    const name = cursor.name(cursor.number());
+    const offset = cursor.number(), count = cursor.number(), width = cursor.number();
+    cursor.number();  // 自定义文本回调在调试路径不使用。
+    const children = cursor.number();
+    if (children > MAX_NODES) throw new Error('调试布局子节点超过预算');
+    const node = { kind, name, offset, count, width, children: [] };
+    for (let index = 0; index < children; ++index) node.children.push(parse(depth + 1));
+    return node;
+  };
+  const layout = parse(0);
+  if (cursor.at !== cursor.text.length) throw new Error('调试布局有多余字节');
+  return layout;
+}
+
+/** 聚合布局需要真实内存地址才能展开。 */
+function expandable(layout) {
+  return Boolean(layout) && ['S', 'T', 'N', 'a', 'A', 'R', 's', 'L', 'M', 'E', 'O', 'F'].includes(layout.kind);
+}
+
+/** 按 UTF-8 解码展示文本，超长时截断并标记。 */
+function quoted(bytes) {
+  const value = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+  return JSON.stringify(value.length > MAX_TEXT ? value.slice(0, MAX_TEXT) + '…' : value);
+}
+
+/** 读取一个标量并按布局格式化。 */
+async function scalar(layout, address, memory) {
+  if (![1, 2, 4, 8].includes(layout.width)) throw new Error('标量布局宽度无效');
+  const bytes = await memory.read(address, layout.width);
+  if (layout.kind === 'f') return String(layout.width === 4 ? bytes.readFloatLE(0) : bytes.readDoubleLE(0));
+  if (layout.kind === 'b') return bytes.readUIntLE(0, layout.width) !== 0 ? 'true' : 'false';
+  if (layout.kind === 'c') return JSON.stringify(String.fromCharCode(bytes[0]));
+  const unsigned = layout.width === 8 ? bytes.readBigUInt64LE(0) : BigInt(bytes.readUIntLE(0, layout.width));
+  if (layout.kind === 'u') return unsigned.toString();
+  const sign = 1n << BigInt(layout.width * 8 - 1);
+  return (unsigned & sign ? unsigned - (sign << 1n) : unsigned).toString();
+}
+
+/** 读取语言字符串：静态数据以 NUL 结尾，堆内先读内联或带缓冲头。 */
+async function string(address, memory) {
+  if (address === 0n) return '""';
+  if (address < memory.dataSize) {
+    const size = Number(memory.dataSize - address);
+    const bytes = await memory.read(address, Math.min(size, MAX_TEXT));
+    const end = bytes.indexOf(0);
+    return quoted(end < 0 ? bytes : bytes.subarray(0, end));
+  }
+  const head = await memory.read(address, 8);
+  const length = head.readBigInt64LE(0);
+  if (length >= 0n) {
+    const size = Number(length > BigInt(MAX_TEXT) ? BigInt(MAX_TEXT) : length);
+    return quoted(await memory.read(address + 8n, size)) + (length > BigInt(size) ? '…' : '');
+  }
+  if (length !== -1n) throw new Error('字符串描述头无效');
+  const header = await memory.read(address, 32);
+  const lengthValue = header.readBigInt64LE(8), data = header.readBigUInt64LE(24);
+  if (lengthValue < 0n || data === 0n) throw new Error('字符串描述无效');
+  const size = Number(lengthValue > BigInt(MAX_TEXT) ? BigInt(MAX_TEXT) : lengthValue);
+  return quoted(await memory.read(data, size)) + (lengthValue > BigInt(size) ? '…' : '');
+}
+
+/** 只生成聚合摘要，不读取全部子项。 */
+async function summary(layout, address, memory) {
+  if (layout.kind === 'O') return (await dynamicValue(address, memory, { count: 0 })).text;
+  if (layout.kind === 'F') return (await closureValue(address, memory, { count: 0 })).text;
+  if (['L', 'M', 'E'].includes(layout.kind)) {
+    const object = await memory.object(address);
+    if (object.kind !== layout.kind) throw new Error('容器快照类型不匹配');
+    return ({ L: 'List', M: 'Map', E: 'Set' }[layout.kind]) + '[' + object.count + ']';
+  }
+  if (layout.kind === 'R') return address === 0n ? 'null' : '&<' + (layout.name || '引用') + '>';
+  if (layout.kind === 'a' || layout.kind === 'A') {
+    let count = layout.count;
+    if (layout.kind === 'a') {
+      if (address < 8n) throw new Error('数组句柄缺少长度头');
+      const header = await memory.read(address - 8n, 8);
+      count = Number(header.readBigInt64LE(0));
+      if (!Number.isSafeInteger(count) || count < 0) throw new Error('数组长度无效');
+    }
+    return '[' + count + ']';
+  }
+  if (layout.kind === 'N') {
+    const tag = (await memory.read(address, 4)).readInt32LE(0);
+    const variant = layout.children.find((item) => item.count === tag);
+    return variant ? variant.name + '(' + (variant.children.length ? '…' : '') + ')' : '<未知变体 ' + tag + '>';
+  }
+  if (layout.kind === 'S' || layout.kind === 'T') return layout.kind === 'T' ? '(' + (layout.children.length ? '…' : '') + ')' : '{' + (layout.children.length ? '…' : '') + '}';
+  if (layout.kind === 'X' && !layout.name) return '<布局不可用或超过观察预算>';
+  return '<' + (layout.name || 'Lepus 值') + '>';
+}
+
+/**
+ * 解码一个布局节点。
+ * @param {object} layout 解析后的布局。
+ * @param {bigint} address 值所在的逻辑地址。
+ * @param {{dataSize:bigint,read:Function}} memory 当前暂停的内存快照。
+ * @param {{start?:number,count?:number}} [page] 子项分页；count 为零时只取摘要。
+ * @returns {Promise<{text:string,children:Array}>} 展示文本与可继续展开的子项。
+ */
+async function decode(layout, address, memory, page = {}, stored = null) {
+  await memory.validateStorage?.();
+  const value = await decodeValue(layout, address, memory, page, stored);
+  await memory.validateStorage?.();
+  return value;
+}
+
+/** 在观察代次校验范围内解码实际节点，递归子项继续复用同一快照及预算。 */
+async function decodeValue(layout, address, memory, page = {}, stored = null) {
+  if (stored) return decodeStored(layout, stored, memory, page);
+  if (address !== 0n && memory.readable && !['O', 'F', 'L', 'M', 'E', 'R'].includes(layout.kind)) {
+    await memory.readable(address, layout.kind === 's' && address < memory.dataSize ? 1 : Math.max(1, layout.width || 1));
+  }
+  const start = Number.isSafeInteger(page.start) && page.start > 0 ? page.start : 0;
+  const limit = Math.min(MAX_PAGE, Number.isSafeInteger(page.count) ? Math.max(0, page.count) : DEFAULT_PAGE);
+  switch (layout.kind) {
+    case 'O': return dynamicValue(address, memory, page);
+    case 'F': return closureValue(address, memory, page);
+    case 'L': case 'M': case 'E': {
+      const object = await memory.object(address);
+      if (object.kind !== layout.kind || layout.children.length !== (layout.kind === 'M' ? 2 : 1)) throw new Error('容器布局不匹配');
+      const children = [];
+      for (let index = start; index < Math.min(object.count, start + limit); ++index) {
+        let element = layout.children[0], node = object.values[object.first + index];
+        if (layout.kind === 'M') {
+          element = { kind: 'S', name: 'entry', children: layout.children.map((item, part) => ({ ...item, typeName: typeName(item), name: part ? 'value' : 'key', offset: part * 8 })) };
+          node = { flags: 1, first: object.first + index * 2, count: 2 };
+        }
+        children.push(await storedChild(element, { node, values: object.values }, String(index), memory));
+      }
+      return { text: await summary(layout, address, memory), children };
+    }
+    case 'i': case 'u': case 'f': case 'b': case 'c':
+      return { text: await scalar(layout, address, memory), children: [] };
+    case 's':
+      return { text: await string(address, memory), children: [] };
+    case 'R': {
+      if (address === 0n) return { text: 'null', children: [] };
+      if (!layout.children.length) {
+        if (memory.readable) await memory.readable(address, 1);
+        return { text: '&<' + (layout.name || '引用') + '>', children: [] };
+      }
+      let element = layout.children[0];
+      if (element.kind === 'X' && element.name) element = memory.referenceLayout?.(element.name) || element;
+      let targetAddress = address;
+      if (['s', 'a', 'L', 'M', 'E', 'O', 'F'].includes(element.kind)) {
+        if (memory.readable) await memory.readable(address, 8);
+        targetAddress = (await memory.read(address, 8)).readBigUInt64LE(0);
+      }
+      const target = await decode(element, targetAddress, memory, page);
+      return { text: '&' + target.text, children: target.children };
+    }
+    case 'N': {
+      const tag = (await memory.read(address, 4)).readInt32LE(0);
+      const variant = layout.children.find((item) => item.count === tag);
+      if (!variant) return { text: '<未知变体 ' + tag + '>', children: [] };
+      const children = [];
+      if (limit > 0) {
+        const end = Math.min(variant.children.length, start + limit);
+        for (let index = start; index < end; ++index) {
+          const payload = variant.children[index];
+          children.push(await child(payload, address + BigInt(payload.offset), payload.name, memory));
+        }
+      }
+      const more = variant.children.length > start + limit ? '…' : '';
+      return { text: variant.name + '(' + more + ')', children };
+    }
+    case 'S': case 'T': {
+      const children = [];
+      if (limit > 0) {
+        const end = Math.min(layout.children.length, start + limit);
+        for (let index = start; index < end; ++index) {
+          const field = layout.children[index];
+          children.push(await child(field, address + BigInt(field.offset), field.name, memory));
+        }
+      }
+      const more = layout.children.length > start + limit || limit === 0 ? '…' : '';
+      return { text: (layout.kind === 'T' ? '(' : '{') + more + '}', children };
+    }
+    case 'a': case 'A': {
+      if (!layout.children.length || (layout.width !== 1 && layout.width !== 8)) throw new Error('数组布局无效');
+      const count = layout.kind === 'A' ? layout.count : Number((await memory.read(address - 8n, 8)).readBigInt64LE(0));
+      if (!Number.isSafeInteger(count) || count < 0) throw new Error('数组长度无效');
+      const children = [];
+      if (limit > 0) {
+        const end = Math.min(count, start + limit);
+        for (let index = start; index < end; ++index) {
+          const element = address + BigInt(index) * BigInt(layout.width);
+          children.push(await child(layout.children[0], element, String(index), memory));
+        }
+      }
+      return { text: '[' + count + (limit > 0 && count > start + limit ? '…' : '') + ']', children };
+    }
+    default:
+      return { text: '<' + (layout.name || 'Lepus 值') + '>', children: [] };
+  }
+}
+
+/** 根据已验证的实际类型号解码接口装箱，不执行类型查询或用户方法。 */
+async function dynamicValue(handle, memory, page) {
+  const object = await memory.object(handle);
+  if (object.kind !== 'O' || object.count !== 2) throw new Error('动态装箱快照类型不匹配');
+  const tag = object.values[object.first], node = object.values[object.first + 1];
+  if (tag.flags !== 0) throw new Error('动态类型号快照无效');
+  if (tag.bits === 0n) return { text: '<未初始化装箱>', children: [] };
+  const layout = memory.dynamicLayout?.(tag.bits);
+  if (!layout) return { text: '<未知实际类型 ' + tag.bits + '>', children: [] };
+  if (layout.kind === 'O') return { text: '<嵌套装箱：' + typeName(layout) + '>', children: [] };
+  const value = node.flags || ['i', 'u', 'f', 'b', 'c'].includes(layout.kind)
+    ? await decodeStored(layout, { node, values: object.values }, memory, page)
+    : await decode(layout, node.bits, memory, page);
+  return { text: (layout.name || typeName(layout)) + ' ' + value.text, children: value.children };
+}
+
+/** 按函数标签及有序捕获描述读取现有闭包环境，禁止调用或物化捕获。 */
+async function closureValue(handle, memory, page) {
+  if (handle === 0n) return { text: '<空函数值>', children: [] };
+  const object = handle >= 0x4000000000000000n ? await memory.object(handle) : null;
+  if (object && (object.kind !== 'F' || object.count < 1 || object.values[object.first].flags !== 0)) throw new Error('闭包环境快照无效');
+  const info = memory.closureInfo?.(object ? object.values[object.first].bits : handle);
+  if (!info) return { text: '<未知函数值>', children: [] };
+  if (!object) return { text: '<函数 ' + info.name + '>', children: [] };
+  if (info.captures.length !== object.count - 1) throw new Error('闭包捕获数量与布局不匹配');
+  const start = Number.isSafeInteger(page.start) && page.start > 0 ? page.start : 0;
+  const count = Math.min(MAX_PAGE, Number.isSafeInteger(page.count) ? Math.max(0, page.count) : DEFAULT_PAGE);
+  const children = [];
+  for (let index = start; index < Math.min(info.captures.length, start + count); ++index) {
+    const capture = info.captures[index], layout = memory.layout?.(capture.layout);
+    if (!layout) throw new Error('闭包捕获布局不可用');
+    const node = object.values[object.first + index + 1];
+    const item = node.flags === 8 || capture.address
+      ? await child(layout, node.bits, capture.name, memory)
+      : await storedChild(layout, { node, values: object.values }, capture.name, memory);
+    item.type = layout.name || typeName(layout);
+    item.readOnly = capture.mode === 0;
+    children.push(item);
+  }
+  return { text: '<闭包 ' + info.name + ' [' + info.captures.length + ']>', children };
+}
+
+/** 解码已复制的宿主值快照，不把其索引伪装成目标地址。 */
+async function decodeStored(layout, stored, memory, page = {}) {
+  await memory.validateObjects();
+  const { node, values } = stored;
+  if (!(node.flags & 1)) {
+    if (['S', 'T', 'N'].includes(layout.kind)) throw new Error('快照缺少聚合字段');
+    if (layout.kind === 's' && (node.flags & 2)) return { text: quoted(node.text), children: [] };
+    if (['i', 'u', 'f', 'b', 'c'].includes(layout.kind)) {
+      const raw = Buffer.alloc(8); raw.writeBigUInt64LE(node.bits);
+      return { text: await scalar(layout, 1n, { read: async (_, length) => raw.subarray(0, length) }), children: [] };
+    }
+    return decode(layout, node.bits, memory, page);
+  }
+  let fields = layout.children;
+  let text = '{…}';
+  if (layout.kind === 'N') {
+    if (!node.count || !values[node.first] || values[node.first].flags !== 0) throw new Error('枚举快照缺少有效标签');
+    const tag = Number(BigInt.asIntN(32, values[node.first]?.bits || 0n));
+    const variant = layout.children.find(item => item.count === tag);
+    if (!variant) return { text: '<未知变体 ' + tag + '>', children: [] };
+    fields = variant.children; text = variant.name + '(…)';
+  } else if (!['S', 'T'].includes(layout.kind)) throw new Error('快照聚合类型不匹配');
+  const start = Number.isSafeInteger(page.start) && page.start > 0 ? page.start : 0;
+  const count = Math.min(MAX_PAGE, Number.isSafeInteger(page.count) ? Math.max(0, page.count) : DEFAULT_PAGE);
+  const children = [];
+  for (const field of fields.slice(start, start + count)) {
+    const slot = field.offset / 8;
+    if (!Number.isSafeInteger(slot) || slot < 0 || slot >= node.count) throw new Error('快照字段超出范围');
+    let fieldNode = values[node.first + slot];
+    if (['S', 'T', 'N'].includes(field.kind) && !(fieldNode.flags & 1)) {
+      const width = field.width / 8;
+      if (!Number.isSafeInteger(width) || width < 0 || slot + width > node.count) throw new Error('快照子记录超出范围');
+      fieldNode = { flags: 1, first: node.first + slot, count: width };
+    }
+    children.push(await storedChild(field, { node: fieldNode, values }, field.name, memory));
+  }
+  return { text, children };
+}
+
+/** 为只读宿主快照创建子项，展开仍受暂停代次约束。 */
+async function storedChild(layout, stored, name, memory) {
+  const value = await decodeStored(layout, stored, memory, { count: 0 });
+  return { name, type: typeName(layout), value: value.text, childLayout: expandable(layout) && layout.kind !== 's' ? layout : null, stored };
+}
+
+/** 按布局推导子项的类型拼写：字段名不能冒充类型名。 */
+function typeName(layout) {
+  if (layout.typeName) return layout.typeName;
+  switch (layout.kind) {
+    case 'i': return 'int' + layout.width * 8;
+    case 'u': return 'uint' + layout.width * 8;
+    case 'f': return layout.width === 4 ? 'float32' : 'float64';
+    case 'b': return 'bool';
+    case 'c': return 'char';
+    case 's': return 'String';
+    case 'R': return layout.name || '引用';
+    case 'a': case 'A': return layout.name || '数组';
+    default: return layout.name || '记录';
+  }
+}
+
+/** 读取并格式化一个子项，标量直接展示，聚合给出摘要并保留展开地址。 */
+async function child(layout, address, name, memory) {
+  try {
+    if (memory.readable) await memory.readable(address, Math.max(1, layout.width || 1));
+    if (['L', 'M', 'E', 'O', 'F', 'a'].includes(layout.kind)) {
+      const handle = (await memory.read(address, 8)).readBigUInt64LE(0);
+      return { name, type: typeName(layout), value: await summary(layout, handle, memory), childLayout: layout, address: handle };
+    }
+    if (layout.kind === 'R') {
+      const pointer = (await memory.read(address, 8)).readBigUInt64LE(0);
+      const value = pointer === 0n ? 'null' : (await decode(layout, pointer, memory, { count: 0 })).text;
+      return { name, type: typeName(layout), value, childLayout: pointer === 0n ? null : layout, address: pointer };
+    }
+    if (layout.kind === 's') {
+      const pointer = (await memory.read(address, 8)).readBigUInt64LE(0);
+      return { name, type: typeName(layout), value: await string(pointer, memory), childLayout: null, address: pointer };
+    }
+    const value = ['i', 'u', 'f', 'b', 'c'].includes(layout.kind) ? await scalar(layout, address, memory) : await summary(layout, address, memory);
+    return { name, type: typeName(layout), value, childLayout: expandable(layout) ? layout : null, address };
+  } catch (error) {
+    return { name, type: typeName(layout), value: '<不可读：' + error.message + '>', childLayout: null, address: 0n };
+  }
+}
+
+module.exports = { parseLayout, decode, expandable, typeName, MAX_PAGE };

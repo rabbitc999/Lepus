@@ -1,0 +1,104 @@
+import std::memory;
+import std::parse;
+import std::path;
+import std::random;
+
+void main() {
+    Result<int64, Error> integer = Parse::parseInt64("-42");
+    Result<uint64, Error> natural = Parse::parseUInt64("18446744073709551615");
+    Result<float64, Error> real = Parse::parseFloat64("12.5");
+    Result<bool, Error> flag = Parse::parseBool("true");
+    match (integer) {
+        Result<int64, Error>::Ok(value) => { println("int64={}", value); }
+        Result<int64, Error>::Fail(error) => { println("int64=error"); }
+    }
+    match (natural) {
+        Result<uint64, Error>::Ok(value) => { println("uint64={}", value); }
+        Result<uint64, Error>::Fail(error) => { println("uint64=error"); }
+    }
+    match (real) {
+        Result<float64, Error>::Ok(value) => { println("float64={:1F}", value); }
+        Result<float64, Error>::Fail(error) => { println("float64=error"); }
+    }
+    match (flag) {
+        Result<bool, Error>::Ok(value) => { println("bool={}", (int64)value); }
+        Result<bool, Error>::Fail(error) => { println("bool=error"); }
+    }
+
+    Result<int64, Error> empty = Parse::parseInt64("");
+    Result<int64, Error> invalid = Parse::parseInt64("4x");
+    Result<int64, Error> overflow =
+    Parse::parseInt64("999999999999999999999999");
+    match (empty) {
+        Result<int64, Error>::Ok(value) => { println("empty=bad"); }
+        Result<int64, Error>::Fail(error) => {
+            match (error) {
+                ParseError(detail) => {
+                    match(detail) {
+                        ParseError::Empty => { println("empty=ok"); }
+                        _ => { println("empty=bad"); }
+                    }
+                }
+                _ => { println("empty=bad"); }
+            }
+        }
+    }
+    match (invalid) {
+        Result<int64, Error>::Ok(value) => { println("invalid=bad"); }
+        Result<int64, Error>::Fail(error) => {
+            match (error) {
+                ParseError(detail) => {
+                    match(detail) {
+                        ParseError::Invalid => { println("invalid=ok"); }
+                        _ => { println("invalid=bad"); }
+                    }
+                }
+                _ => { println("invalid=bad"); }
+            }
+        }
+    }
+    match (overflow) {
+        Result<int64, Error>::Ok(value) => { println("overflow=bad"); }
+        Result<int64, Error>::Fail(error) => {
+            match (error) {
+                ParseError(detail) => {
+                    match(detail) {
+                        ParseError::Overflow => { println("overflow=ok"); }
+                        _ => { println("overflow=bad"); }
+                    }
+                }
+                _ => { println("overflow=bad"); }
+            }
+        }
+    }
+
+    Random first = Random::withSeed((uint64)7);
+    Random second = Random::withSeed((uint64)7);
+    uint64 firstValue = first.nextUInt64();
+    uint64 secondValue = second.nextUInt64();
+    assert(firstValue == secondValue);
+    println("random={},{}", firstValue, first.nextInt(-10, 10));
+    Random entropy = Random::fromEntropy();
+    entropy.nextUInt64();
+
+    String joined = PathString::join("alpha/beta", "../gamma.txt");
+    String name = PathString::fileName("alpha/gamma.txt");
+    String extension = PathString::extension("alpha/gamma.txt");
+    String normalized = PathString::normalize("a\\b/./c/../d");
+    println("path={}", joined);
+    println("name={} ext={}", name, extension);
+    println("normalized={}", normalized);
+
+    int64 before = Memory::stats().liveBytes;
+    int64 during = before;
+    {
+        char bytes[] = new[16];
+        Span<char> view = Span<char>::from(&bytes[0], 16);
+        assert(view.len() == 16);
+        during = Memory::stats().liveBytes;
+        assert(during >= before + 16);
+    }
+    int64 after = Memory::stats().liveBytes;
+    assert(after <= during - 16);
+    println("memory=ok");
+}

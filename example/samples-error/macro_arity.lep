@@ -1,0 +1,4 @@
+$macro ADD(x, y) -> {
+((x) + (y))
+}
+void main() { return $ADD(1); }

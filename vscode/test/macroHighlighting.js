@@ -1,0 +1,96 @@
+'use strict';
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const textmate = require('vscode-textmate');
+const oniguruma = require('vscode-oniguruma');
+
+/** 使用 VS Code 的真实 TextMate/Oniguruma 引擎验证独立宏区与注释、字符串边界。 */
+async function main() {
+  const wasm = fs.readFileSync(require.resolve('vscode-oniguruma/release/onig.wasm'));
+  await oniguruma.loadWASM(wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength));
+  const file = path.join(__dirname, '../syntaxes/lepus.tmLanguage.json');
+  const registry = new textmate.Registry({
+    onigLib: Promise.resolve({
+      createOnigScanner: (patterns) => new oniguruma.OnigScanner(patterns),
+      createOnigString: (text) => new oniguruma.OnigString(text),
+    }),
+    loadGrammar: async (scope) => scope === 'source.lepus' ? textmate.parseRawGrammar(fs.readFileSync(file, 'utf8'), file) : null,
+  });
+  const grammar = await registry.loadGrammar('source.lepus');
+  for (const directive of ['define', 'undefine', 'if', 'elif', 'else', 'endif', 'error', 'warning']) {
+    const result = grammar.tokenizeLine('%' + directive + ' VALUE', textmate.INITIAL);
+    assert(!result.tokens.some((token) => token.scopes.includes('keyword.control.preprocessor.lepus')));
+  }
+  /** 按真实的逐行状态进行词法着色。 */
+  const tokenize = (lines) => {
+    let state = textmate.INITIAL;
+    return lines.map((line) => {
+      const result = grammar.tokenizeLine(line, state);
+      state = result.ruleStack;
+      return result.tokens;
+    });
+  };
+  const lines = [
+    '$macro example(...A)(...B) -> {', '{', '    print("A=[");', '    $for (var in A) {',
+    '    print("{} ", var);', '    }', '    println("]");', '    print("B=[");',
+    '    $for (var in B) {', '    print("{} ", var);', '    }', '    println("]");',
+    '    int64 temporary = 1;',
+    '    // $for (var in A) { }', '    println("} var A");', '}', '}',
+    'int64 main() { int64 A=1; println("{}", A); return 0; }',
+  ];
+  const tokens = tokenize(lines);
+  const scopes = (line, name) => tokens[line].find((token) => token.startIndex <= lines[line].indexOf(name) && lines[line].indexOf(name) < token.endIndex).scopes;
+  assert(scopes(0, 'example').includes('entity.name.function.macro.lepus'));
+  assert(scopes(0, 'A').includes('variable.parameter.macro.lepus'));
+  assert(scopes(0, 'B').includes('variable.parameter.macro.lepus'));
+  assert(scopes(3, '$for').includes('keyword.control.macro.lepus'));
+  assert(scopes(3, 'var').includes('variable.other.macro-loop.lepus'));
+  assert(scopes(3, 'A').includes('variable.parameter.macro.lepus'));
+  assert(scopes(4, 'var').includes('variable.other.macro-body.lepus'));
+  assert(scopes(8, 'B').includes('variable.parameter.macro.lepus'));
+  assert(scopes(12, 'temporary').includes('variable.other.macro-body.lepus'));
+  assert(scopes(13, '$for').includes('comment.line.double-slash.lepus'));
+  assert(scopes(14, '}').includes('string.quoted.double.lepus'));
+  assert(scopes(15, '}').includes('meta.preprocessor.macro.body.lepus'));
+  assert(!scopes(17, 'int64').some((scope) => scope.startsWith('meta.preprocessor.macro')));
+  const protectedLines = ['$macro safe(...A) -> {', '/*', '}', '*/', 'println("A");', '}', 'int64 after=1;'];
+  const protectedTokens = tokenize(protectedLines);
+  assert(protectedTokens[2][0].scopes.includes('comment.block.lepus'));
+  assert(protectedTokens[4][0].scopes.includes('meta.preprocessor.macro.body.lepus'));
+  assert(!protectedTokens[6][0].scopes.includes('meta.preprocessor.macro.body.lepus'));
+  const incomplete = tokenize(['$macro vec<T>[...list] -> {', '{', '    $for (var in list) {', '    println("{}", var);']);
+  assert(incomplete[3][0].scopes.includes('meta.preprocessor.macro.body.lepus'));
+  const branches = ['$macro choose() -> expr {', '$if (false) {', '1', '} $elif (false) {', '2', '} $else_if (true) {', '3', '} $else {', '4', '}', '}'];
+  const branchTokens = tokenize(branches);
+  for (const line of [1, 3, 5, 7]) {
+    assert(branchTokens[line].some(token => token.scopes.includes('keyword.control.macro.lepus')), branches[line]);
+  }
+  const interfaces = tokenize([
+    '$macro implementCount<T>() -> member {',
+    '$implement Count<T>;',
+    '$implement Count<String>;',
+    '// $implement Count;',
+    '}',
+  ]);
+  assert(interfaces[1][0].scopes.includes('keyword.control.macro.lepus'));
+  assert(interfaces[2][0].scopes.includes('keyword.control.macro.lepus'));
+  assert(interfaces[3][0].scopes.includes('comment.line.double-slash.lepus'));
+  const qualified = '$std::macro::Equal<T>(left, right)';
+  const calls = tokenize([qualified, '// ' + qualified, '"' + qualified + '"',
+    '$macro forward<T>() -> expr {', qualified, '}']);
+  for (const line of [0, 4]) {
+    const at = (name) => calls[line].find(token => token.startIndex <= qualified.indexOf(name)
+      && qualified.indexOf(name) < token.endIndex).scopes;
+    assert(at('$').includes('punctuation.definition.variable.lepus'));
+    assert(at('std').includes('entity.name.namespace.lepus'));
+    assert(at('macro').includes('entity.name.namespace.lepus'));
+    assert(at('Equal').includes('entity.name.function.macro.lepus'));
+  }
+  for (const line of [1, 2]) {
+    assert(!calls[line].some(token => token.scopes.includes('entity.name.function.macro.lepus')));
+  }
+  registry.dispose();
+  console.log('真实 TextMate 宏头、独立宏体、两组循环、卫生局部变量、字符串/注释保护与结束恢复高亮通过。');
+}
+main().catch((error) => { console.error(error); process.exitCode = 1; });

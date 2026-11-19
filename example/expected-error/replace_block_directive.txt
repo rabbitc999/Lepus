@@ -1,0 +1,1 @@
+语法错误：example/samples-error/replace_block_directive.lep 第 1 行第 59 列：期望 字符串 / 数字 / 标识符 / MACRO_MATCH 等 76 个之一，实际是 MACRO_REPLACE_END

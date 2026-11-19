@@ -1,0 +1,1 @@
+lepus: example/samples-error/operator_binary_reference_readonly.lep 第 9 行第 6 列：只读引用（`T const&`）只能读，不能写入元素或成员

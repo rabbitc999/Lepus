@@ -1,0 +1,18 @@
+/* 固定参数形态优先于变长形态；变长片段在调用参数列表中逐项展开。 */
+$macro REPORT(a) -> {
+println("one {}", a);
+}
+
+$macro REPORT(a, b) -> {
+println("two {} {}", a, b);
+}
+
+$macro REPORT(...rest) -> {
+println("three {} {} {}", rest);
+}
+
+void main() {
+    $REPORT(7);
+    $REPORT(1, 2);
+    $REPORT(1, 2, 3);
+}

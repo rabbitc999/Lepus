@@ -1,0 +1,62 @@
+/**
+ * @file compiler_entry.cpp
+ * @brief 独立编译器工程的命令入口，复用 C 头导入并转发普通编译。
+ */
+#include "lepus_cli.hpp"
+#include "lepus_assembler.hpp"
+#include "lepus_linker.hpp"
+#include "lepus_library.hpp"
+#include "lepus_i18n.hpp"
+#include "system_arena.hpp"
+#include "tools/abi_import.hpp"
+#include <cstdio>
+
+/**
+ * @brief 进入已生成的编译器前端。
+ * @param argc 已归一化的参数数量。
+ * @param argv 已归一化的参数数组。
+ * @return 前端命令的退出状态。
+ */
+int lepus_main_entry(int argc, char **argv);
+
+#if defined(__GNUC__) || defined(__clang__)
+/**
+ * @brief 在独立编译器其他全局对象构造前安装系统分配器。
+ */
+[[gnu::constructor(101)]] static void initializeCompilerAllocator()
+{
+    Memory::installCompilerAllocator();
+}
+#endif
+
+/**
+ * @brief 派发独立工程的 C 头导入或普通前端命令。
+ * @param argc 原始参数数量。
+ * @param argv 原始参数数组。
+ * @return 被调用命令的退出状态；语言选项无效时为二。
+ */
+int main(int argc, char **argv)
+{
+#if !defined(__GNUC__) && !defined(__clang__)
+    Memory::installCompilerAllocator();
+#endif
+    auto original = lepus_i18n::processArguments(argc, argv);
+    std::vector<char *> values;
+    for (auto &argument : original) values.push_back(argument.data());
+    auto arguments = lepus_cli::normalize(static_cast<int>(values.size()), values.data());
+    std::string error;
+    if (!lepus_i18n::configure(arguments, error))
+    {
+        std::fprintf(stderr, "lepus: %s\n", error.c_str());
+        return 2;
+    }
+    values.clear();
+    for (auto &argument : arguments) values.push_back(argument.data());
+    values.push_back(nullptr);
+    if (arguments.size() > 1 && arguments[1] == "lib") return lepus_library::runCli(static_cast<int>(arguments.size()), values.data());
+    if (arguments.size() > 1 && (arguments[1] == "link" || arguments[1] == "ar")) return lepus_linker::runCli(static_cast<int>(arguments.size()), values.data());
+    if (arguments.size() > 1 && arguments[1] == "asm") return lepus_assembler::runCli(static_cast<int>(arguments.size()), values.data());
+    if (arguments.size() > 2 && arguments[1] == "gen" && arguments[2] == "abi")
+        return lepus_abi_import::run(static_cast<int>(arguments.size()), values.data());
+    return lepus_main_entry(static_cast<int>(arguments.size()), values.data());
+}

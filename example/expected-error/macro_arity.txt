@@ -1,0 +1,1 @@
+lepus: example/samples-error/macro_arity.lep 第 4 行第 22 列：宏实参数量与形参不一致：ADD

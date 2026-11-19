@@ -1,0 +1,168 @@
+"""执行书本中标记的新增完整程序，并核对 LaTeX 生成内容。"""
+from compiler_path import compiler_path
+from pathlib import Path
+import os
+import re
+import subprocess
+import sys
+import json
+from project_temp import tempfile
+from concurrent.futures import ThreadPoolExecutor
+
+ROOT=Path(__file__).resolve().parents[1]
+COMPILER=Path(os.environ.get('LEPUS_BIN',str(compiler_path())))
+sys.path.insert(0,str(ROOT/'doc/book/latex/tools'))
+from md2tex import Converter, FILES, CHAPTERS, main as generate_chapters
+IMPORTS={c["zh"]:c.get("imports",[]) for c in CHAPTERS}
+EXTRAS=json.loads((ROOT/"tests/book_extras_manifest.json").read_text(encoding="utf-8"))["sha256"]
+
+
+def main():
+    """新章节示例须产生所列输出，生成章节须与 Markdown 一致。"""
+    # 生成章节不入库：全新检出先生成，已有章节仍逐字核对是否过期。
+    if any(not (ROOT/'doc/book/latex/chapters'/target).exists() for _,target in FILES):
+        generate_chapters()
+    book=(ROOT/'doc/book/latex/book.tex').read_text(encoding='utf-8')
+    assert not re.search(r'^\s*\\part\*?\{',book,re.M), '书稿直接按章节排列，不使用 part 分组'
+    # 章节数跟随 md2tex 的映射表，加章时只改那一处，不用再改这里的常数。
+    chapterCount = sum(1 for _, name in FILES if name.startswith('ch'))
+    assert len(re.findall(r'\\input\{chapters/ch\d+\}',book))==chapterCount
+    for name in (name for _, name in FILES if name.startswith(('ch','appendix-'))):
+        assert re.search(r'\\input\{chapters/%s\}' % name[:-4], book), name
+    appendix=Converter('appendix').convert('# 附录 D Lepus 语言限制\n\n## D.1 语法\n\n正文。')
+    assert r'\chapter{Lepus 语言限制}' in appendix and r'\section{语法}' in appendix, appendix
+    headings=Converter().convert('## 3.7 字面量\n\n### 数字后缀\n\n说明。')
+    assert r'\subsection*{数字后缀}' in headings and r'\subsection{数字后缀}' not in headings
+    directive=Converter().convert('#borrow 描述借用来源。\n\n## 22.3 借用\n\n正文。')
+    assert r'\#borrow' in directive and r'\chapter{' not in directive, directive
+    numbered=Converter().convert('## 15.7 捕获\n\n### 15.7.1 借用\n\n正文。\n\n### 15.7.2 拥有\n\n正文。')
+    assert r'\subsection{借用}' in numbered and r'\subsection{拥有}' in numbered
+    try:
+        Converter().convert('## 3.7 字面量\n\n### 3.7.1 唯一子节\n\n正文。')
+    except ValueError as error:
+        assert '孤立编号子节' in str(error)
+    else:
+        raise AssertionError('转换器不能重新引入孤立编号子节')
+    for image in ('lepus-compilation.png', 'lepus-aot.png'):
+        assert (ROOT/'doc/book/images'/image).read_bytes()==(ROOT/'doc/images'/image).read_bytes(),image
+    fixture = "1. 先声明：\n\n   ```lepus\n   int64 value = 1;\n   ```\n\n2. 再读取：\n\n   ```lepus\n   println(\"{}\", value);\n   ```\n\n- 无序说明：\n\n  ```text\n  output\n  ```"
+    rendered = Converter().convert(fixture)
+    assert r'\begin{enumerate}[start=2]' in rendered
+    assert 'minipage' not in rendered and 'samepage' not in rendered
+    environments=[]
+    for tag, name in re.findall(r'\\(begin|end)\{([^}]+)\}', rendered):
+        if tag == 'begin':
+            if name in ('lstlisting', 'BookOutput'):
+                assert not any(item in ('enumerate', 'itemize') for item in environments)
+            environments.append(name)
+        else:
+            assert environments.pop() == name
+    assert not environments
+    compact = '{"value":"' + 'a' * 160 + '"}'
+    assert '\\begin{BookOutput}\n' + compact + '\n\\end{BookOutput}' in Converter().conv_code('text', [compact])
+    try:
+        Converter().convert('| chapter | title |\n| 24 | project |\n| 25 | Linux |')
+    except ValueError as error:
+        assert '分隔行' in str(error)
+    else:
+        raise AssertionError('没有表头分隔行的表格不能静默丢行')
+    # 双反引号代码段要整体识别，拆成单反引号会在 PDF 里漏出裸反引号。
+    double = Converter().convert('| 指令 | 作用 |\n| --- | --- |\n| `` $macro N((a)) `` | 说明 |')
+    assert '`' not in double and r'\texttt{ \$macro N(' in double, double
+    operators = Converter().convert('| 用途 | 操作符 |\n| --- | --- |\n| 逻辑 | \\|\\| |')
+    assert '逻辑 & ||' in operators, operators
+    preface=(ROOT/'doc/book/latex/chapters/preface.tex').read_text(encoding='utf-8')
+    for chapter in range(1, chapterCount + 1):
+        assert preface.count(r'\hyperref[ch:%02d]{%02d} &' % (chapter, chapter)) == 1, chapter
+    count=0
+    programs=[]
+    with tempfile.TemporaryDirectory(prefix='lepus-book-') as folder:
+        work=Path(folder)
+        for source,target in FILES:
+            path=ROOT/'doc/book'/source
+            text=path.read_text(encoding='utf-8')
+            if re.match(r'^\d\d-', source):
+                assert not re.search(r'^#{2,4} .*?(?:习题|参考解答)\s*$', text, re.M), source
+                assert '<!-- verify-book' in text, ('章节缺少可核对的代码示例', source)
+                if source in EXTRAS:
+                    assert '番外：' in re.findall(r'^## (.+)$', text, re.M)[-1], source
+            mode='preface' if source=='README.md' else 'appendix' if re.match(r'^[A-Z]-',source) else 'chapter'
+            expected=Converter(mode).convert(text)
+            if mode == 'chapter':
+                assert expected.count(r'\chapter{') == 1, ('正文被误识别为章标题', source)
+            assert (ROOT/'doc/book/latex/chapters'/target).read_text(encoding='utf-8')==expected,target
+            assert 'minipage' not in expected and 'samepage' not in expected, target
+            list_depth=0
+            for match in re.finditer(r'\\(begin|end)\{(enumerate|itemize|lstlisting|BookOutput)\}', expected):
+                direction, environment=match.groups()
+                if environment in ('lstlisting', 'BookOutput'):
+                    assert list_depth == 0, (target, match.start())
+                else:
+                    list_depth += 1 if direction == 'begin' else -1
+            assert list_depth == 0, target
+            for input_json,code,output in re.findall(r'<!-- verify-book(?:-input:\s*("(?:\\.|[^"\\])*"))? -->\s*```lepus\n(.*?)```\s*```text\n(.*?)```',text,re.S):
+                count+=1;file=work/f'example{count}.lep';file.write_text(code,encoding='utf-8')
+                programs.append((source,file,work/f'output{count}',output,json.loads(input_json) if input_json else None))
+        def execute(program):
+            """在独立产物路径并行验证一个书稿完整程序。"""
+            source,file,prefix,output,stdin=program
+            environment=dict(os.environ,LEPUS_LANG='zh',LEPUS_NO_STDIN_INPUT='1')
+            if stdin is not None:
+                environment.pop('LEPUS_NO_STDIN_INPUT',None)
+            includes=[arg for directory in IMPORTS.get(source,[]) for arg in ('--include-path',str(ROOT/directory))]
+            result=subprocess.run([str(COMPILER),'run',str(file),'--out',str(prefix),*includes],cwd=work,
+                env=environment,input=stdin,capture_output=True,encoding='utf-8',timeout=180)
+            if result.returncode!=0 or result.stdout.replace('\r\n','\n')!=output:
+                return (source,file.stem,result.stdout,result.stderr,output)
+            return None
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            failures=[failure for failure in pool.map(execute, programs) if failure]
+        assert not failures,failures
+        negative_count = 0
+        negative_block = re.compile(
+            r'<!-- verify-book-error:\s*([^\n]+?)\s*-->\s*```lepus\n(.*?)```\s*```text\n(.*?)```', re.S)
+        for entry in CHAPTERS:
+            chapter = (ROOT/'doc/book'/entry['zh']).read_text(encoding='utf-8')
+            cases = negative_block.findall(chapter)
+            assert len(cases) == chapter.count('<!-- verify-book-error:'), entry['zh']
+            for mode, invalid, diagnostic in cases:
+                diagnostic_code = re.fullmatch(r'LEP\d{4}', mode)
+                assert mode in ('check', 'run', 'temp') or diagnostic_code, (entry['zh'], mode)
+                negative_count += 1
+                bad = work/f'chapter-failure-{negative_count}.lep'
+                bad.write_text(invalid, encoding='utf-8')
+                arguments = ['run', str(bad), '--out', str(bad.with_suffix(''))] if mode == 'run' else ['check', str(bad)]
+                result = subprocess.run([str(COMPILER), *arguments], cwd=work,
+                    env=dict(os.environ, LEPUS_LANG='zh', LEPUS_NO_STDIN_INPUT='1'),
+                    capture_output=True, encoding='utf-8', timeout=120)
+                assert result.returncode != 0 and diagnostic.strip() in result.stderr, (entry['zh'], result)
+                if diagnostic_code:
+                    assert re.search(rf'\b{mode}\b', result.stderr), (entry['zh'], mode, result.stderr)
+                if mode == 'temp':
+                    assert '分支结果类型必须一致' not in result.stderr, result
+        assert negative_count > 0
+        kong=(ROOT/'doc/book/19-函数值与闭包.md').read_text(encoding='utf-8')
+        assert '鲁镇的码栈' in kong and '违约金零头' in kong and not re.search(r'^\[\d+\]',kong,re.M)
+    # 附录 A 的 <!-- fail --> 示例逐个重跑：必须失败，且文档记载的首条消息真实出现。
+    with tempfile.TemporaryDirectory(prefix='lepus-book-fail-') as failFolder:
+        failWork=Path(failFolder)
+        appendix=(ROOT/'doc/book/A-常见错误速查.md').read_text(encoding='utf-8')
+        failBlock=re.compile(r'<!-- fail[^>]*-->\s*```lepus\n(.*?)```\s*```text\n(.*?)```',re.S)
+        position=re.compile(r'\S+ 第 \d+ 行(第 \d+ 列)?：')
+        fails=failBlock.findall(appendix)
+        assert fails and len(fails) == len(re.findall(r'<!-- fail[^>]*-->', appendix)), '附录 A 负例缺少诊断块'
+        for index,(code,expected) in enumerate(fails):
+            file=failWork/f'appendix-fail{index}.lep';file.write_text(code,encoding='utf-8')
+            result=subprocess.run([str(COMPILER),'run',str(file),'--out',failWork/f'appendix-fail{index}'],cwd=failWork,
+                env=dict(os.environ,LEPUS_LANG='zh',LEPUS_NO_STDIN_INPUT='1'),capture_output=True,encoding='utf-8',timeout=180)
+            actual=result.stderr.replace('\r\n','\n')
+            lines=actual.splitlines()
+            first=expected.strip().splitlines()[0] if expected.strip() else ''
+            documented=position.sub('',first).strip()
+            assert result.returncode!=0,(index,actual)
+            assert lines and (position.sub('',lines[0]).strip()==documented or documented in actual),(index,first,lines[0] if lines else '')
+    assert count>=22,count
+    print(f'{count} 个书本程序、{negative_count} 个章节反例、{len(fails)} 个附录反例和全部 LaTeX 生成章节通过。')
+
+
+if __name__=='__main__':main()

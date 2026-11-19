@@ -1,0 +1,4 @@
+void main() {
+    BarePtr<int64> pointer;
+    println("{}", pointer.address);
+}

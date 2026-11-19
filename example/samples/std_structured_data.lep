@@ -1,0 +1,152 @@
+/*
+ * std_structured_data.lep —— `std::json` 与 `std::toml` 的读写样例。
+ *
+ * 本例将 find / keyAt / asString 的结果分别保存，方便逐层检查 Result/Option。
+ * 当前语言也支持 root.find("x").unwrap() 等持资源结果的链式访问；编译器在完整
+ * 表达式结束后清理中间值。节点拥有独立子树，close 不影响副本及已提取的子值。
+ */
+import std::json;
+import std::toml;
+
+void main() {
+    Result<JsonValue, Error> parsed = std::json::parse(
+    "{\"name\":\"中文\",\"items\":[1,2,3],\"active\":true,\"nothing\":null,"
+    "\"ratio\":1.5,\"min\":-9223372036854775808}");
+    JsonValue root = parsed.unwrap();
+    assert(root.isObject() && root.len() == 6);
+    Option<String> firstKey = root.keyAt(0);
+    assert(firstKey.unwrap() == "name");
+    Option<JsonValue> nameField = root.find("name");
+    JsonValue nameValue = nameField.unwrap();
+    Option<String> nameText = nameValue.asString();
+    assert(nameText.unwrap() == "中文");
+
+    Option<JsonValue> itemsField = root.find("items");
+    JsonValue items = itemsField.unwrap();
+    int64 sum = 0;
+    for (JsonValue item in items) {
+        Option<int64> itemNumber = item.asInt();
+        sum = sum + itemNumber.unwrap();
+    }
+    assert(sum == 6 && items.at(-1).isNone() && items.at(3).isNone());
+    Option<JsonValue> missingField = root.find("missing");
+    assert(missingField.isNone());
+    Option<JsonValue> activeField = root.find("active");
+    JsonValue activeValue = activeField.unwrap();
+    Option<bool> activeBool = activeValue.asBool();
+    assert(activeBool.unwrap());
+    Option<JsonValue> nothingField = root.find("nothing");
+    JsonValue nothingValue = nothingField.unwrap();
+    assert(nothingValue.isNull());
+    Option<int64> nothingInt = nothingValue.asInt();
+    assert(nothingInt.isNone());
+    Option<JsonValue> ratioField = root.find("ratio");
+    JsonValue ratioValue = ratioField.unwrap();
+    Option<float64> ratioNumber = ratioValue.asFloat64();
+    assert(ratioNumber.unwrap() == 1.5);
+    Option<int64> ratioInt = ratioValue.asInt();
+    assert(ratioInt.isNone());
+    Option<JsonValue> minField = root.find("min");
+    JsonValue minValue = minField.unwrap();
+    Option<int64> minNumber = minValue.asInt();
+    assert(format("{}", minNumber.unwrap()) == "-9223372036854775808");
+
+    String rootText = root.dump();
+    Result<JsonValue, Error> reparsed = std::json::parse(rootText);
+    JsonValue reloaded = reparsed.unwrap();
+    Option<JsonValue> reloadedName = reloaded.find("name");
+    JsonValue reloadedNameValue = reloadedName.unwrap();
+    Option<String> reloadedText = reloadedNameValue.asString();
+    assert(reloadedText.unwrap() == "中文");
+    assert(reloaded.close());
+    assert(root.close() && items.isValid() && !root.close());
+
+    Result<JsonValue, Error> parsedZero =
+    std::json::parse("{\"a\\u0000b\":\"x\\u0000y\"}");
+    JsonValue zero = parsedZero.unwrap();
+    Option<String> zeroKey = zero.keyAt(0);
+    assert(zeroKey.isNone());
+    Option<List<uint8>> keyResult = zero.keyBytesAt(0);
+    List<uint8> key = keyResult.unwrap();
+    assert(key.len() == 3 && key[1] == (uint8)0);
+    Option<JsonValue> zeroTextField = zero.findBytes(key);
+    JsonValue zeroText = zeroTextField.unwrap();
+    Option<String> zeroTextString = zeroText.asString();
+    assert(zeroTextString.isNone());
+    Option<List<uint8>> rawResult = zeroText.asBytes();
+    List<uint8> raw = rawResult.unwrap();
+    assert(raw.len() == 3 && raw[0] == (uint8)120 && raw[1] == (uint8)0 &&
+    raw[2] == (uint8)121);
+    assert(zero.close());
+    Result<JsonValue, Error> badJson = std::json::parse("{\"x\":}");
+    assert(badJson.isErr() && len(badJson.error().toString()) > 0);
+    Result<JsonValue, Error> trailing = std::json::parse("[1,]");
+    assert(trailing.isErr());
+
+    Result<TomlValue, Error> parsedConfig = std::toml::parse(
+    "title = \"Lepus\"\nreleased = 1979-05-27T07:32:00Z\n[server]\nport = 8080\n"
+    "enabled = true\nvalues = [1, 2, 3]\n[[products]]\nname = \"one\"\n"
+    "[[products]]\nname = \"two\"\n");
+    TomlValue config = parsedConfig.unwrap();
+    assert(config.isTable());
+    Option<String> titleKey = config.keyAt(0);
+    assert(titleKey.unwrap() == "title");
+    Option<TomlValue> titleField = config.find("title");
+    TomlValue titleValue = titleField.unwrap();
+    Option<String> titleText = titleValue.asString();
+    assert(titleText.unwrap() == "Lepus");
+    Option<TomlValue> serverField = config.find("server");
+    TomlValue server = serverField.unwrap();
+    Option<TomlValue> portField = server.find("port");
+    TomlValue portValue = portField.unwrap();
+    Option<int64> portNumber = portValue.asInt();
+    assert(portNumber.unwrap() == 8080);
+    Option<TomlValue> enabledField = server.find("enabled");
+    TomlValue enabledValue = enabledField.unwrap();
+    Option<bool> enabledBool = enabledValue.asBool();
+    assert(enabledBool.unwrap());
+    Option<TomlValue> releasedField = config.find("released");
+    TomlValue releasedValue = releasedField.unwrap();
+    Option<String> releasedText = releasedValue.asDateTime();
+    assert(releasedText.unwrap() == "1979-05-27T07:32:00Z");
+
+    Option<TomlValue> productsField = config.find("products");
+    TomlValue products = productsField.unwrap();
+    assert(products.len() == 2);
+    Option<TomlValue> secondProduct = products.at(1);
+    TomlValue second = secondProduct.unwrap();
+    Option<TomlValue> secondName = second.find("name");
+    TomlValue secondNameValue = secondName.unwrap();
+    Option<String> secondNameText = secondNameValue.asString();
+    assert(secondNameText.unwrap() == "two");
+    int64 members = 0;
+    for (TomlValue item in server) { members = members + 1; }
+    assert(members == 3);
+    Option<String> missingMember = server.keyAt(3);
+    assert(missingMember.isNone());
+
+    String configText = config.dump();
+    Result<TomlValue, Error> reparsedConfig = std::toml::parse(configText);
+    TomlValue copy = reparsedConfig.unwrap();
+    Option<TomlValue> copyServer = copy.find("server");
+    TomlValue copyServerValue = copyServer.unwrap();
+    Option<TomlValue> copyPort = copyServerValue.find("port");
+    TomlValue copyPortValue = copyPort.unwrap();
+    Option<int64> copyPortNumber = copyPortValue.asInt();
+    assert(copyPortNumber.unwrap() == 8080);
+    assert(copy.close() && config.close() && server.isValid());
+    Result<TomlValue, Error> duplicate = std::toml::parse("x = 1\nx = 2\n");
+    assert(duplicate.isErr() && len(duplicate.error().toString()) > 0);
+    for (int64 i = 0; i < 50; i = i + 1) {
+
+        Result<JsonValue, Error> parsedSmall = std::json::parse("[]");
+        JsonValue small = parsedSmall.unwrap();
+        assert(small.close());
+        Result<TomlValue, Error> invalid = std::toml::parse("x = [");
+        assert(invalid.isErr());
+
+    }
+    Result<JsonValue, Error> trailingOk = std::json::parse("true");
+    assert(trailingOk.isOk()); // 注册表结束时清理未显式关闭的文档
+    println("JSON and TOML parsing OK");
+}

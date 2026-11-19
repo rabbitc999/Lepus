@@ -1,0 +1,88 @@
+'use strict';
+
+/** 调试配置规范化：只处理路径和工程入口，语言配置仍由编译器读取。 */
+const fs = require('node:fs');
+const path = require('node:path');
+const { processId } = require('./debugIdentity');
+const { DebugSourceMap } = require('./debugSourceMap');
+const { remoteEndpoint } = require('./debugRemote');
+const { findProject } = require('./dependencies');
+
+/** 保留未指定环境项，null 明确删除继承的环境变量。 */
+function debugEnvironment(base, overrides = {}) {
+  if (!overrides || typeof overrides !== 'object' || Array.isArray(overrides)) throw new Error('env 必须是对象');
+  const result = { ...base };
+  for (const [name, value] of Object.entries(overrides)) {
+    if (!name || name.includes('=') || name.includes('\0') || (value !== null && (typeof value !== 'string' || value.includes('\0')))) throw new Error('env 包含无效名称或值');
+    const actual = process.platform === 'win32' ? Object.keys(result).find(key => key.toLowerCase() === name.toLowerCase()) || name : name;
+    if (value === null) delete result[actual];
+    else result[actual] = value;
+  }
+  return result;
+}
+
+/** 将单次构建的原始诊断转为编辑器位置；不再触发第二次检查。 */
+function buildDiagnostics(output, cwd) {
+  const diagnostics = [];
+  for (const line of output.replace(/\x1b\[[0-9;]*m/g, '').split(/\r?\n/)) {
+    // 英文显示使用「文件:行:列:」，中文显示使用「文件 第 N 行[第 M 列]：」，两者都要定位。
+    const match = /^(?:lepus:\s*)?(.+?):([0-9]+):([0-9]+):\s*(.+)$/.exec(line)
+      || /^(?:lepus:\s*)?(.+?)\s*第\s*([0-9]+)\s*行(?:第\s*([0-9]+)\s*列)?：\s*(.+)$/.exec(line);
+    if (match) diagnostics.push({ path: path.resolve(cwd, match[1]), line: Math.max(0, Number(match[2]) - 1),
+      column: Math.max(0, Number(match[3] || 1) - 1), message: match[4] });
+  }
+  return diagnostics;
+}
+
+/** 按选定工作区解析入口，保存相关文档，并拒绝不能在宿主执行的项目目标。 */
+async function resolveConfiguration(vscode, folder, configuration, projectInfo) {
+  if (vscode.workspace.isTrusted === false) throw new Error('Lepus 调试需要受信任的工作区');
+  const config = { type: 'lepus', request: 'launch', name: 'Lepus', ...configuration };
+  if (!['launch', 'attach'].includes(config.request)) throw new Error('调试 request 必须为 launch 或 attach');
+  if (config.debugMode !== undefined && !['development', 'optimized'].includes(config.debugMode)) throw new Error('debugMode 必须为 development 或 optimized');
+  if (remoteEndpoint(config.remote) && config.request !== 'attach') throw new Error('remote 只用于附加已有 Linux gdbserver');
+  if (config.request === 'attach') {
+    config.processId = processId(config.processId);
+    if (!config.executable || config.program) throw new Error('附加需要已有 executable，不执行 program 构建');
+    if ((config.args || []).length || config.console === 'integratedTerminal' || config.stopOnEntry) throw new Error('附加不修改参数或接管终端；暂停使用 stopOnAttach');
+    if (config.stopOnAttach !== undefined && typeof config.stopOnAttach !== 'boolean') throw new Error('stopOnAttach 必须是布尔值');
+  }
+  const active = vscode.window.activeTextEditor?.document;
+  const directory = folder?.uri.fsPath || (active?.uri.scheme === 'file' ? path.dirname(active.uri.fsPath) : null);
+  if (!directory) throw new Error('请选择工作区或已保存的 Lepus 文件');
+  if (config.args !== undefined && (!Array.isArray(config.args) || config.args.length > 65536 || config.args.some(value => typeof value !== 'string' || value.includes('\0')))) throw new Error('args 必须是无 NUL 的字符串数组，且数量不得超过限制');
+  debugEnvironment({}, config.env);
+  if (config.executable) {
+    config.executable = path.resolve(directory, config.executable);
+    if (!fs.statSync(config.executable).isFile()) throw new Error('executable 不是普通文件');
+    config.cwd = path.resolve(directory, config.cwd || path.dirname(config.executable));
+    new DebugSourceMap(config.sourceFileMap, config.cwd);
+    return config;
+  }
+  let program = config.program || (config.entry !== 'project' && active?.languageId === 'lepus' ? active.uri.fsPath : '');
+  const candidate = program ? path.resolve(directory, program) : directory;
+  const projectRoot = findProject(candidate);
+  const manifest = projectRoot && path.join(projectRoot, 'lepus.toml');
+  for (const document of vscode.workspace.textDocuments) {
+    if (document.uri.scheme === 'file' && document.isDirty && (document.uri.fsPath === manifest || document.languageId === 'lepus')) {
+      if (!(await document.save())) throw new Error('文档保存失败，已取消调试');
+    }
+  }
+  const project = projectInfo ? await projectInfo(vscode.Uri.file(candidate)) : null;
+  if (projectRoot && !project?.valid) throw new Error(project?.error || '项目配置尚未就绪');
+  if (project?.exists) {
+    if (!project.native || project.output !== 'executable') throw new Error('调试要求宿主目标及可执行输出');
+    if (config.entry === 'project' || !program) {
+      if (!project.main) throw new Error('项目没有配置 main 入口');
+      program = path.resolve(path.dirname(vscode.Uri.parse(project.manifestUri).fsPath), project.main);
+    }
+  }
+  if (!program) throw new Error('没有 Lepus 源文件或项目入口');
+  config.program = path.resolve(directory, program);
+  if (path.extname(config.program).toLowerCase() !== '.lep' || !fs.statSync(config.program).isFile()) throw new Error('program 必须是已保存的 .lep 文件');
+  config.cwd = path.resolve(directory, config.cwd || projectRoot || path.dirname(config.program));
+  new DebugSourceMap(config.sourceFileMap, config.cwd);
+  return config;
+}
+
+module.exports = { debugEnvironment, buildDiagnostics, resolveConfiguration };

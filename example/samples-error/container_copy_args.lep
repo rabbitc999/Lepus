@@ -1,0 +1,4 @@
+void main() {
+    std::core::List<int64> values;
+    std::core::List<int64> copy = values.copy(1);
+}

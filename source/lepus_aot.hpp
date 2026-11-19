@@ -1,0 +1,178 @@
+/**
+ * @file lepus_aot.hpp
+ * @brief 从语义检查后的 AST 直接生成 LLVM 代码并编译原生产物。
+ */
+#pragma once
+#include "stackvm.hpp"
+#include "lepus_aot_target.hpp"
+
+namespace ast { struct Program; }
+
+namespace lepus_build
+{
+
+/**
+ * @brief 一个由 `#abi("C", "库", "符号")` 声明、要链接到外部 C 的函数。
+ */
+struct ExternFunction
+{
+    Memory::String label;                           ///< 四元式里的调用标签。
+
+    Memory::String symbol;                          ///< C 侧真正的符号名（`= "名字"`）。
+    Memory::String library;                         ///< 动态库声明路径或静态链接资产路径；空值直接引用链接符号。
+    Memory::String resultType = "long long";        ///< C 返回类型名。
+    Memory::Vector<Memory::String> parameterTypes;  ///< C 形参类型名，按序。
+    Memory::String abiConvention = "C";             ///< 已验证的外部调用约定。
+    bool requiresMarshalling = false;               ///< 非标量签名必须通过 C 帧封送，不按槽位冒充原生布局。
+};
+
+/**
+ * @brief 判断外部声明是否需要按声明路径动态加载库。
+ * @param function 外部函数及其库路径。
+ * @return 非空且不是静态库或对象文件时返回真。
+ */
+bool usesDynamicAbiLibrary(const ExternFunction &function);
+/**
+ * @brief 判断是否显式声明最终链接阶段解析的 C 符号。
+ * @param library ABI 库说明；@link 表示直接链接。
+ * @return 是直接链接标记时为真。
+ */
+bool isDirectLinkLibrary(const Memory::String &library);
+
+/**
+ * @brief 识别需由 BUILD 链接器提供的内置 C 服务。
+ * @param library ABI 库标识。
+ * @return GUI、音频或 XML 的保留标识为真。
+ */
+bool isBuiltinNativeLibrary(const Memory::String &library);
+
+/**
+ * @brief BUILD 输出的形态与开关。
+ */
+struct Options
+{
+    bool checked = false;                            ///< 原生导出默认 unchecked，run 驱动显式开启检查。
+    bool debug = false;                               ///< 保留原生源码与局部变量调试信息。
+    bool debugOptimized = false;                      ///< debug 为真时使用 O3／LTO，不承诺变量或步骤完整保留。
+    bool threadsEnabled = false;                     ///< 是否启用与 运行时 同源的隔离线程服务。
+    bool shared = false;                             ///< 产出动态库而不是可执行文件。
+    bool emitLLVMOnly = false;                       ///< `--emit-llvm`：只写 LLVM 模块，不调用目标代码工具。
+    bool emitAssemblyOnly = false;                   ///< 只生成目标机器汇编 .s，不生成对象或执行链接。
+    bool emitObjectOnly = false;                     ///< 只生成目标机器的对象文件，不执行链接。
+    Memory::String target;                           ///< 目标三元组，空值使用实际宿主。
+    Memory::String cpu;                              ///< 目标 CPU，空值使用目标的通用 CPU。
+    Memory::String subsystem;                        ///< Windows 可执行文件的 PE 子系统，空值使用工具链默认值。
+    Memory::String sysroot;                          ///< 完整交叉链接使用的目标 sysroot。
+    Memory::String runtimeDirectory;                 ///< 目标 liblepus_aot_host.a 所在目录。
+    Memory::String allocator;                        ///< malloc 或 pool；空值默认系统 malloc。
+    Memory::String compiler;                         ///< LLVM clang 驱动；空值优先使用 library/llvm 中的工具。
+    Memory::String outputPrefix;                     ///< LLVM 模块、头文件和原生产物的公共前缀。
+    Memory::Vector<Memory::String> exports;          ///< 显式导出给 C 的 Lepus 函数名。
+    Memory::Vector<Memory::String> linkLibraries;    ///< 额外的链接库（`abi` 里的库路径）。
+    Memory::Vector<Memory::String> assemblySources;  ///< 显式加入最终链接的 .s 输入。
+    Memory::Vector<Memory::String> assemblyIncludes;  ///< 汇编 .include 的搜索目录。
+    Memory::Vector<Memory::String> linkObjects;      ///< 用户提供及本次编译生成的目标文件。
+    bool lto = true;                                ///< 最终链接保留 LLVM bitcode，默认启用全量 LTO。
+    bool thinLto = false;                           ///< 启用 LTO 时改用带模块摘要的 ThinLTO，默认完整 LTO。
+    std::size_t memoryBytes = 512u * 1024u * 1024u;  ///< 数据区之外的堆预算。
+    std::size_t stepLimit = 0;                       ///< 运行安全点的逻辑步数上限，零表示不限。
+};
+
+/**
+ * @brief 一次 BUILD 编译的全部输入。
+ */
+struct Request
+{
+    const ast::Program *syntax = nullptr;      ///< 语义检查后的 AST；正常运行和 BUILD 直接消费此树。
+    const runtime::QuadFile *quads = nullptr;   ///< 独立库调用方的兼容四元式输入；正常编译为空。
+    const runtime::Program *program = nullptr;  ///< 兼容组装结果；AST 路径不需要它。
+    Memory::String dataBytes;                   ///< `.data.bin` 原始字节。
+    Memory::String dataLayout;                  ///< 布局文本（每行 `名 offset=… size=…`）。
+    Memory::Vector<ExternFunction> externs;     ///< `abi` 声明的外部 C 函数。
+    Memory::String abiGlue;                     ///< 复杂 C ABI 使用的类型化宿主绑定源码。
+    Memory::Vector<ExternFunction> abiExports; ///< 经类型校验的 C ABI 导出，与语言入口独立。
+    Memory::String abiExportHeader; ///< 编译器生成的 C 类型声明及原生导出原型。
+    Options options;
+};
+
+/**
+ * @brief 直接启动已生成的原生程序，不经过命令行解释器。
+ * @param options 决定产物路径的输出配置。
+ * @param arguments 按原样传递的程序参数。
+ * @param input 可选的标准输入内容；空指针表示继承当前输入。
+ * @return 子进程退出码，启动失败返回一。
+ */
+int executeNative(const Options &options, const Memory::Vector<Memory::String> &arguments);
+
+/**
+ * @brief 取当前编译单元里 `#abi("C", "库", "符号")` 声明的外部 C 函数。
+ *
+ * 由前端（`source/semantics/artifacts.cpp`）注入，提供函数声明表与 C ABI 类型映射；
+ * BUILD 这边只消费结果，不反过来依赖前端，这样 `lepus_aot` 始终是个干净的独立模块。
+ * @return 外部函数清单；未登记提供方时返回空表。
+ */
+[[nodiscard]] Memory::Vector<ExternFunction> collectAbiExterns();
+
+/**
+ * @brief 读取当前编译单元的类型化 C ABI 导出描述。
+ * @return 对外符号、语言标签与 C 类型。
+ */
+Memory::Vector<ExternFunction> collectAbiExports();
+/**
+ * @brief 注册前端 C ABI 导出描述入口。
+ * @param provider 返回导出描述的提供方。
+ */
+void setAbiExportProvider(Memory::Vector<ExternFunction> (*provider)());
+/**
+ * @brief 读取生成的纯 C 导出声明。
+ * @return 不含语言内部存储地址的 C 声明。
+ */
+Memory::String collectAbiExportHeader();
+/**
+ * @brief 登记纯 C 导出声明生成入口。
+ * @param provider 前端提供方。
+ */
+void setAbiExportHeaderProvider(Memory::String (*provider)());
+
+/**
+ * @brief 前端注册"怎么取 abi 声明"的办法（进程启动时注入一次即可）。
+ * @param provider 返回外部函数清单的函数指针；nullptr 表示清空。
+ */
+void setAbiExternProvider(Memory::Vector<ExternFunction> (*provider)());
+
+/**
+ * @brief 登记前端生成复杂 C ABI 宿主绑定源码的入口。
+ * @param provider 返回绑定源码的回调；空指针清除登记。
+ */
+void setAbiGlueProvider(Memory::String (*provider)(const Memory::Set<Memory::String> &));
+
+/**
+ * @brief 取得需要结构体、引用、缓冲区或回调封送的宿主绑定源码。
+ * @param reachableBuiltin 需要生成绑定的内置 C 服务函数。
+ * @return 没有复杂 ABI 声明时为空串。
+ */
+[[nodiscard]] Memory::String collectAbiGlue(const Memory::Set<Memory::String> &reachableBuiltin = {});
+
+/**
+ * @brief 生成自包含的 LLVM 模块。
+ * @param request 已检查 AST 或显式兼容四元式、数据映像及输出选项。
+ * @param diagnostics 不支持的构造等诊断（非空 = 失败）。
+ * @param header 给外部 C 用的头文件；不需要可以传 nullptr。
+ * @return LLVM 模块文本；失败时返回空串。
+ */
+[[nodiscard]] Memory::String generateLLVM(const Request &request, Memory::Vector<Memory::String> *diagnostics,
+                                          Memory::String *header = nullptr);
+/**
+ * @brief 生成 LLVM 模块、写盘、并调 LLVM clang 驱动产出可执行文件 / 动态库。
+ * @param request 输入。
+ * @param diagnostics 诊断（含编译器的报错输出）。
+ * @return 0 成功，非 0 失败。
+ */
+[[nodiscard]] int run(const Request &request, Memory::Vector<Memory::String> *diagnostics);
+/**
+ * @brief 查找实际外置 LLVM 驱动，不启动子进程。
+ * @param wanted 显式路径；空值使用环境、发行目录或 PATH。
+ * @return 驱动路径或 clang 程序名。
+ */
+Memory::String llvmCompilerPath(const Memory::String &wanted);
+}  // namespace lepus_build

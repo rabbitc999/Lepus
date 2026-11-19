@@ -1,0 +1,1 @@
+语法错误：example/samples-error/legacy_dollar_undef.lep 第 5 行第 11 列：期望 MACRO_REPLACE_END / MACRO_BODY / 条件(if) / 自增(++) 等 49 个之一，实际是 标识符

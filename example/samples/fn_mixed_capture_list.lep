@@ -1,0 +1,56 @@
+int64 apply(int64 fn(int64) callback, int64 value)
+{
+    return callback(value);
+}
+
+void main()
+{
+    int64 a = 1;
+    int64 b = 2;
+    int64 c = 3;
+    int64 read = 4;
+    int64 implicitRead = 5;
+    let mixed = int64 fn [mut a, move b, copy c, const read](int64 x)
+    {
+        a += x;
+        b += x;
+        c += x;
+        return a + b + c + read + implicitRead;
+    };
+    c = 30;
+    read = 40;
+    implicitRead = 50;
+    int64 b = 20;
+    assert(mixed(1) == 99 && a == 2 && b == 20 && c == 30);
+    assert(mixed(2) == 105 && a == 4);
+
+    int64 shared = 6;
+    int64 snapshot = 7;
+    let fallback = fn [mut shared] copy(int64 x)
+    {
+        shared += x;
+        snapshot += x;
+        return shared + snapshot;
+    };
+    snapshot = 70;
+    assert(fallback(2) == 17 && shared == 8 && snapshot == 70);
+    assert(fallback(1) == 19 && shared == 9 && snapshot == 70);
+    assert(apply(fn [mut shared] copy(x) { shared += x; return shared + snapshot; }, 1) == 80);
+    assert(shared == 10);
+
+    int64 calls = 0;
+    int64 start = 10;
+    let generic = fn<T> [
+        mut /* counter shared with the caller */ calls
+    ] copy(T value)
+    {
+        calls += 1;
+        start += 1;
+        return start;
+    };
+    start = 100;
+    assert(generic(1) == 11 && generic("text") == 12);
+    assert(calls == 2 && start == 100);
+
+    println("mixed capture list OK");
+}

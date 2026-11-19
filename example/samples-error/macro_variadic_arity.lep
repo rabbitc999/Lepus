@@ -1,0 +1,4 @@
+$macro CALL(first, ...rest) -> {
+std::core::println(first, rest);
+}
+void main() { $CALL(); }

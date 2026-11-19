@@ -1,0 +1,1 @@
+lepus: example/samples-error/reference_address_arithmetic.lep 第 1 行第 76 列：引用不支持地址运算；请使用元素下标，地址仅由 std::core::address 获取

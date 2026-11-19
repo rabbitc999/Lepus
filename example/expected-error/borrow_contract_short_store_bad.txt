@@ -1,0 +1,1 @@
+lepus: example/samples-error/borrow_contract_short_store_bad.lep 第 2 行：[LEP1212] out借用了契约未声明的来源 a；当前契约为 #borrow(out, [b])

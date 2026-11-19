@@ -1,0 +1,22 @@
+/* 尖括号只声明泛型；其余三种参数组按顺序、形状和数量匹配。 */
+$macro SHOW<T>[..Attrs](..Args){Body} -> {
+$for (attr in Attrs) {
+println("{}", $stringify(attr));
+}
+$for (arg in Args) {
+println("{}", $stringify(arg));
+}
+Body;
+}
+$macro EMPTY()() -> {
+println("repeated empty groups");
+}
+void main() {
+    $SHOW<int64>[readonly](x, y){{
+        int64 total = 2 + 3;
+        if (total > 0) {
+            println("{}", total);
+        }
+    }};
+    $EMPTY()();
+}

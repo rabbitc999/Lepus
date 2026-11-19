@@ -1,0 +1,3 @@
+/* 旧文本包含不在当前文法中；模块使用 import。 */
+%include_once "missing.lep"
+void main() { }

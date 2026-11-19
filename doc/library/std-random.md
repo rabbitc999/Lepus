@@ -1,0 +1,722 @@
+# std::random — 随机数
+
+<!-- LANGUAGE NAVIGATION -->
+[English（中文原文）](std-random.md) · **简体中文**
+<!-- END LANGUAGE NAVIGATION -->
+
+[返回库目录](README.md) · [全部符号](symbols.md)
+
+## 引入
+
+```lepus
+import std::random;
+```
+
+## 公共约定与错误边界
+
+固定种子采用确定性 LCG，可复现；不用于密码学。nextInt/nextRange 区间为 [minimum,maximum)，要求 maximum>minimum；nextFloat64 为 [0,1)。Random 是拥有序列状态的 opcode，普通复制保留当前位置并独立推进，作用域退出自动释放。
+
+## 参考代码
+
+完整程序：[example/samples/std_math_clock_random.lep](../../example/samples/std_math_clock_random.lep)。
+
+```powershell
+lepus run example/samples/std_math_clock_random.lep
+```
+
+<details>
+<summary>展开完整参考代码</summary>
+
+```lepus
+/* std_math_clock_random.lep —— 第二档：Math 补齐、Clock、Random 扩展。
+ *
+ * 三条路线各不相同，改这块前先分清：
+ *   * Math 的 float64 取整 / 判定走**宿主胶水**（glue/std_math.hpp 绑 <cmath>）；
+ *   * Math 的 int64 版是**Lepus 重载转发到宿主胶水**（写在同一模块里，实参完全匹配优先于 int64→float64 放宽）；
+ *   * Clock 是宿主胶水（chrono 的 steady_clock）；
+ *   * Random 的 nextRange / nextBool 是 宿主胶水的薄封装。
+ *
+ * `choice` / `shuffle` 不在 `Random::` 下：Lepus 没有泛型方法，而 `std::random::Random` 这个
+ * 名字已经被同名的 struct 占着（再开同名模块会让 `Random::withSeed` 找不到）。
+ * 它们放在 `algorithms`，导入后写 `choiceValue(表, 种子)`。
+ */
+
+import std::random;
+
+import std::math;
+import std::algorithms;
+
+import std::clock;
+
+void main() {
+    /* --- Math：float64 取整 / 取余 / 特殊值判定（宿主 <cmath>） --- */
+    println("{} {} {} {}", floor(2.7), ceil(2.1),
+    round(2.5), trunc(-2.7));
+    println("{} {}", fmod(7.5, 2.0), fmod(-7.5, 2.0));
+
+    /* Lepus 里浮点除零是运行期错误，所以 NaN / Inf 从宿主函数拿：
+     * sqrt(-1) = NaN、ln(0) = -Inf。 */
+    float64 notNumber = sqrt(-1.0);
+    float64 infinite = ln(0.0);
+    println("{} {} {} {}", isNaN(notNumber), isNaN(1.0),
+    isInf(infinite), isInf(1.0));
+
+    /* --- Math：int64 版（Lepus 重载转发到宿主胶水）+ float64 版 abs 仍然可用 --- */
+    println("{} {} {} {}", abs(-5), min(3, 8),
+    max(3, 8), clamp(12, 0, 10));
+    println("{}", abs(-2.5));
+
+    /* --- Clock：单调时钟。读数本身不可复现，只断言"拿到了、且不倒退"。 --- */
+    int64 before = nowNanos();
+    int64 millis = nowMs();
+    int64 after = nowNanos();
+    println("{} {} {}", before > 0, millis > 0, after >= before);
+
+    /* --- Random：分布 --- */
+    Random rng = Random::withSeed((uint64)12345);
+    float64 ranged = rng.nextRange(10.0, 20.0);
+    int64 drawn = rng.nextInt(0, 10);
+    bool coin = rng.nextBool();
+    /* 固定种子 -> 固定序列（和 std_parse_random_path_memory 一个口径：钉住随机输出）。 */
+    println("{} {} {}", ranged, drawn, coin);
+    println("{} {}", ranged >= 10.0, ranged < 20.0);
+
+    /* --- 取一个 / 洗一副（种子自己给，结果可复现） --- */
+    List<int64> items;
+    items.push(1);
+    items.push(2);
+    items.push(3);
+    /* 种子 0：`0 % 3 == 0`，无论随机数怎么算都取到第 0 个。 */
+    println("{}", choiceValue(items, (uint64)0));
+
+    List<int64> mixed = shuffleValue(items, (uint64)4242);
+    println("{} {} {}", mixed.len(),
+    mixed[0] + mixed[1] + mixed[2],   /* 洗牌不改总和 */
+    items[0]);                        /* 原表不动 */
+
+    List<int64> again = shuffleValue(items, (uint64)4242);
+    println("{} {} {}", again[0] == mixed[0], again[1] == mixed[1],
+    again[2] == mixed[2]);
+}
+```
+
+</details>
+
+<details>
+<summary>示例输出</summary>
+
+```text
+2.00000000 3.00000000 3.00000000 -2.00000000
+1.50000000 -1.50000000
+1 0 1 0
+5 3 8 10
+2.50000000
+1 1 1
+11.33079669 7 0
+1 1
+1
+3 6 1
+1 1 1
+```
+
+</details>
+
+聚合入口的具体操作参见对应子模块；本页类型/方法的调用形式列在下方。
+
+## 类型、枚举、常量与字段
+
+公开字段按源码原样列出；句柄和游标字段用于包装器状态，通常通过方法操作。枚举的括号表示变体载荷。
+
+| 所属类型 | 声明 | 说明 |
+| --- | --- | --- |
+| 模块 | <a id="symbol-390"></a>`opcode Random` | 拥有独立随机序列位置的 opcode，普通复制后独立推进。 |
+
+## 函数索引
+
+| 名称 | 声明 |
+| --- | --- |
+| [randomWithSeed](#api-0) | `Random randomWithSeed(uint64 seed)` |
+| [randomFromEntropy](#api-1) | `Random randomFromEntropy()` |
+| [randomNextUInt64](#api-2) | `uint64 randomNextUInt64(uint64 handle)` |
+| [randomNextInt](#api-3) | `int64 randomNextInt(uint64 handle, int64 minimum, int64 maximum)` |
+| [randomNextFloat64](#api-4) | `float64 randomNextFloat64(uint64 handle)` |
+| [randomNextRange](#api-5) | `float64 randomNextRange(uint64 handle, float64 minimum, float64 maximum)` |
+| [randomNextBool](#api-6) | `bool randomNextBool(uint64 handle)` |
+| [randomDrop](#api-7) | `void randomDrop(uint64 handle)` |
+| [Random::withSeed](#api-8) | `static Random withSeed(uint64 seed)` |
+| [Random::fromEntropy](#api-9) | `static Random fromEntropy()` |
+| [Random::nextUInt64](#api-10) | `uint64 nextUInt64()` |
+| [Random::nextInt](#api-11) | `int64 nextInt(int64 minimum, int64 maximum)` |
+| [Random::nextFloat64](#api-12) | `float64 nextFloat64()` |
+| [Random::nextRange](#api-13) | `float64 nextRange(float64 minimum, float64 maximum)` |
+| [Random::nextBool](#api-14) | `bool nextBool()` |
+
+<a id="api-0"></a>
+
+### randomWithSeed（1）
+
+**声明**
+
+```lepus
+Random randomWithSeed(uint64 seed);
+```
+
+**行为**
+
+宿主入口：用固定 seed 创建随机数状态。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `seed` | `uint64 seed` | 随机种子 | 无 |
+
+**返回值**
+
+`Random`。宿主入口：用固定 seed 创建随机数状态。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+randomWithSeed(seed);
+```
+
+**源码**：[source/std/random.lep:3](../../source/std/random.lep#L3)。
+
+**完整示例**：[example/samples/std_math_clock_random.lep](../../example/samples/std_math_clock_random.lep)。
+
+<a id="api-1"></a>
+
+### randomFromEntropy（2）
+
+**声明**
+
+```lepus
+Random randomFromEntropy();
+```
+
+**行为**
+
+宿主入口：用宿主熵源播种随机数状态。
+
+**参数**
+
+无显式参数。实例方法使用当前接收者。
+
+**返回值**
+
+`Random`。宿主入口：用宿主熵源播种随机数状态。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+randomFromEntropy();
+```
+
+**源码**：[source/std/random.lep:4](../../source/std/random.lep#L4)。
+
+**完整示例**：[example/samples/std_math_clock_random.lep](../../example/samples/std_math_clock_random.lep)。
+
+<a id="api-2"></a>
+
+### randomNextUInt64（3）
+
+**声明**
+
+```lepus
+uint64 randomNextUInt64(uint64 handle);
+```
+
+**行为**
+
+宿主入口：推进生成器并返回 64 位随机值。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `handle` | `uint64 handle` | 本模块创建且仍有效的宿主句柄 | 无 |
+
+**返回值**
+
+`uint64`。宿主入口：推进生成器并返回 64 位随机值。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+randomNextUInt64(handle);
+```
+
+**源码**：[source/std/random.lep:5](../../source/std/random.lep#L5)。
+
+**完整示例**：[example/samples/std_math_clock_random.lep](../../example/samples/std_math_clock_random.lep)。
+
+<a id="api-3"></a>
+
+### randomNextInt（4）
+
+**声明**
+
+```lepus
+int64 randomNextInt(uint64 handle, int64 minimum, int64 maximum);
+```
+
+**行为**
+
+宿主入口：返回 [minimum,maximum) 内的随机整数。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `handle` | `uint64 handle` | 本模块创建且仍有效的宿主句柄 | 无 |
+| `minimum` | `int64 minimum` | 包含的下界 | 无 |
+| `maximum` | `int64 maximum` | 不包含的上界 | 无 |
+
+**返回值**
+
+`int64`。宿主入口：返回 [minimum,maximum) 内的随机整数。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+randomNextInt(handle, minimum, maximum);
+```
+
+**源码**：[source/std/random.lep:6](../../source/std/random.lep#L6)。
+
+**完整示例**：[example/samples/std_math_clock_random.lep](../../example/samples/std_math_clock_random.lep)。
+
+<a id="api-4"></a>
+
+### randomNextFloat64（5）
+
+**声明**
+
+```lepus
+float64 randomNextFloat64(uint64 handle);
+```
+
+**行为**
+
+宿主入口：返回 [0,1) 内的随机浮点数。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `handle` | `uint64 handle` | 本模块创建且仍有效的宿主句柄 | 无 |
+
+**返回值**
+
+`float64`。宿主入口：返回 [0,1) 内的随机浮点数。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+randomNextFloat64(handle);
+```
+
+**源码**：[source/std/random.lep:7](../../source/std/random.lep#L7)。
+
+**完整示例**：[example/samples/std_math_clock_random.lep](../../example/samples/std_math_clock_random.lep)。
+
+<a id="api-5"></a>
+
+### randomNextRange（6）
+
+**声明**
+
+```lepus
+float64 randomNextRange(uint64 handle, float64 minimum, float64 maximum);
+```
+
+**行为**
+
+宿主入口：返回 [minimum,maximum) 内的随机浮点数。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `handle` | `uint64 handle` | 本模块创建且仍有效的宿主句柄 | 无 |
+| `minimum` | `float64 minimum` | 包含的下界 | 无 |
+| `maximum` | `float64 maximum` | 不包含的上界 | 无 |
+
+**返回值**
+
+`float64`。宿主入口：返回 [minimum,maximum) 内的随机浮点数。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+randomNextRange(handle, minimum, maximum);
+```
+
+**源码**：[source/std/random.lep:8](../../source/std/random.lep#L8)。
+
+**完整示例**：[example/samples/std_math_clock_random.lep](../../example/samples/std_math_clock_random.lep)。
+
+<a id="api-6"></a>
+
+### randomNextBool（7）
+
+**声明**
+
+```lepus
+bool randomNextBool(uint64 handle);
+```
+
+**行为**
+
+宿主入口：推进生成器并返回随机布尔值。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `handle` | `uint64 handle` | 本模块创建且仍有效的宿主句柄 | 无 |
+
+**返回值**
+
+`bool`。宿主入口：推进生成器并返回随机布尔值。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+randomNextBool(handle);
+```
+
+**源码**：[source/std/random.lep:9](../../source/std/random.lep#L9)。
+
+**完整示例**：[example/samples/std_math_clock_random.lep](../../example/samples/std_math_clock_random.lep)。
+
+<a id="api-7"></a>
+
+### randomDrop（8）
+
+**声明**
+
+```lepus
+void randomDrop(uint64 handle);
+```
+
+**行为**
+
+宿主入口：释放对象拥有的资源，调用后遵守本模块失效规则。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `handle` | `uint64 handle` | 本模块创建且仍有效的宿主句柄 | 无 |
+
+**返回值**
+
+无返回值。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+randomDrop(handle);
+```
+
+**源码**：[source/std/random.lep:10](../../source/std/random.lep#L10)。
+
+**完整示例**：[example/samples/std_math_clock_random.lep](../../example/samples/std_math_clock_random.lep)。
+
+<a id="api-8"></a>
+
+### Random::withSeed（9）
+
+**声明**
+
+```lepus
+static Random withSeed(uint64 seed);
+```
+
+**行为**
+
+用固定 seed 创建随机数状态。
+
+使用可复现的种子建立独立生成器。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `seed` | `uint64 seed` | 随机种子 | 无 |
+
+**返回值**
+
+`Random`。用固定 seed 创建随机数状态。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+Random::withSeed(seed);
+```
+
+**源码**：[source/std/random.lep:20](../../source/std/random.lep#L20)。
+
+**完整示例**：[example/samples/std_math_clock_random.lep](../../example/samples/std_math_clock_random.lep)。
+
+<a id="api-9"></a>
+
+### Random::fromEntropy（10）
+
+**声明**
+
+```lepus
+static Random fromEntropy();
+```
+
+**行为**
+
+用宿主熵源播种随机数状态。
+
+使用宿主熵源建立独立生成器。
+
+**参数**
+
+无显式参数。实例方法使用当前接收者。
+
+**返回值**
+
+`Random`。用宿主熵源播种随机数状态。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+Random::fromEntropy();
+```
+
+**源码**：[source/std/random.lep:22](../../source/std/random.lep#L22)。
+
+**完整示例**：[example/samples/std_math_clock_random.lep](../../example/samples/std_math_clock_random.lep)。
+
+<a id="api-10"></a>
+
+### Random::nextUInt64（11）
+
+**声明**
+
+```lepus
+uint64 nextUInt64();
+```
+
+**行为**
+
+推进生成器并返回 64 位随机值。
+
+**参数**
+
+无显式参数。实例方法使用当前接收者。
+
+**返回值**
+
+`uint64`。推进生成器并返回 64 位随机值。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+obj.nextUInt64();
+```
+
+**源码**：[source/std/random.lep:23](../../source/std/random.lep#L23)。
+
+**完整示例**：[example/samples/std_math_clock_random.lep](../../example/samples/std_math_clock_random.lep)。
+
+<a id="api-11"></a>
+
+### Random::nextInt（12）
+
+**声明**
+
+```lepus
+int64 nextInt(int64 minimum, int64 maximum);
+```
+
+**行为**
+
+返回 [minimum,maximum) 内的随机整数。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `minimum` | `int64 minimum` | 包含的下界 | 无 |
+| `maximum` | `int64 maximum` | 不包含的上界 | 无 |
+
+**返回值**
+
+`int64`。返回 [minimum,maximum) 内的随机整数。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+obj.nextInt(minimum, maximum);
+```
+
+**源码**：[source/std/random.lep:24](../../source/std/random.lep#L24)。
+
+**完整示例**：[example/samples/std_math_clock_random.lep](../../example/samples/std_math_clock_random.lep)。
+
+<a id="api-12"></a>
+
+### Random::nextFloat64（13）
+
+**声明**
+
+```lepus
+float64 nextFloat64();
+```
+
+**行为**
+
+返回 [0,1) 内的随机浮点数。
+
+**参数**
+
+无显式参数。实例方法使用当前接收者。
+
+**返回值**
+
+`float64`。返回 [0,1) 内的随机浮点数。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+obj.nextFloat64();
+```
+
+**源码**：[source/std/random.lep:25](../../source/std/random.lep#L25)。
+
+**完整示例**：[example/samples/std_math_clock_random.lep](../../example/samples/std_math_clock_random.lep)。
+
+<a id="api-13"></a>
+
+### Random::nextRange（14）
+
+**声明**
+
+```lepus
+float64 nextRange(float64 minimum, float64 maximum);
+```
+
+**行为**
+
+返回 [minimum,maximum) 内的随机浮点数。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `minimum` | `float64 minimum` | 包含的下界 | 无 |
+| `maximum` | `float64 maximum` | 不包含的上界 | 无 |
+
+**返回值**
+
+`float64`。返回 [minimum,maximum) 内的随机浮点数。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+obj.nextRange(minimum, maximum);
+```
+
+**源码**：[source/std/random.lep:26](../../source/std/random.lep#L26)。
+
+**完整示例**：[example/samples/std_math_clock_random.lep](../../example/samples/std_math_clock_random.lep)。
+
+<a id="api-14"></a>
+
+### Random::nextBool（15）
+
+**声明**
+
+```lepus
+bool nextBool();
+```
+
+**行为**
+
+推进生成器并返回随机布尔值。
+
+**参数**
+
+无显式参数。实例方法使用当前接收者。
+
+**返回值**
+
+`bool`。推进生成器并返回随机布尔值。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+obj.nextBool();
+```
+
+**源码**：[source/std/random.lep:27](../../source/std/random.lep#L27)。
+
+**完整示例**：[example/samples/std_math_clock_random.lep](../../example/samples/std_math_clock_random.lep)。

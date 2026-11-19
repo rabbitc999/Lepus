@@ -1,0 +1,58 @@
+# Custom error propagation and if expressions
+
+<!-- LANGUAGE NAVIGATION -->
+**English** · [简体中文](../27-error-propagation-if.md)
+<!-- END LANGUAGE NAVIGATION -->
+
+## Conditional expressions
+
+Use `if` in initializers, assignments, arguments, returns and nested expressions. A simple branch contains one expression without a semicolon. A statement branch produces its result using `yield value;`.
+
+`else if` is equivalent to `elif` and can be mixed with it. Statements and value expressions share branch selection and short-circuit condition evaluation. Parentheses around the condition are optional: `if ready { 1 }` equals `if (ready) { 1 }`. Braces remain required, and a value expression still needs a final else.
+
+```lepus
+int32 value;
+value = if (ready) { 1 } elif (cached) { 2 } else {
+    int32 fallback = 3;
+    yield fallback;
+};
+```
+
+Conditions are tested in order. Once a branch matches, later conditions and other branches are not evaluated. Value contexts require an else branch and a result on every normal exit. A statement such as `{ value; }` discards its value. Statement branches require an explicit `yield value;`.
+
+Expected types flow from the surrounding initialization, assignment, parameter or return type. Unconstrained integer literals remain int64. Incompatible branches are rejected; no implicit Any boxing is introduced.
+
+`yield value;` exits the nearest result-receiving block, if, match or loop expression, crossing intervening loops that do not receive a value. `yield (a, b);` produces one tuple. Nested expressions used in initializers, assignments, arguments or returns still receive their own value exits. Plain break and continue retain their loop meaning. Return exits the current function. Results are saved before branch cleanup; references to expired branch locals are rejected.
+
+## Custom propagation
+
+The automatically imported std::core module defines TryBranch<T,R>, Try<T,R>, TryMove<T,R> and FromResidual<F,R>. The source declares its unique output T and residual R. The enclosing return type F must provide a suitable static fromResidual method. An exact residual match takes priority; a concrete implementation may also convert to an interface. Equally applicable conversion receivers are ambiguous, and arbitrary conversion chains are not searched. Static receivers are checked at compile time. A source interface value or reference can dynamically dispatch its splitting method.
+
+Standard-library failures return `Result<T, Error>` while retaining the concrete error inside the owned interface value. If IoError implements Error, `?` can propagate a custom `Result<T, IoError>` into `Result<U, Error>`, including conversion of the standard error residual wrapper. An Option source still yields its concrete success value, which can be placed into `Option<Interface>`; None propagates as the destination Option's None. Custom Try, TryMove and FromResidual protocols also accept legal concrete-to-interface residual conversions.
+
+Interface types can be generic arguments and owned payloads. `Fail(IoError error)` checks the dynamic type and binds the concrete error; `Fail(_)` covers remaining errors without binding, and `Fail(_ error)` retains an interface binding. Repeated outer enum tags with distinct payload patterns are tried in source order. Open interfaces require a fallback. See the [complete multi-tag example](../../example/samples/interface_payload_match.lep).
+
+Single interface payloads also support `Fail::IoError(error)`, or `IoError(error)` when the tag is unique and there is no variant-name collision. Multiple payloads retain `Tag(Type a, Type b, ordinary)`; ordinary payloads may bind directly without a type annotation. These forms share type compatibility, duplicate detection, source ordering and exhaustiveness checks.
+
+A named value uses the read-only branch method. Explicit `move value?` uses intoBranch. Owned temporaries prefer the move protocol and may fall back to the read protocol. The source is evaluated once. Propagation performs normal cleanup and exits the current function or lambda.
+
+Result<T,E> uses ErrorResidual<E>; Option<T> uses NoneResidual. Different success types can share an error exit without confusing errors with absence. Custom sources can produce ErrorResidual<E> to propagate into a standard Result; custom return types can accept the same residual to receive standard errors. See the [custom propagation example](../../example/samples/try_custom.lep).
+
+## Error adapters
+
+- `result.mapErr<F>(mapper)` maps only Fail values.
+- `option.okOr<E>(error)` constructs an error for None; arguments are evaluated normally.
+- `option.okOrElse<E>(factory)` calls the error factory only for None.
+- `result.ok()` explicitly discards error information.
+
+The propagation operator works in conditional branches and still exits the enclosing function. See the [conditional expressions](../../example/samples/if_expression.lep) and [error adapters](../../example/samples/error_adapters.lep) samples, which `sh check.sh` runs on both runtime.
+
+## Migration and tooling
+
+Take a conditional value with `if (condition) { a } else { b }`; it evaluates only the selected branch. User-defined functions with those names remain ordinary functions.
+
+The LSP infers conditional and propagation results for let hover and member completion. Hover over ? to inspect source, output, residual and the enclosing return type.
+
+Interactive terminal output is streamed before the pause prompt. std::core::pause flushes stdout and stderr before waiting; non-interactive input never waits for Enter. Pipeline output retains the host's buffered collection behavior.
+
+`unwrap()` and `expect()` copy their success payload. Calls are rejected at compile time when that payload contains a `#NonCopyable opcode`. `Option<T>.take()` and `Result<T,E>.take()` consume the receiver and move its success payload; `Result<T,E>.takeError()` consumes the receiver and moves its error payload. A mismatched variant panics. Use `take()` to transfer FileStream or File ownership. String and array values retain independent value semantics.

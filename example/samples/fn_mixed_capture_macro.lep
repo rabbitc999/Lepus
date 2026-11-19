@@ -1,0 +1,12 @@
+$macro Snapshot(source) -> {
+    fn<T> [copy source](T value) { source }
+}
+
+void main()
+{
+    int64 captured = 42;
+    let snapshot = $Snapshot(captured);
+    captured = 100;
+    assert(snapshot(0) == 42);
+    println("macro capture list OK");
+}

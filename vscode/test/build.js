@@ -1,0 +1,161 @@
+'use strict';
+
+/** 构建命令集成回归：模拟编辑器 API，使用真实编译器验收 exe、保存、右键与失败诊断。 */
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const os = require('node:os');
+const { spawnSync } = require('node:child_process');
+const { buildArguments, registerBuild } = require('../src/build');
+const { variantManifest } = require('../src/llvmConfiguration');
+
+/** 执行真实构建并核对原生产物及各失败分支。 */
+async function main() {
+  const root = path.resolve(__dirname, '../..');
+  const compiler = path.resolve(process.env.LEPUS_BIN || path.join(root, process.platform === 'win32' ? 'Lepus.exe' : 'lepus'));
+  const directory = fs.mkdtempSync(path.join(require('./projectTemp').root, 'lepus build space '));
+  const buildInfo = spawnSync(compiler, ['--build-info'], { encoding: 'utf8', windowsHide: true });
+  assert.equal(buildInfo.status, 0, buildInfo.stderr);
+  const extensionPath = path.join(directory, 'extension');
+  fs.mkdirSync(extensionPath);
+  fs.mkdirSync(path.join(extensionPath, 'bin'));
+  fs.writeFileSync(path.join(extensionPath, 'bin/lepus-build-info.json'), buildInfo.stdout);
+  const manifest = JSON.parse(fs.readFileSync(path.join(root, 'vscode/package.json'), 'utf8'));
+  fs.writeFileSync(path.join(extensionPath, 'package.json'),
+    JSON.stringify(variantManifest(manifest, JSON.parse(buildInfo.stdout).llvm)));
+  const source = path.join(directory, 'hello & 中文.lep');
+  fs.writeFileSync(source, 'void main() { println("build {}", 42); }\n');
+  const commands = new Map(); const errors = []; const messages = []; const logs = [];
+  let saved = 0; let cancel = false;
+  const uri = (fsPath) => ({ scheme: 'file', fsPath });
+  const document = { uri: uri(source), isDirty: true, async save() { ++saved; this.isDirty = false; return true; } };
+  const settings = { 'build.outputDirectory': 'output & space', 'build.llvmPath': process.env.LEPUS_LLVM_CLANG || (process.platform === 'win32'
+    ? path.join(root, 'build/dependencies/llvm/toolchain/bin/clang.exe') : ''), 'build.checked': true };
+  const disposable = { dispose() {} };
+  const context = { extensionPath, subscriptions: [] };
+  const vscode = {
+    Uri: { file: uri }, ProgressLocation: { Notification: 1 },
+    commands: { registerCommand(name, callback) { commands.set(name, callback); return disposable; }, async executeCommand() {} },
+    window: {
+      activeTextEditor: { document },
+      createOutputChannel: () => ({ ...disposable, append: (s) => logs.push(s), appendLine: (s) => logs.push(s), show() {} }),
+      async showInformationMessage(s) { messages.push(s); }, async showWarningMessage(s) { messages.push(s); },
+      async showErrorMessage(s) { errors.push(s); },
+      async showQuickPick(choices) { return cancel ? undefined : choices[1]; },
+      async withProgress(_options, task) { return task(); },
+    },
+    workspace: { isTrusted: true, textDocuments: [document],
+      getConfiguration: () => ({ get: (key, fallback) => settings[key] ?? fallback }) },
+  };
+  try {
+    registerBuild(vscode, context, { readConfig: () => ({ lepusPath: compiler }) });
+    assert.equal(commands.size, 2);
+    assert.equal(commands.has('lepus.buildSvmb'), false);
+    assert.throws(() => buildArguments('svmb', source, 'prefix'), /未知构建格式/);
+    assert.deepEqual(buildArguments('exe', source, 'prefix', { llvmPath: 'clang space', checked: true }), ['build', source, '--out', 'prefix', '--llvm', 'clang space', '--checked']);
+    assert.deepEqual(buildArguments('exe', source, 'prefix', { checked: false }), ['build', source, '--out', 'prefix', '--unchecked']);
+    await commands.get('lepus.build')();
+    assert.deepEqual(errors, [], logs.join('')); assert.equal(saved, 1);
+    const prefix = path.join(directory, settings['build.outputDirectory'], 'hello & 中文');
+    assert.ok(fs.statSync(prefix + '.exe').size > 0);
+    let result;
+    if (process.platform === 'win32') {
+      // 显式右键目标应优先于当前不相关的编辑器。
+      vscode.window.activeTextEditor = null;
+      await commands.get('lepus.buildExe')(uri(source));
+      assert.deepEqual(errors, []);
+      assert.ok(fs.statSync(prefix + '.exe').size > 0);
+      result = spawnSync(prefix + '.exe', [], { cwd: directory, encoding: 'utf8' });
+      assert.equal(result.status, 0, result.stderr); assert.equal(result.stdout.replace(/\r\n/g, '\n'), 'build 42\n');
+    }
+    const configuredOutput = settings['build.outputDirectory'];
+    settings['build.outputDirectory'] = '';
+    await commands.get('lepus.build')(uri(source));
+    assert.deepEqual(errors, []);
+    const adjacent = path.join(directory, 'hello & 中文') + (process.platform === 'win32' ? '.exe' : '');
+    assert.ok(fs.statSync(adjacent).size > 0);
+    assert.equal(fs.existsSync(path.join(directory, '.lepus')), false);
+    assert.equal(fs.existsSync(path.join(directory, 'hello & 中文.ll')), false);
+    settings['build.outputDirectory'] = configuredOutput;
+    const successes = messages.filter((s) => s.includes('构建完成')).length;
+    fs.writeFileSync(source, 'void main() { missing_symbol(); }\n');
+    await commands.get('lepus.buildExe')(uri(source));
+    assert.equal(errors.length, 1);
+    assert.equal(messages.filter((s) => s.includes('构建完成')).length, successes);
+    // append 接收任意管道分块，不能在块间插入换行拆开诊断中的标识符。
+    assert.ok(logs.join('').includes('missing_symbol'), logs.join(''));
+    const count = logs.length;
+    vscode.workspace.isTrusted = false;
+    await commands.get('lepus.buildExe')(uri(source));
+    assert.equal(logs.length, count);
+    vscode.workspace.isTrusted = true;
+    await commands.get('lepus.buildExe')({ scheme: 'untitled', fsPath: source });
+    assert.equal(errors.length, 2);
+    // 英语编辑器使用英文界面与编译器语言，不翻译源码中的文件名和值。
+    vscode.env = { language: 'en' }; cancel = false;
+    fs.writeFileSync(source, 'void main() { println("build {}", 42); }\n');
+    registerBuild(vscode, context, { readConfig: () => ({ lepusPath: compiler }) });
+    await commands.get('lepus.buildExe')(uri(source));
+    assert.equal(errors.length, 2);
+    assert.ok(messages.some((s) => s.includes('Build completed')));
+    // 通过真实 LSP 解析清单；构建按钮先保存脏配置，并核对交叉对象／LLVM IR 的实际后缀。
+    const { LspClient } = require('../src/lspClient');
+    const { pathToFileURL } = require('node:url');
+    const client = new LspClient(compiler, ['lsp'], { cwd: directory });
+    const manifestPath = path.join(directory, 'lepus.toml');
+    let configSaved = 0;
+    const manifest = { uri: uri(manifestPath), isDirty: true,
+      text: '[build]\ntarget="linux-arm64"\noutput="object"\n',
+      async save() { ++configSaved; fs.writeFileSync(manifestPath, this.text); this.isDirty = false; return true; } };
+    fs.writeFileSync(manifestPath, '');
+    vscode.workspace.textDocuments.push(manifest);
+    if (JSON.parse(fs.readFileSync(path.join(context.extensionPath, 'bin/lepus-build-info.json'), 'utf8')).llvm === 'static')
+      settings['build.llvmPath'] = '';
+    try {
+      await client.start(); await client.initialize();
+      registerBuild(vscode, context, { readConfig: () => ({ lepusPath: compiler }),
+        projectInfo: target => client.request('lepus/projectInfo', { uri: pathToFileURL(target.fsPath).toString() }) });
+      await commands.get('lepus.build')(uri(source));
+      assert.equal(errors.length, 2, errors.join('\n')); assert.equal(configSaved, 1);
+      const object = fs.readFileSync(prefix + '.o');
+      assert.equal(object.subarray(0, 4).toString('hex'), '7f454c46'); assert.equal(object.readUInt16LE(18), 183);
+      await commands.get('lepus.buildExe')(uri(source));
+      assert.equal(errors.length, 3); assert.match(errors[2], /object, assembly or LLVM IR/);
+      manifest.text = '[build]\ntarget="linux-arm64"\noutput="llvm"\n'; manifest.isDirty = true;
+      await commands.get('lepus.build')(uri(source));
+      assert.equal(errors.length, 3, errors.join('\n')); assert.equal(configSaved, 2);
+      assert.ok(fs.readFileSync(prefix + '.ll', 'utf8').includes('aarch64-unknown-linux-gnu'));
+      manifest.text = '[build]\ntarget="linux-arm64"\noutput="assembly"\n'; manifest.isDirty = true;
+      await commands.get('lepus.build')(uri(source));
+      assert.equal(errors.length, 3, errors.join('\n')); assert.equal(configSaved, 3);
+      const assembly = fs.readFileSync(prefix + '.s', 'utf8');
+      assert.ok(assembly.includes('.text') && !assembly.includes('target triple ='));
+
+      const targets = [
+        ['linux-x86', 1, 3], ['linux-arm32', 1, 40],
+        ['linux-riscv32', 1, 243], ['linux-riscv64', 2, 243],
+        ['linux-mipsel', 1, 8], ['linux-mips64el', 2, 8],
+      ];
+      for (const [target, elfClass, machine] of targets) {
+        manifest.text = '[build]\ntarget="' + target + '"\noutput="object"\n';
+        manifest.isDirty = true;
+        fs.unlinkSync(prefix + '.o');
+        await commands.get('lepus.build')(uri(source));
+        assert.equal(errors.length, 3, errors.join('\n'));
+        const header = fs.readFileSync(prefix + '.o');
+        assert.equal(header.subarray(0, 4).toString('hex'), '7f454c46', target);
+        assert.equal(header[4], elfClass, target);
+        assert.equal(header[5], 1, target);
+        assert.equal(header.readUInt16LE(18), machine, target);
+      }
+      assert.equal(configSaved, 3 + targets.length);
+
+    } finally { await client.stop(); }
+    console.log('VS Code 构建：原生产物、配置保存、七种 Linux 目标对象、LLVM IR、错误输出模式及既有交互通过');
+  } finally {
+    for (const item of context.subscriptions) item.dispose();
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+}
+
+main().catch((error) => { console.error(error); process.exitCode = 1; });

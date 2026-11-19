@@ -1,0 +1,4 @@
+$replace BAD(...values) $for (v in values) {
+    println("{}", v);
+}
+void main() { $BAD(1); }

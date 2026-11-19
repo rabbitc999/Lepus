@@ -1,0 +1,1 @@
+lepus: example/samples-error/macro_break_outside_loop.lep 第 8 行第 5 列：$break 只能在宏循环内使用

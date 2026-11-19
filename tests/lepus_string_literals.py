@@ -1,0 +1,51 @@
+"""验证字面量数据合并、UTF-8 字节长度与 VM 字符串副本独立性。"""
+from compiler_path import compiler_path
+import argparse
+import os
+import re
+import shutil
+from pathlib import Path
+import subprocess
+from project_temp import tempfile
+ROOT = Path(__file__).resolve().parents[1]
+
+def main():
+    """运行独立 VM 编译器并检查重复字面量只占用一份生成期数据。"""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--lepus', type=Path, default=compiler_path())
+    compiler = parser.parse_args().lepus.resolve()
+    if os.name == 'nt' and (not compiler.suffix) and compiler.with_suffix('.exe').is_file():
+        compiler = compiler.with_suffix('.exe')
+    with tempfile.TemporaryDirectory(prefix='string-literals-', dir=ROOT / 'build') as temporary:
+        work = Path(temporary)
+        source = ROOT / 'example/samples/string_literal_pool.lep'
+        expected = (ROOT / 'example/expected/string_literal_pool.txt').read_text(encoding='utf-8')
+        tools = work / 'tools'
+        tools.mkdir()
+        isolated_compiler = tools / compiler.name
+        shutil.copy2(compiler, isolated_compiler)
+        shadow = work / 'lepus'
+        (shadow / 'source/ircode').mkdir(parents=True)
+        (shadow / 'source/ircode/native_text.cpp').write_text('#error unexpected_external_runtime\n', encoding='utf-8')
+        for mode in ('run',):
+            target = work / (mode + '')
+            runner = isolated_compiler
+            env = dict(os.environ)
+            env.setdefault('LEPUS_LLVM_CLANG', str(ROOT / 'build/dependencies/llvm/toolchain/bin/clang.exe') if os.name == 'nt' else 'clang')
+            result = subprocess.run([str(runner), mode, str(source), '--out', str(target)], cwd=work, env=env, capture_output=True, text=True, encoding='utf-8', timeout=300)
+            assert result.returncode == 0, (mode, result.stdout, result.stderr)
+            assert result.returncode == 0 and result.stdout == expected and (not result.stderr), (mode, result.stdout, result.stderr)
+            if mode == 'run':
+                llvm = target.with_suffix('.ll').read_text(encoding='utf-8')
+                image = re.search(r'^@lepus_data_image = .*?c"(.*)"$', llvm, re.M)
+                assert image, 'LLVM 模块缺少内嵌初始数据'
+                data = bytes(int(byte, 16) for byte in re.findall(r'\\([0-9A-F]{2})', image[1]))
+                assert data.count('literal-pool-data-你好'.encode('utf-8')) == 1, '重复字面量未合并'
+                assert not target.with_suffix('.data.bin').exists()
+        for index, statement in enumerate(('"hello"[0] = \'H\';', '"hello"[0]++;', 'char mut& byte = &"hello"[0];')):
+            invalid = work / f'readonly-{index}.lep'
+            invalid.write_text('void main() { ' + statement + ' }\n', encoding='utf-8')
+            result = subprocess.run([str(compiler), '--check', str(invalid)], cwd=ROOT, capture_output=True, text=True, encoding='utf-8', timeout=120)
+            assert result.returncode != 0 and ('只读' in result.stderr or 'const&' in result.stderr), result.stderr
+if __name__ == '__main__':
+    main()

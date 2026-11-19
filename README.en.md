@@ -1,0 +1,234 @@
+# The Lepus Language
+
+<!-- LANGUAGE NAVIGATION -->
+**English** · [简体中文](README.md)
+<!-- END LANGUAGE NAVIGATION -->
+
+Lepus is a statically typed language that compiles to native code. Assignment, argument passing and return copy values by default; sharing requires an explicit reference (`T const&` read-only, `T mut&` writable) or a move, and the language has no pointers or address arithmetic. There is no GC: resources are released deterministically when they leave scope.
+
+Name, type, generic, borrow and lifetime checks all run at compile time, and hygienic macros expand during semantic analysis. Any retains concrete type information; generics and inheritance match on concrete types, known calls may be devirtualized or inlined, and copies may be removed when behavior is preserved.
+
+The standard library provides containers, iterators, JSON/TOML, regex, paths and processes, networking, SQL, linear algebra, concurrency and more. See [Standard library overview](doc/en/07-stdlib-overview.md).
+
+## Name and capability references
+
+The five letters in Lepus each name a language feature (C and L are capitalized):
+
+| Letter | Meaning | Language feature |
+| --- | --- | --- |
+| **C** | **Copy** | Independent observable values, explicit references and moves; copies may be removed when behavior is preserved |
+| **h** | **Hygienic** | Hygienic names and parameter categories with defined evaluation rules |
+| **a** | **Any** | Any retains concrete type information and follows ownership and provenance restrictions |
+| **L** | **Lifetime** | Static source and lifetime checks; unsafe and foreign-code preconditions remain separate |
+| **i** | **Interface** | Generic behavior, inheritance and concrete-type matching; known calls may be devirtualized or inlined |
+
+See [naming and related capabilities](doc/en/37-name-freeze.md) for references and verification entry points.
+
+## Compilation
+
+Module loading and source mapping precede the generated parser. Hygienic AST macros expand during semantic analysis. After name, type, generic and borrow checks, the C++ backend generates LLVM IR directly from the checked AST; LLVM optimizes it and generates native code. Normal run and native build paths skip quadruple generation, serialization and assembly.
+
+![Lepus compilation: module loading, parsing, semantic macro expansion, borrow checks, checked AST and LLVM Build](doc/images/lepus-compilation-en.png)
+
+## Release build
+
+Run `./Lepus.exe build input.lep --out build/program --checked` to lower the semantically checked AST directly to LLVM code, generate machine code and link a native artifact. The static variant embeds LLVM and LLD; the external variant uses `library/llvm/` or the clang path passed through `--llvm`. Use `--emit-llvm` to export only the LLVM module.
+
+![Lepus release build: checked AST, LLVM IR, built-in or external LLVM, linking and delivery](doc/images/lepus-aot-en.png)
+
+The generated application needs no LLVM DLL. Ship application-specific C ABI dynamic libraries when required. See [LLVM build](doc/en/38-build.md) and the Chinese book's [release build chapter](doc/book/en/27-aot-export.md) for the supported scope and steps.
+
+## Execution
+
+`run` compiles and executes checked native machine code. `build` exports unchecked native products by default. The native runtime provides shared memory, ownership, host callbacks, and thread services.
+
+## Documentation
+
+> This is the English edition. The Chinese edition is maintained first and takes precedence where the two differ. See [中文 README](README.md).
+
+The [library API reference](doc/library/README.md) (Chinese) covers the module list with signatures, overloads, parameters, return values, error contracts and runnable examples.
+
+| Document | Audience | What it covers |
+| --- | --- | --- |
+| [Documentation index](doc/en/README.md) | Everyone | Jump to any of the documents below by "what do you want to do" |
+| [01 Quickstart](doc/en/01-quickstart.md) | First-time users | Install, first program, command cheat-sheet |
+| [02 Language tour](doc/en/02-language-tour.md) | Experienced developers | 14 runnable snippets walking through what Lepus looks like |
+| [03 Core concepts](doc/en/03-core-concepts.md) | Users going deeper | Value semantics, non-null references, resource management without a GC |
+| [04 Language reference](doc/en/04-language-reference.md) | Day-to-day writers | Syntax, semantics and common errors by topic |
+| [05 Delivery security](doc/en/05-delivery-security.md) | Teams shipping outward | Four delivery forms, the four steps, reverse-engineering cost, boundary statement |
+| [06 Cross-platform deployment](doc/en/06-deployment.md) | People doing deployment | Source execution and bytecode deployment, desktop / embedded Linux, resources and limits |
+| [07 Standard library overview](doc/en/07-stdlib-overview.md) | Anyone asking "what can it do" | standard-library modules by capability |
+| [08 Host integration and C ABI](doc/en/08-host-integration.md) | Integrators | `abi` blocks, host glue bindings, type mapping, nullable references |
+| [09 Toolchain](doc/en/09-toolchain.md) | Daily `lepus` users | Scenario commands, options, `lepus.toml`, diagnostics, debugging |
+| [10 Roadmap](doc/en/10-roadmap.md) | Contributors, long-term users | Short/mid/long-term goals and "things we explicitly will not do" |
+
+Companion resources:
+
+- [`example/samples/`](example/samples/) — runnable formal samples; expected stdout in [`example/expected/`](example/expected/).
+- [`example/samples-error/`](example/samples-error/) — samples expected to fail; diagnostics in [`example/expected-error/`](example/expected-error/).
+- [`doc/examples/`](doc/examples/) — examples that need a companion project layout (ABI, SQLite).
+- [Full grammar reference (EBNF)](doc/14-grammar-ebnf.md) — the authoritative form of the grammar.
+
+The [English book](doc/book/en/README.md) has the technical chapters and appendices without the Chinese literary extras.
+
+## Build
+
+From the repository root:
+
+```sh
+sh gen.sh          # generate the parser first; requires HareParse
+make               # build lepus and build/lepus-frontend/libparser.a
+./lepus example/samples/hello.lep
+sh check.sh        # run the passing and the failing samples
+```
+
+After cloning, run `sh gen.sh` with HareParse available, then `make`. Parser sources
+(`lepus_parser.cpp` / `lepus_parser.hpp` / `lepus_parser_user.h` / `lepus_main.cpp`) are
+generated locally and are not committed to the repository.
+
+Regenerate for the initial build and after changing these source files; commit the sources,
+not the generated parser files:
+
+```sh
+sh gen.sh          # regenerate the front end from lepus.gram with IELR (needs the [HareParse](https://github.com/rabbitc999/HareParse) grammar generator)
+```
+
+- `source/lepus.gram` / `source/lepus_token.gram` (the grammar)
+- `source/lepus_semantics.cpp` / `source/semantics/*.cpp` (expanded into `lepus_parser.cpp` by `%epilogue include`)
+- `source/lepus_driver.cpp` (expanded into `lepus_main.cpp` by `%main include`)
+
+> Forgetting `gen.sh` is the easiest trap to fall into: `lepus_main.cpp` is a **generated copy** of
+> `source/lepus_driver.cpp`, and `make` alone does not regenerate it — you will see "I changed it but
+> nothing happened".
+
+`gen.sh` needs a HareParse grammar generator. The simplest option is to drop it into the
+repository root as `./HareParse[.exe]`; it also works if it stays in a neighboring HareParse
+checkout (`gen.sh` looks for `../HareParse/build/bin/` automatically).
+
+Generated parser sources, headers and reports are in `source/`. Object files and the parser archive are in `build/lepus-frontend/`; the repository root stays clear.
+
+SQLite and miniz are downloaded at build time at pinned versions, with no copies in the source tree. See [build dependencies](doc/en/42-build-dependencies.md).
+
+## Quick usage
+
+```sh
+./lepus run  example/samples/hello.lep        # checked native compilation (default)
+./lepus new  hello-lepus                       # create a new application project
+```
+
+`lepus` is the single toolchain entry point: front end, both C/C++ export tiers, project generation and cleanup are all in the same program. See [Toolchain](doc/en/09-toolchain.md) for the remaining subcommands and `--mode`.
+
+### Debugging
+
+VS Code uses GDB/MI to debug a native program with DWARF source locations and variables. It supports source breakpoints, continue and step in/over/out, plus stack frames, parameters, locals and expressions. Development debugging retains symbols at O0; `--debug-optimized` or VSCode `debugMode: "optimized"` retains DWARF with O3/LTO and inline frames. Normal release builds retain highest optimization. See [build debugging](doc/en/43-native-debugging.md).
+
+### Diagnostics
+
+Syntax errors carry **file, line and column**, echo the offending line, and underline it at the
+error position with a caret run sized to the token:
+
+```text
+syntax error: example/samples-error/syntax_extern_impl_removed.lep line 2 col 8: expected one of identifier / constant(const) / mutable(mut) / new(new) (17 candidates), found impl(impl)
+   |
+ 2 | extern impl Value : Some = binding;
+   |        ~~~~
+```
+
+- The width of the underline is the length of the offending token; tabs are padded to 4-column tab
+  stops and CJK characters count as 2 columns, so the column never drifts.
+- When the error sits in a module loaded by `import`, it points at **the file that actually
+  contains the mistake**, not at the expanded main file.
+- Internal token names are no longer shown: `SEMI` → `semicolon(;)`, `IMPL` → `impl(impl)`,
+  `VARIABLE` → `identifier`.
+- Diagnostic text follows the display language (`LEPUS_LANG=zh|en` or `--lang`); the same error
+  reads:
+
+  ```text
+  期望 标识符 / 常量(const) / 可变(mut) / 新建(new) 等 17 个之一，实际是 实现(impl)
+  expected one of identifier / constant(const) / mutable(mut) / new(new) (17 candidates), found impl(impl)
+  ```
+
+  Semantic errors (type mismatch, undefined symbol, …) are still Chinese for now: those messages
+  are in the compiler core, not in the diagnostic presentation layer.
+
+## Language tour
+
+```c
+struct Item { int64 value; };
+
+void main() {
+    List<Item> items;
+    Item item;
+    item.value = 7;
+    items.push(item);
+    println("{}", items.len());
+
+}
+```
+
+Value semantics is the default: assignment, argument passing and return all copy; share explicitly
+by taking a reference (`T const&` read-only, `T mut&` writable), and there are no pointers and no
+address arithmetic. There is no GC, so resources are released deterministically when they leave
+scope. The standard library ships containers, iterators, JSON/TOML, regex, paths and processes,
+networking, SQL, linear algebra, concurrency and more. See
+[Standard library overview](doc/en/07-stdlib-overview.md).
+
+## Configuration
+
+A project can set the run mode, compiler path and search directories in `lepus.toml`; command-line
+arguments win. Example:
+
+```toml
+[lepus]
+run = "run"
+opt_level = 2
+main = "src/main.lep"
+```
+
+`[lepus] main` names the project's entry file: when you run **without** a source file it is used as
+the entry point (i.e. build the project); when you pass a file explicitly it is a single-file
+compilation and the main file is ignored. Projects generated by `lepus new` carry this line by
+default.
+
+## Linux deployment
+
+Desktop and embedded Linux use the same operating-system host and runtime core. Build the compiler and native dependencies for the target architecture; deploy the generated native application, its dynamic dependencies and resource files.
+The runtime services required by standard modules are linked into the application.
+See [deployment](doc/en/06-deployment.md).
+
+## Repository layout
+
+```text
+lepus/
+├── lepus.gram / lepus_token.gram   grammar: token declarations and productions
+├── gen.sh / Makefile               build and self-checks
+├── source/                         compiler front end, exporter and glue
+│   ├── std/                        standard library modules (.lep)
+│   ├── glue/                       host-side C++ glue
+│   ├── allocator/                  desktop allocator
+│   ├── lsp/ dap/                   editor integration
+│   └── generator/            entry point that generates standalone compiler projects
+├── library/                        reusable C++ libraries and the board host
+│   ├── ircode/                     Quad IR and native shared runtime
+│   ├── bignum/ json/ toml/ console/ lztext/ …
+│   └── …
+├── doc/                            user-facing documentation (00–20, 99)
+│   ├── en/                         English edition (index + 00–11, 13, 99; 15 files)
+│   └── library/                    library API reference (one page per module)
+├── example/                        examples (samples, error samples, calculator, …)
+├── tests/                          Python acceptance scripts
+├── tools/                          helper scripts (icon, overview figure, …)
+└── sql-lepus/                      minimal SQL usage example
+```
+
+## Sources and boundaries
+
+The compiler front end is generated from this repository's `source/lepus.gram` by [HareParse](https://github.com/rabbitc999/HareParse); it emits LLVM IR directly from the checked AST and LLVM builds the native program.
+
+[The HareParse repository](https://github.com/rabbitc999/HareParse) supports generating parsers written in Lepus (the upstream target name is still `--lang chali`) in five modes: **LL(1), SLR(1), LALR(1), LR(1), and IELR(1)**, selected with `--mode ll1`, `slr`, `lalr`, `lr1`, or `ielr`, respectively. The generated `parser.chl` can be run or built with Lepus. This repository's compiler front end uses the C++17 output target with IELR(1), as configured in `gen.sh`.
+
+Type, ownership and runtime rules are defined by the language; supported hosts, export targets and external-library requirements are checked separately. See [current capabilities](doc/en/17-capabilities.md) for implemented features, defaults and platform limits. The current version is in [`VERSION`](VERSION).
+
+## License
+
+Apache License 2.0, see [LICENSE](LICENSE) and [NOTICE](NOTICE).

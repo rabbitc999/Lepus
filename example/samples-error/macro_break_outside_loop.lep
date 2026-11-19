@@ -1,0 +1,9 @@
+$macro misplaced() -> stmt {
+$if (false) {
+    $break;
+}
+}
+
+void main() {
+    $misplaced();
+}

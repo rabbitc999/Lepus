@@ -1,0 +1,1 @@
+lepus: example/samples-error/source_compile_if_runtime.lep 第 3 行第 10 列：编译期条件不能读取运行时变量：enabled

@@ -1,0 +1,13 @@
+import std::audio;
+import std::thread;
+void main(List<String> args) {
+    if (args.len() != 1) { println("pass one audio file path"); return; }
+    if (!open()) { println("audio device unavailable"); return; }
+    int64 sound = load(args[0]);
+    if (sound == 0) { close(); println("audio file could not be loaded"); return; }
+    assert(play(sound));
+    while (isPlaying(sound)) { sleepFor(10); }
+    assert(unload(sound));
+    close();
+    println("playback finished");
+}

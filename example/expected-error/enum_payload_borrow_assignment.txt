@@ -1,0 +1,1 @@
+lepus: example/samples-error/enum_payload_borrow_assignment.lep 第 1 行：[LEP1204] 保存的引用不能超过来源的生命周期

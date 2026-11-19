@@ -1,0 +1,1 @@
+lepus: example/samples-error/generic_type_nested_borrow_escape.lep 第 1 行：[LEP1204] 返回值中的引用不能超过局部来源的生命周期（G<G<int64 mut&>>，所属类型 ，来源 g）

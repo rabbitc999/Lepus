@@ -1,0 +1,33 @@
+import std::iter;
+import std::linear_algebra;
+
+void main() {
+    List<int64> values;
+    values.push(3);
+    values.push(7);
+    assert(values.indexOf(7) == 1);
+    Map<int64, int64> table;
+    table.put(4, 9);
+    assert(table.keyAt(0) == 4 && table.valAt(0) == 9);
+    { let cursor = values.iterMut(); assert(cursor.sizeHint()[0] == 2); }
+    let owned = values.intoIter();
+    assert(owned.count() == 2);
+    List<int64> seed;
+    seed.push(1); seed.push(2); seed.push(3);
+    let pipeline = fromList<int64>(seed).stepBy(2);
+    assert(pipeline.count() == 2);
+    assert(add(3, 4) == 7);
+    assert(sub(7, 4) == 3);
+    assert(mul(3, 4) == 12);
+    assert(div(12, 4) == 3);
+    assert(mod(7, 4) == 3);
+    assert(eq(3, 3) && ne(3, 4));
+    assert(lt(3, 4) && le(3, 3));
+    assert(gt(4, 3) && ge(3, 3));
+    int64 data[2];
+    index(data, 0) = 11;
+    assert(index(data, 0) == 11);
+    LuFactorization factorization;
+    pause();
+    println("camelCase PascalCase");
+}

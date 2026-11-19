@@ -1,0 +1,25 @@
+import std::reflect;
+import std::json;
+int64 constructed=0;int64 dropped=0;
+@Reflect struct User : Drop {
+    String name;int64 id;
+    static User create(String name,int64 id){self.name=name;self.id=id;constructed++;}
+    String describe(){return format("{}:{}",self.name,self.id);}
+    void rename(String name){self.name=name;}
+    void drop(){dropped++;}
+};
+void main(){
+    let document=parse("{\"name\":\"alice\",\"id\":7}").unwrap();
+    String name=document.find("name").unwrap().asString().unwrap();
+    int64 id=document.find("id").unwrap().asInt().unwrap();
+    document.close();
+    {
+        User user=User::create(name,id);
+        assert(constructed==1);
+        String before=user.describe();
+        user.rename("bob");
+        assert(user.describe()=="bob:7");
+        assert(before=="alice:7" && name=="alice");
+    }
+    assert(dropped>0);println("reflection json OK");
+}

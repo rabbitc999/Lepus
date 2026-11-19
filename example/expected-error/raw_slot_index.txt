@@ -1,0 +1,1 @@
+lepus: example/samples-error/raw_slot_index.lep 第 3 行第 5 列：原始存储内部字段不可访问：index

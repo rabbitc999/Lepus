@@ -1,0 +1,1595 @@
+# Chapter 22 Macros
+
+<!-- LANGUAGE NAVIGATION -->
+**English** · [简体中文](../22-预处理与宏.md)
+<!-- END LANGUAGE NAVIGATION -->
+
+This chapter uses braces for macro definitions and control blocks. Use -> category to declare the result, or put the opening brace directly after -> to use the implicit result rules. Enclose conditions, iteration sources and match selectors in parentheses. Put the opening brace on the same line as the header. Template braces delimit expansion. To emit a runtime block, write an ordinary code block inside the template.
+
+Some repetition concerns program structure rather than repeated calls to one function. Macros compose syntax during compilation to reuse that structure, making evaluation count, name origins and type context essential to the interface.
+
+Begin with evaluation counts, then generate expressions, statements, module declarations and members. Finally, iterate over struct fields to generate different operations. Separate the structure produced during compilation from the statements executed at runtime.
+
+## 22.1 Value parameters, references and hygiene
+
+Start with an argument next() that changes state. A macro reusing one result should evaluate once and reuse that value. A macro accepting expression syntax may execute at each placement. Similar-looking calls therefore need an interface that makes the difference explicit.
+
+Unannotated parameters use single evaluation per argument: one next() argument runs once, while two separate arguments each run once. Mutating the parameter copy does not update the caller, and copy elimination must preserve behavior. The next section makes value versus expr visible with a counter.
+
+Explicit &n borrows read-only and mut &n permits caller mutation, subject to static borrowing. Internal temporary names remain hygienic.
+
+
+### Updating a Copy or the Source
+
+<!-- verify-book -->
+```lepus
+$macro Bump(n) -> stmt {
+    n = n + 1;
+}
+$macro RefBump(mut &n:value) -> stmt {
+    n = n + 1;
+}
+void main()
+{
+    int64 x = 7;
+    $Bump(x);
+    println("{}", x);
+    $RefBump(x);
+    println("{}", x);
+}
+```
+
+```text
+7
+8
+```
+
+Bump has no reference annotation. Its assignment changes the parameter copy, so the first output remains 7. This does not produce a copy-mutation warning.
+
+RefBump explicitly borrows a mutable source with mut &n. Its assignment updates x, producing 8. Use &n for a read-only borrow. The compiler may remove an unnecessary copy while preserving these observable results; it cannot turn a private update into a write to x.
+
+## 22.2 Parameter categories control expansion
+
+x:value keeps single evaluation. x:expr accepts expression syntax evaluated where inserted: two placements may execute twice and no placement does not execute it. name:ident, T:type, body:stmt and body:block require their corresponding syntax categories.
+
+Value arguments are evaluated in argument order before expr placements execute in the expanded body. Do not assume expr preserves single evaluation for side effects.
+
+<!-- verify-book -->
+```lepus
+int64 count = 0;
+int64 next() { count += 1; return count; }
+$macro TwiceValue(x: value) -> {
+    x + x
+}
+$macro TwiceExpr(x: expr) -> {
+    x + x
+}
+void main() {
+    int64 value = $TwiceValue(next());
+    println("{} {}", value, count);
+    count = 0;
+    int64 expression = $TwiceExpr(next());
+    println("{} {}", expression, count);
+}
+```
+
+```text
+2 1
+3 2
+```
+
+Each next call increments the global count and returns its new value. TwiceValue evaluates next() once to obtain one, then reuses that value in both additions. Its result is two while count is one, explaining `2 1`.
+
+After resetting count, TwiceExpr places expression syntax at both use sites. Runtime calls return one and two, yielding three with count two. Thus `3 2`. Identical-looking x+x bodies have different evaluation behavior because their categories differ, affecting input reads, state updates and resource acquisition.
+
+
+### Choose categories by evaluation behavior
+
+Decide whether the macro should reuse a computed value or place syntax at a new execution point. Input reads, counter increments and resource acquisition need explicit evaluation counts; ordinary value parameters are usually suitable. Choose expr when the expanded control structure must determine execution placement, and document that execution may be skipped or repeated. Copy costs and effects still follow the argument type's copy rules.
+
+Ident carries a name, type carries type syntax, and stmt and block carry statements or blocks. These categories describe syntax positions. A generic parameter T and a parameter written T:type have different roles. Category matching does not exempt names, types, borrows or ownership from ordinary checking, and an identifier does not grant permission to mutate its object.
+
+Hygiene associates names with their origins. A template's result can coexist with the caller's result without overwriting it. An undeclared temp in the template cannot be repaired by an unrelated caller variable of that name. Reusable macros therefore do not require callers to avoid a hidden list of temporary names. Interfaces should state explicitly when they affect caller objects.
+
+## 22.3 Generic parameters and result context
+
+Macros may declare type parameters. T:#res infers from the statically expected result type, while U:b infers from argument b. Neither runs the argument expression during compilation. Explicit arguments take priority; missing context or conflicting constraints require more type information.
+
+For example, $macro Example<T:#res, U:b>(a, b) combines result and argument information. Its inferred types still must satisfy the body and call-site checks.
+
+<!-- verify-book -->
+```lepus
+$macro Example<T:#res, U:b>(a, b) -> {
+    T left = cast<T>(a);
+    U right = b;
+    yield left + cast<T>(right);
+}
+void main() {
+    int32 result = $Example((int64)3, (int16)4);
+    println("{}", result);
+}
+```
+
+```text
+7
+```
+
+T:#res obtains int32 from result's expected type. U:b obtains int16 from the second argument. Although the first argument is int64, cast<T> converts it for left. Right initially keeps U and is converted to T at the addition.
+
+The sum therefore fits the result context and yields seven. Inference uses static information rather than executing b to discover its type. If context is missing or constraints conflict, supply explicit types or correct the call instead of expecting runtime adaptation.
+
+
+## 22.4 Argument groups and variadic parameters
+
+Fixed parameters describe individual positions. Variadic parameters collect related inputs. First build a list, then annotate whole groups with a syntax category.
+
+<!-- verify-book -->
+```lepus
+$macro vec<T:first>[first,...rest] -> {
+    List<T> result;
+    result.push(first);
+    $for (element in rest) {
+        result.push(element);
+    }
+    yield result;
+}
+
+void main()
+{
+    List<int64> result;
+    result.push(99);
+    List<int64> values = $vec[1, 2, 3];
+    println("{} {} {}", values.len(), values.at(2), result.at(0));
+}
+```
+
+```text
+3 3 99
+```
+
+Vec uses a bracket call group. First provides both the initial item and T's inference source, while rest collects later arguments. Its internal List<T> receives first, and compile-time $for generates a push for each remaining argument. Those pushes execute when the generated program runs. The top-level yield supplies the completed list, and the macro evaluation owns the local scope.
+
+The call produces three entries, and at(2) returns three because indexing starts at zero. The caller's separate result contains 99. Hygiene keeps the macro's result distinct, so the last output remains 99. Compile-time $for differs from runtime for, and this supported repetition does not imply arbitrary pattern matching.
+
+
+
+## 22.5 Explicit Result Categories
+
+An expression computes a value. A module declaration introduces a function or type. The category after the arrow tells the compiler where the expansion belongs.
+
+| Result category | Position | Typical use |
+| --- | --- | --- |
+| -> expr | Expression | Compute or construct a value |
+| -> stmt | Statement in a function | Update an object or print lines |
+| -> item | Module declaration | Generate a function, struct, enum or interface |
+| -> member | Type member | Generate fields or methods |
+
+Parameter and result categories answer different questions: name:ident accepts a name, while -> item produces module declarations.
+
+<!-- verify-book -->
+```lepus
+$macro FUNCTION(name:ident) -> item {
+    int64 name() { return 42; }
+}
+$macro RECORD<T>(name:ident) -> item {
+    struct name { T value; }
+}
+$FUNCTION(answer);
+$RECORD<int64>(Score);
+void main()
+{
+    Score score;
+    score.value = answer();
+    println("{}", score.value);
+}
+```
+
+```text
+42
+```
+
+FUNCTION places its identifier parameter in a function-name position. Its invocation generates an ordinary answer function. Calling answer() at runtime returns 42; it does not invoke the expander.
+
+RECORD has a separate type parameter T. Its invocation supplies Score as the struct name and int64 as the field type. main declares that type, stores the function result and prints the field.
+
+These invocations belong outside main. An item result cannot be used as the right side of an assignment. Duplicate public names still conflict. Names explicitly supplied through ident form the caller-facing interface; template-local helpers retain hygienic identities.
+
+## 22.6 Generating Members Inside a Type
+
+<!-- verify-book -->
+```lepus
+$macro GET(name:ident, field:ident) -> member {
+    int64 name() { return self.field; }
+}
+struct Counter
+{
+    int64 value;
+    $GET(read, value);
+}
+void main()
+{
+    Counter counter;
+    counter.value = 9;
+    println("{}", counter.read());
+}
+```
+
+```text
+9
+```
+
+Read the definition first: name supplies the method name and field supplies the accessed field. self belongs to the generated method's receiver.
+
+Counter declares value, then generates read in the same type body. This is equivalent in intent to an ordinary int64 read() { return self.value; } method. main stores 9 and reads it back through that method.
+
+The return type is fixed to int64. Add a type parameter when supporting other types. Generated methods undergo normal field, return-type and borrow checks, and conflict with hand-written methods of the same name. Interface member generation can introduce method declarations or defaults, but cannot add instance fields.
+
+## 22.7 Categorized Variadic Arguments
+
+<!-- verify-book -->
+```lepus
+int64 calls = 0;
+int64 next() { calls += 1; return calls; }
+$macro SUM(...values:value) -> expr {
+    int64 total = 0;
+    $for (value in values) {
+        total += value + value;
+    }
+    total
+}
+void main()
+{
+    int64 result = $SUM(next(), next());
+    println("{} {}", result, calls);
+    println("{}", $SUM());
+}
+```
+
+```text
+6 2
+0
+```
+
+...values:value collects zero or more value arguments. next increments a counter so that evaluation remains visible.
+
+The first call obtains 1 and 2 in source order. The compile-time loop generates two additions that reuse those values: (1+1)+(2+2)=6, with two actual calls. An empty invocation generates no additions and keeps total at 0.
+
+Changing the category to expr inserts syntax at each use and changes the evaluation contract. Variadic ident, type, stmt and block parameters collect the corresponding fragments. A variadic parameter must end its own group. Empty groups are valid, but the macro must define a useful empty result.
+
+## 22.8 Passing a Pattern and Its Branch
+
+<!-- verify-book -->
+```lepus
+enum Pair
+{
+    Values(int64 first, int64 second),
+    Empty
+}
+$macro SELECT(value:value, p:pattern, body:block) -> expr {
+    match(value)
+    {
+        p => { yield body; }
+        _ => { 0 }
+    }
+}
+void main()
+{
+    int64 x = 100;
+    Pair pair = Values(7, 8);
+    int64 total = $SELECT(pair, Values(x, y), { yield x + y; });
+    println("{} {}", total, x);
+}
+```
+
+```text
+15 100
+```
+
+Pair has a variant with two payloads. SELECT evaluates its value once, inserts p before the branch arrow, and executes body on a match. The wildcard produces 0 otherwise.
+
+Pair::Values(x, y) binds payloads 7 and 8. The accompanying block uses these bindings to produce 15. The outer x remains 100: a pattern-local binding does not update it.
+
+Union patterns such as 1 | 2 and interface-payload patterns such as Fail::IoError(e) use the normal matching rules from Chapters 10 and 17. For interface filtering in multiple payload positions, keep the type annotations inside the variant parentheses.
+
+## 22.9 Reading Field Metadata
+
+Runtime reflection inspects objects. Here, a concrete type supplies field information during compilation.
+
+<!-- verify-book -->
+```lepus
+struct Record
+{
+    int64 score;
+    static int64 shared;
+    String name;
+}
+void main()
+{
+    println("{}", $fields<Record>().count);
+    println("{}", ($fields<Record>())[0].name);
+    println("{}", ($fields<Record>())[1].type.name);
+}
+```
+
+```text
+2
+score
+std::core::String
+```
+
+shared is static and is excluded from instance fields. The count is therefore 2, in source order: score, then name. The three output statements use the count, the first name and the second field's canonical type name.
+
+Metadata is processed during compilation; the program prints generated scalar values. Fields also expose index, id, type and attributes. Types expose nested fields, and annotations expose their names and arguments. Identity values distinguish entities in the current compilation; do not persist them as stable cross-version identifiers.
+
+A metadata collection is not a runtime List, cannot escape into ordinary runtime storage and requires compile-time indices. This interface covers ordinary struct fields; enum and method reflection are separate capabilities.
+
+## 22.10 Generating Operations by Field Type
+
+<!-- verify-book -->
+```lepus
+struct Record
+{
+    int64 first;
+    String name;
+    int64 second;
+}
+$macro SUM_FIELDS<T>(&value:value) -> expr {
+    int64 total = 0;
+    $for (field in $fields<T>()) {
+        $if (field.type.name == "int64") {
+            total += $member(value, field);
+        }
+    }
+    total
+}
+void main()
+{
+    Record record;
+    record.first = 3;
+    record.name = "Ada";
+    record.second = 4;
+    println("{}", $SUM_FIELDS<Record>(record));
+}
+```
+
+```text
+7
+```
+
+Record contains two integers and one string. &value:value explicitly borrows the object read-only.
+
+The macro creates a runtime accumulator. Its compile-time loop visits the three descriptors, and its compile-time condition selects only int64 fields. The name field generates no addition and is not type-checked as an operand of that addition.
+
+$member turns the descriptor into direct field access. This invocation generates operations equivalent to total += value.first; total += value.second;. There is no runtime name-based lookup loop; the additions themselves still execute at runtime.
+
+main initializes 3, Ada and 4, then prints 7. Writing fields requires a mutable reference parameter and writable fields. The descriptor must belong to the object's concrete type; identical spelling in another type does not grant access.
+
+### Chaining Conditions with $elif and $else_if
+
+Use $elif or $else_if within one $if to select among several implementations. The two commands are equivalent, and each takes a compile-time condition. This example generates different JSON field text for String, int64 and bool fields.
+
+<!-- verify-book -->
+```lepus
+struct Record
+{
+    String name;
+    int64 count;
+    bool active;
+}
+$macro JSON_FIELDS<T>(&value:value) -> expr {
+    $compile_assert(($fields<T>()).count > 0, "JSON 生成至少需要一个实例字段");
+    String result = "{";
+    $for (field in $fields<T>()) {
+        $if (field.index > 0) {
+            result = result + ",";
+        }
+        $if (field.type == String) {
+            result = result + "\"" + field.name + "\": \"" + $member(value, field) + "\"";
+        } $else_if (field.type == int64) {
+            result = result + "\"" + field.name + "\": " + $member(value, field).toString();
+        } $elif (field.type == bool) {
+            result = result + "\"" + field.name + "\": " + $member(value, field).toString();
+        } $else {
+            $compile_error("JSON_FIELDS 不支持该字段类型: " + field.type.name);
+        }
+    }
+    result + "}"
+}
+void main()
+{
+    Record record;
+    record.name = "Ada";
+    record.count = 7;
+    record.active = true;
+    println("{}", $JSON_FIELDS<Record>(record));
+}
+```
+
+```text
+{"name": "Ada","count": 7,"active": true}
+```
+
+The first true branch is selected in source order. Later conditions are not evaluated after selection. Unselected branches are not expanded, so their field operations do not enter runtime type checking. The final $else handles types that matched none of the earlier conditions; adding a float64 field produces a compile-time error naming that type.
+
+The int64 branch uses $else_if and the bool branch uses $elif to demonstrate that both spellings can appear in one chain. Either spelling can replace the other. Each branch has its own braces and belongs to the same $if chain. At most one $else is allowed, and it must come last. Neither $elif nor $else_if can stand alone or follow $else.
+
+Field iteration, type selection and diagnostics happen during compilation; the generated string concatenations still execute at runtime. The example uses strings that need no escaping. Complete JSON encoding also handles quotes, backslashes and control characters inside strings.
+
+### Child Fields and Recursive JSON Generation
+
+The single field of JsonType<T> exposes type metadata for T. Records recurse through their fields. List and Set produce arrays, while a Map with String keys produces an object. Element and value types come from typeArguments, so collections can contain records or other collections. Empty collections produce [] or {}.
+
+<!-- verify-book -->
+```lepus
+import std::json;
+
+String jsonText(String value) {
+    String result = "\"";
+    String digits = "0123456789abcdef";
+    int64 start = 0;
+    int64 i = 0;
+    bytes: while (i < value.length()) {
+        int64 byte = match (value.byteAt(i)) {
+            Value(item) => { (int64)item }
+            None => { break bytes; }
+        };
+        if (byte < 32 || byte == 34 || byte == 92) {
+            result += value.slice(start, i);
+            if (byte == 34) { result += "\\\""; }
+            elif (byte == 92) { result += "\\\\"; }
+            else { result += "\\u00" + digits.substring(byte / 16, 1) + digits.substring(byte % 16, 1); }
+            start = i + 1;
+        }
+        i += 1;
+    }
+    return result + value.slice(start, value.length()) + "\"";
+}
+String jsonBool(bool value) { if (value) { return "true"; } return "false"; }
+
+struct JsonType<T> { T item; }
+
+$macro JSON_VALUE(T:type)[value:value] -> expr {
+    String result = "";
+    $for (info in $fields<JsonType<T>>()) {
+        $if (info.type == String) {
+            result = jsonText(value);
+        } $elif (info.type == int64) {
+            result = value.toString();
+        } $elif (info.type == bool) {
+            result = jsonBool(value);
+        } $elif (info.type == List<?> || info.type == Set<?>) {
+            result = "[";
+            int64 i = 0;
+            while (i < value.len()) {
+                if (i > 0) { result += ","; }
+                let item = value.at(i);
+                result += $JSON_VALUE(info.typeArguments[0])[item];
+                i += 1;
+            }
+            result += "]";
+        } $elif (info.type == Map<String, ?>) {
+            result = "{";
+            int64 i = 0;
+            while (i < value.len()) {
+                if (i > 0) { result += ","; }
+                let item = value.valAt(i);
+                result += jsonText(value.keyAt(i)) + ":" + $JSON_VALUE(info.typeArguments[1])[item];
+                i += 1;
+            }
+            result += "}";
+        } $elif (info.type == Map) {
+            $compile_error("JSON Map 的键必须是 String: " + info.type.name);
+        } $else {
+            result = "{";
+            $for (field in info.ids) {
+                $if (field.index > 0) {
+                    result += ",";
+                }
+                result += jsonText(field.name) + ":" + $JSON_VALUE(field.type)[$member(value, field)];
+            }
+            result += "}";
+        }
+    }
+    result
+}
+
+struct Empty {}
+struct Leaf { int64 count; String text; bool enabled; Empty empty; }
+struct Middle<T> { T inner; }
+struct Root {
+    Middle<Leaf> middle;
+    List<int64> items;
+    Set<String> unique;
+    Map<String, List<Leaf>> byName;
+    List<int64> emptyList;
+    Set<int64> emptySet;
+    Map<String, bool> emptyMap;
+}
+Result<T, MessageError> requireValue<T>(Option<T> value, String description) {
+    match (value) {
+        Value(item) => { return Ok(item); }
+        None => {
+            MessageError error = MessageError::from(description);
+            return Fail(error);
+        }
+    }
+}
+Result<bool, Error> verifyJson(String encoded) {
+    let parsed = parse(encoded)?;
+    let items = requireValue(parsed.find("items"), "missing items")?;
+    let names = requireValue(parsed.find("byName"), "missing byName")?;
+    let bucket = requireValue(names.find("b\"ox"), "missing bucket")?;
+    let item = requireValue(items.at(1), "missing item")?;
+    assert(requireValue(item.asInt(), "item must be int")? == 8);
+    let leaf = requireValue(bucket.at(0), "missing leaf")?;
+    let count = requireValue(leaf.find("count"), "missing count")?;
+    assert(requireValue(count.asInt(), "count must be int")? == 42);
+    return Ok(true);
+}
+Result<bool, Error> demonstrateJson() {
+    Root value;
+    value.middle.inner.count = 42;
+    value.middle.inner.text = "a\"\\\n";
+    value.middle.inner.enabled = true;
+    value.items.push(5);
+    value.items.push(8);
+    value.unique.add("only");
+    value.unique.add("only");
+    List<Leaf> bucket;
+    bucket.push(value.middle.inner);
+    value.byName.put("b\"ox", bucket);
+    String encoded = $JSON_VALUE(Root)[value];
+    assert(verifyJson(encoded)?);
+    println("{}", encoded);
+    assert(value.items.len() == 2 && value.unique.len() == 1 && value.byName.len() == 1);
+    return Ok(true);
+}
+void main() {
+    match (demonstrateJson()) {
+        Ok(_) => {}
+        Fail(error) => { println("{}", error.toString()); }
+    }
+}
+```
+
+```text
+{"middle":{"inner":{"count":42,"text":"a\"\\\u000a","enabled":true,"empty":{}}},"items":[5,8],"unique":["only"],"byName":{"b\"ox":[{"count":42,"text":"a\"\\\u000a","enabled":true,"empty":{}}]},"emptyList":[],"emptySet":[],"emptyMap":{}}
+```
+
+This general helper keeps Fail(error): T can itself be MessageError, making the success and error payload types identical. The explicit variant selects failure in that case. Naming the error avoids nested constructors; other error returns can still use a direct payload when the target has a unique best match.
+
+requireValue maps a missing required field to MessageError, and verifyJson uses ? to propagate parsing, missing-field, and type failures. Option and Result carry different residual states, so mapping absence requires an explicit application error. Main matches the final result.
+
+Field names, map keys, and string values share one escaping function for quotes, backslashes, and control bytes. List preserves element order, and Set follows its iteration order. Map keys must be String.
+
+For a single level, write $for (child in field.ids) and use $member($member(value, field), child) to access the child. To dispatch on a generic family, match $if (field.type == Map<String, ?>) and read the value type through field.typeArguments[1], or use $for (arg in field.typeArguments) to visit the concrete types. Use Map as shorthand for Map<?, ?> when only the family matters.
+
+## 22.11 Grouped Iteration and Compile-Time Diagnostics
+
+<!-- verify-book -->
+```lepus
+$macro DOT(...left:value)[...right:value] -> expr {
+    $compile_assert($count(left) == $count(right), "两组长度必须相同");
+    int64 total = 0;
+    $for ((a, b) in (left, right)) {
+        total += a * b;
+    }
+    total
+}
+void main()
+{
+    println("{}", $DOT(2, 3)[4, 5]);
+    println("{}", $DOT()[]);
+}
+```
+
+```text
+23
+0
+```
+
+The definition has two ordered groups: parentheses for left and brackets for right. Invocations preserve both shape and order.
+
+$count returns capture counts. $compile_assert checks equality during expansion. The paired loop generates 2*4 and 3*5, producing 23. Empty lists produce 0. The loop itself requires equal lengths rather than truncating either list.
+
+`$DOT(2, 3)[4]` must fail during compilation. A selected $compile_error("reason") directly rejects unsupported input, such as a field type that a JSON generator cannot encode.
+
+$if requires a compile-time condition, such as metadata or a capture count. An ordinary runtime function cannot decide template structure. $match (x is ident) classifies complete syntax, and $regex (x is "[0-9]+") matches complete source text. Neither is the runtime match statement or a runtime regex library.
+
+## 22.12 Reading Enum Variants and Payloads
+
+Fields describe object data; variants describe an enum's alternatives. Print the declaration structure without creating a Message value.
+
+<!-- verify-book -->
+```lepus
+enum Message
+{
+    Quit,
+    Text(String text),
+    Move(int64 x, int64 y)
+};
+$macro DESCRIBE<T>() -> stmt {
+    $for (variant in $variants<T>()) {
+        println("{}: {}", variant.name, variant.payloads.count);
+        $for (payload in variant.payloads) {
+            println("  {}: {}", payload.name, payload.type.name);
+        }
+    }
+}
+void main()
+{
+    $DESCRIBE<Message>();
+}
+```
+
+```text
+Quit: 0
+Text: 1
+  text: std::core::String
+Move: 2
+  x: int64
+  y: int64
+```
+
+The declaration has three variants. Quit has no payload, Text has one String and Move has two int64 values. Payload names and order come from the declaration.
+
+DESCRIBE obtains descriptors with `$variants<T>()`. The outer compile-time loop emits one output statement for each variant. The inner loop visits that variant's payloads and emits their names and types. Quit has an empty payload collection, so it produces no indented lines.
+
+`payload.type.name` is canonical, hence std::core::String for text. Generic enums substitute concrete arguments before exposing payload types: a T payload in MyBox<int16> has type int16. Descriptors do not read an enum object; use ordinary match to inspect a Message value.
+
+main invokes the macro. Iteration happens during compilation; the generated println statements execute at runtime. Variants and payloads expose name, index and id. Variants additionally expose payloads, and payloads expose type. A payload is not a struct field and cannot be passed to `$member`.
+
+## 22.13 Querying Methods and Interfaces
+
+Method metadata describes declared operations; interface metadata describes inherited contracts.
+
+<!-- verify-book -->
+```lepus
+interface Base
+{
+    int64 read();
+}
+interface Named: Base
+{
+    String label();
+}
+struct Counter: Named
+{
+    int64 read()
+    {
+        return 7;
+    }
+    String label()
+    {
+        return "counter";
+    }
+}
+void main()
+{
+    println("{}", $methods<Counter>().count);
+    println("{}", ($methods<Counter>())[0].name);
+    println("{}", $interfaces<Counter>().count);
+    println("{}", ($interfaces<Counter>())[0].isDirect);
+    println("{}", ($interfaces<Counter>())[1].isDirect);
+}
+```
+
+```text
+2
+read
+2
+1
+0
+```
+
+Base declares read. Named inherits Base and adds label. Counter implements both methods and therefore satisfies Named and its base.
+
+The first two output statements query methods: the count is 2 and the first source method is read. The parameters collection excludes the implicit receiver; each parameter exposes name, type, hasDefault and isVariadic. Methods also expose result, declaringType, isStatic, isConstructor, hasBody and isInherited. Compiler-supplied toString is excluded.
+
+The remaining statements inspect interfaces. Counter explicitly lists Named and inherits Base through it, so the count is 2. Traversal is source-order depth-first, deduplicating repeated bases. Named is direct and Base is inherited. Boolean output is 1 and 0, as elsewhere in this book.
+
+Use these collections in `$for (method in $methods<T>())` or `$for (contract in $interfaces<T>())`. A nested `$for (parameter in method.parameters)` reads parameters. Queries do not create callable machine pointers. Indices must be compile-time nonnegative constants. Collections and descriptors cannot escape into runtime storage; id only distinguishes identities within the current compilation.
+
+### Receivers and associated types
+
+The interface declaring a method and the object receiving a call are separate pieces of information. An associated type likewise distinguishes an interface requirement from an implementation's definition.
+
+<!-- verify-book -->
+```lepus
+interface Source
+{
+    type Item;
+    Item get();
+}
+struct Numbers: Source
+{
+    type Item = int64;
+    Item get() { return 7; }
+}
+void main()
+{
+    println("{} {}", ($interfaces<Numbers>())[0].associatedTypes[0].name,
+        ($interfaces<Numbers>())[0].associatedTypes[0].type.name);
+    println("{}", ($methods<Numbers>())[0].receiverType.name);
+    assert(($interfaces<Numbers>())[0].associatedTypes[0].sourceLine > 0);
+}
+```
+
+```text
+Item int64
+Numbers
+```
+
+Source requires an Item definition and uses it as get's result type. Numbers supplies int64, so get returns an integer.
+
+Main first reads the associated type from Numbers' first implemented interface: name is Item and type.name is int64. An interface requirement without an implementation has hasDefinition set to false. Test it in a compile-time condition before reading type. Associated types also support `$for (item in contract.associatedTypes)`.
+
+The second statement reads get's receiver, producing Numbers. An inherited default method retains the queried receiverType and its original declaringType. Static factories have no caller receiver; check hasReceiver before querying receiverType.
+
+Methods also expose hasMutableParameters, returnsMutableReference, usesUnsafe and hasPropagation. The first pair describes writable references in the signature. The latter pair observes direct unsafe and question-mark propagation syntax in the current body, excluding nested functions and closures. They do not prove an entire call chain free of side effects. Generated code still undergoes ordinary type, borrow and resource checks.
+
+The final assertion confirms that Item retains its declaration line. Descriptors expose sourceFile, sourceLine and sourceColumn for diagnostics; fields, payloads, methods and parameters each have their own location. Generic instances retain template lines, and cross-module queries retain the original module's file. The preview's Metadata declaration button uses this provenance even after name or id folds into an ordinary constant.
+
+## 22.14 Reading a Complete Field Example
+
+[macro_fields.lep](../../../example/reflection/macro_fields.lep) applies these operations to printing, validation and JSON. Read it in four sections:
+
+1. quoteJson and boolText handle scalar encoding. The first escapes quotes, backslashes and control bytes. The second emits JSON true and false instead of numeric boolean formatting.
+2. PRINT_FIELDS generates output statements. VALIDATE_FIELDS generates type-specific nonempty and nonnegative checks.
+3. JSON_FIELDS checks field count and emits keys, punctuation and encoded values. Unsupported types receive a compile-time error.
+4. main prepares a Student and calls the three macros. A JSON parser verifies the encoded result; field access does not depend on runtime reflection.
+
+Start with printing and validation before adding encoding. Add a bool field and inspect which statements are generated.
+
+## 22.15 Keeping Control Targets at Their Source
+
+A break passed to a macro still targets the caller's loop. A loop introduced by the template must not intercept it.
+
+<!-- verify-book -->
+```lepus
+$macro RUN_ONCE(body:block) -> stmt {
+    int64 round = 0;
+    while (round < 1)
+    {
+        round += 1;
+        body;
+    }
+}
+void main()
+{
+    int64 visited = 0;
+    loop
+    {
+        visited += 1;
+        $RUN_ONCE({ break; });
+        visited += 100;
+        break;
+    }
+    println("{}", visited);
+}
+```
+
+```text
+1
+```
+
+RUN_ONCE takes a complete block fragment. Its private round variable controls one while iteration, then the template places body inside the loop. The private binding does not accidentally resolve to a caller variable with the same spelling.
+
+main creates the outer loop and increments visited from 0 to 1. The supplied break belongs to that loop, so the addition of 100 is never executed. The result is 1. Selecting the physically nearest loop after expansion would instead exit the template's while and change the result.
+
+Continue follows the same origin rule. A return or ? in a supplied fragment belongs to the caller's function; yield belongs to the caller's existing value exit. Template caches and value blocks do not intercept them. Loops and functions declared inside the supplied fragment retain their own local boundaries.
+
+A template's ordinary control statements first search its loops or value exits. An explicit `-> stmt` macro may transfer control to the caller when there is no local target. Legacy macros without a result category retain that use. Named exits resolve within their own syntax origin. An explicit `-> expr` template stops at its own boundary: it cannot itself return or propagate errors into the caller, nor escape the expression through break or continue. Returns inside functions declared by that template still belong to those functions.
+
+Explicit caller fragments may leave the caller, but cannot cross a newly generated function and then return to the original function. Exited scopes still execute defer actions and owned-value cleanup. Return and propagation values retain ordinary type, borrowing and move checks. Read the statement category, fragment categories and invocation's exit condition together before examining expansion nesting.
+
+## 22.16 Inspecting Expansions and Diagnosing Errors
+
+In VS Code, use Lepus's macro expansion preview to inspect one level or the complete expansion. A one-level preview may retain nested macro calls; the complete preview expands them further. Source mappings identify definitions and invocations. Preview output is not a stable source export format.
+
+
+A generic directive may have several concrete instances. Each shows its field types and generated methods while retaining the original directive as its source. One-level and complete views can differ after further name, type and macro resolution. Previewing does not execute user code again.
+The summary lists direct effects: result category, introduced template bindings, shared or mutable parameter borrows, and control exits. Full expansion distinguishes caller control from local control using actual targets; one-step previews list unresolved targets separately. Creating a closure does not execute its body, so that body's return is excluded from the current macro's exits. The summary does not analyze effects along an entire call chain. An empty list still requires ordinary signature, type and borrow checks.
+
+Check parameter and result categories first, followed by type inference, descriptor ownership and name origin. The temp example below demonstrates the last issue.
+
+### A Hygiene Error
+
+For a macro diagnostic, distinguish definition and call sites, then inspect categories, type arguments, scope and borrowing. The following hygiene example is rejected because an internal temporary is not a caller-visible name.
+
+<!-- verify-book-error: temp -->
+```lepus
+$macro broken(value) -> {
+    temp.push(value);
+    yield temp;
+}
+
+void main()
+{
+    List<int64> temp;
+    List<int64> values = $broken(1);
+}
+```
+
+```text
+引用了没声明的变量：temp
+```
+
+Broken uses temp without declaring it in the template's scope or receiving its source as a parameter. Main's equally spelled temp belongs to the caller. Hygienic name resolution does not connect those identities automatically.
+
+The example therefore fails during compilation and has no normal runtime output. Repair the interface by explicitly supplying the needed object, or declare a genuine local list inside the macro. A hidden caller variable of the same name is not a repair. Value supplies an element, not a list source.
+
+
+### Counterexample: writing the caller’s matching name
+
+The template writes to total directly. The caller’s matching declaration supplies no binding to it. Pass the target explicitly through a mutable reference parameter such as mut &target. The diagnostic excerpt below uses the compiler’s Chinese language setting.
+
+<!-- verify-book-error: check -->
+```lepus
+$macro ADD(amount:value) -> stmt {
+    total = total + amount;
+
+}
+
+void main() {
+    int64 total = 7;
+    $ADD(2);
+}
+```
+
+```text
+给没声明的变量赋值：total
+```
+
+### Expansion and execution occur at different stages
+
+Expansion composes program structure during compilation; next in the examples still executes at runtime. Knowing an expression's static type does not execute that expression. T:#res obtains information from an expected type supplied by contexts such as assignment or return; it does not observe a runtime result. Supply explicit types when context is insufficient rather than depending on incidental literal inference.
+
+Expanded code undergoes ordinary semantic checking and then reaches the LLVM native backend. Macros cannot remove cleanup obligations, bypass borrowing or make an invalid expression executable. Performance depends on generated operations and LLVM optimization; fewer template lines do not establish less runtime work. For diagnostics, first express the intended operation as ordinary code, verify types and resource relationships, then inspect whether the macro preserves them.
+
+
+## 22.17 Single-Line and Parameterless Macros
+
+Use $replace for a one-line template. It shares hygienic AST substitution.
+
+<!-- verify-book -->
+```lepus
+$replace ADD(a, b) a + b
+$replace LIMIT 100
+void main()
+{
+    println("{}", $ADD(2, 3) * 10);
+    println("{}", $LIMIT + 1);
+}
+```
+
+```text
+50
+101
+```
+
+ADD is invoked with parentheses. Its complete addition expression produces 5 before multiplication by 10, so the result is 50. LIMIT has no parameter group and is invoked without parentheses. A definition with an empty () group requires that group at the call. Use $macro and braces for multi-line templates. Put the opening brace directly after -> to omit the result category.
+
+## 22.18 Source Text, Names and Locations
+
+<!-- verify-book -->
+```lepus
+module macroTutorial;
+$macro SHOW(x) -> {
+    $stringify(x)
+}
+$macro MAKE(a, b) -> {
+    $concat(a, b)
+}
+int64 itemCount = 9;
+void main()
+{
+    println("{}", $SHOW(1 + 2));
+    println("{}", $MAKE(item, Count));
+    println("{}", $module);
+}
+```
+
+```text
+1 + 2
+9
+macroTutorial
+```
+
+SHOW stringifies the argument's original spelling. It prints 1 + 2 rather than computing 3; comments can also be retained. Reading spelling does not evaluate it as an ordinary value.
+
+MAKE concatenates identifier fragments into itemCount, resolving to the global variable with value 9. $concat must produce one valid identifier. It cannot manufacture arbitrary statements and is not runtime string concatenation.
+
+$module gives the module name. $file and $line provide source information for diagnostics. Paths vary across machines, so do not freeze a local absolute path as portable expected output. Follow source mappings through nested expansion rather than treating preview line numbers as original source positions.
+
+
+### Target platform and boolean build options
+
+`$system` and `$cpu` are bare string constants describing the target program's operating system and architecture. Windows, macOS and Linux use `"win"`, `"mac"` and `"linux"`; common architecture names are `"amd64"`, `"arm64"` and `"arm32"`. Cross builds use the selected target rather than the compiler host. CPU tuning through `--cpu` does not change the architecture macro. Name normalization does not add native output targets; consult the LLVM build chapter for supported targets.
+
+```csharp
+void main() {
+    println("system={}, cpu={}", $system, $cpu);
+    println("A={}, B={}", $build[A], $build["B"]);
+}
+```
+
+`lepus run main.lep -B A -BB` defines both names. A project can also declare:
+
+```toml
+[build]
+build_option = ["A", "B"]
+```
+
+CLI and manifest names form a union. Names are case sensitive; duplicates have no additional effect. `$build[A]` and `$build["A"]` are equivalent: the bare name is a literal flag name, not a variable lookup. Defined names yield `true`, undefined names yield `false`. Values such as `-BA=false`, numbers and strings are unsupported. Names must be nonempty and contain only ASCII letters, digits, underscores, dots or hyphens; quote names containing dots or hyphens.
+
+Inside macro templates, use $if ($build[A]) { ... } or $if ($system == "win") { ... } to select code. Ordinary expressions can read the same constants. `$build` accepts a literal name or string, not a computed runtime key. `-I` keeps its module-search-directory meaning.
+
+See [Chapter 11](11-modules-projects.md) for the complete manifest context and [Chapter 27](27-aot-export.md) for target and link settings.
+
+## 22.19 Selecting Templates by Syntax or Text
+
+<!-- verify-book -->
+```lepus
+$macro CLASSIFY(value) -> expr {
+    $match (value is ident) {
+        1
+    } $else (is expr) {
+        2
+    } $else {
+        0
+    }
+}
+$macro NUMBER(value) -> expr {
+    $regex (value is "[0-9]+") {
+        value
+    } $else {
+        0
+    }
+}
+void main()
+{
+    println("{} {}", $CLASSIFY(name), $CLASSIFY(1 + 2));
+    println("{} {}", $NUMBER(42), $NUMBER(noSuchFunction()));
+}
+```
+
+```text
+1 2
+42 0
+```
+
+CLASSIFY checks a complete identifier before a complete expression. name matches the first branch and produces 1. 1 + 2 matches the second and produces 2. This classifies syntax rather than reading a runtime variable named name.
+
+NUMBER fully matches source spelling with an ECMAScript regular expression. The digits 42 remain in the selected template; noSuchFunction() selects 0, so no call to that function is generated. Unselected templates do not enter final semantic checking. This does not permit executing unresolved names.
+
+$match supports ident, expr, type, block and stmt, and tries $else (is category) { ... } branches in order. $regex matches the entire spelling, so abc123 does not match [0-9]+.
+
+## 22.20 Groups and Nested Forwarding
+
+Ordered groups preserve their delimiter shapes. For ``$macro ADD[a](b){c} -> expr { a + b + c }``, call `$ADD[1](2){3}`, not $ADD(1, 2, 3). Each group can end with its own variadic parameter; ..rest is a compatibility spelling for ...rest.
+
+<!-- verify-book -->
+```lepus
+$macro SUM(...values:value) -> expr {
+    int64 total = 0;
+    $for (value in values) {
+        total += value;
+    }
+    total
+}
+$macro FORWARD(...values:value) -> expr {
+    $SUM(values)
+}
+void main()
+{
+    println("{}", $FORWARD(2, 3, 4));
+    $assert($FORWARD() == 0);
+}
+```
+
+```text
+9
+```
+
+SUM generates additions over captured arguments. FORWARD places the capture list into a nested argument position, forwarding three separate arguments rather than a runtime List. The first call sums 2, 3 and 4 to 9. Empty forwarding retains a valid empty group and produces 0.
+
+Single evaluation for value parameters survives forwarding. Forwarded expr parameters remain syntax and do not automatically become cached values.
+
+$std::core::assert explicitly qualifies a macro by module. Use visible imported names or qualify them when the source needs to be explicit. Ordinary function calls and macro calls retain their respective call syntax.
+
+### Interface derivation in a member macro
+
+This member macro generates a method that counts instance fields. The static loop expands at compile time, and the method executes the generated statements.
+
+<!-- verify-book -->
+```lepus
+interface Count
+{
+    int64 count();
+}
+
+$macro Count<T>(method:ident) -> member {
+    $implement Count;
+    int64 method()
+    {
+        int64 result = 0;
+        $for (field in $fields<T>()) {
+            result += 1;
+        }
+        return result;
+    }
+}
+
+struct Record
+{
+    int64 number;
+    String text;
+    $Count<Record>(count);
+}
+
+void main()
+{
+    Record record;
+    Count counted = record;
+    println("fields={}", counted.count());
+}
+```
+
+```text
+fields=2
+```
+
+The `Count` interface requires an instance method returning an integer. The macro’s `$implement Count;` adds that interface to the host type. The call `$Count<Record>(count);` supplies the type `Record` and the method name `count` explicitly. The `method:ident` parameter uses the caller’s name for the generated method, while local variables inside the macro remain hygienic.
+
+The static loop emits an increment for each of the two instance fields. It reads no field values and copies no string. The call through an interface value verifies that the generated method satisfies the interface signature.
+
+
+In a generic member macro, `$implement Count<T>;` uses the macro's type argument, and `$implement Count<String>;` fixes it to String, provided the declared Count interface accepts a type parameter. The host must provide all required methods after expansion.
+
+
+### Adding an interface from a member macro
+
+The macro registers `Read<U>` with the host and generates the required method. At `$AUTO<int64>(read, label)`, the interface becomes `Read<int64>`. Assignments to `Read<int64>` and `Named` exercise ordinary interface dispatch.
+
+<!-- verify-book -->
+```lepus
+interface Read<T> { T read(); }
+interface Named { String label(); }
+$macro AUTO<U>(reader:ident, labeler:ident) -> member {
+    $implement Read<U>;
+    $implement Named;
+    U reader() { return self.value; }
+    String labeler() { return "auto"; }
+}
+struct Entry {
+    int64 value;
+    $AUTO<int64>(read, label);
+}
+void main() {
+    Entry entry;
+    entry.value = 42;
+    Read<int64> reader = entry;
+    Named named = entry;
+    println("{} {}", reader.read(), named.label());
+}
+```
+
+```text
+42 auto
+```
+
+### Inspecting values with Debug
+
+Debug uses `($type<T>()).qualifiedName` to display the declaring module and concrete generic arguments. It omits the default `program::` prefix.
+
+The standard Debug interface declares String debug(). Call `$std::macro::Debug<T>(debug);` in the body of a structure or enumeration to generate the implementation from its instance fields or active variant payloads.
+
+<!-- verify-book -->
+```lepus
+import std::macro;
+
+struct Reading
+{
+    String sensor;
+    int64 value;
+    $std::macro::Debug<Reading>(debug);
+}
+
+enum Event
+{
+    Idle,
+    Updated(Reading reading, bool saved);
+    $std::macro::Debug<Event>(debug);
+};
+
+void main()
+{
+    Reading reading;
+    reading.sensor = "温度";
+    reading.value = 23;
+    println("{}", reading.debug());
+    Event event = Updated(reading, true);
+    println("{}", event.debug());
+}
+```
+
+```text
+Reading { sensor: "温度", value: 23 }
+Event::Updated(reading: Reading { sensor: "温度", value: 23 }, saved: true)
+```
+
+The first declaration generates Reading.debug in field order. Strings appear in double quotes, integers as numbers, and static fields are excluded because they belong to the type rather than the inspected instance.
+
+Event has an empty variant and a variant with two payloads. Updated displays only its active reading and saved values, calling Reading.debug for the nested value. Idle produces Event::Idle without reading any other payload. Additional payloads retain declaration order.
+
+main constructs the reading and then the event. Each println receives an ordinary String returned by debug. Generated methods follow the same type, borrowing and cleanup rules as handwritten methods; they do not walk runtime field tables.
+
+Newlines, carriage returns, tabs, quotes and backslashes are escaped. Other ASCII control bytes use `\xNN`; complete UTF-8 spans preserve Chinese text and emoji. Characters use single quotes and booleans use true or false. The default program:: module prefix is omitted, while other module names and concrete generic identities distinguish types.
+
+Nested user types must implement Debug. A handwritten implementation can omit sensitive fields or shorten output. Derivation rejects an existing debug method instead of replacing it. Arrays, references, function values and containers without a Debug contract are rejected at compile time. An owned resource can provide a borrowing Debug method without becoming copyable.
+
+Debug output is for inspection, has no cross-version format guarantee, and is not a JSON or persistence format. User-facing error descriptions still use Error.toString. The generated method follows the ordinary interface, type and borrow checks.
+
+### Generate equality, hashing and cloning with member macros
+
+Equality, cloning and hashing often follow a model’s field structure. Standard member macros generate the methods for those interfaces.
+
+Point declares the three interfaces and calls the corresponding member macros in its type body. The program compares a copy with its source, then changes one field and compares them again.
+
+<!-- verify-book -->
+```lepus
+import std::macro;
+
+struct Point
+{
+    int64 x;
+    int64 y;
+    String label;
+    $std::macro::Equal<Point>(leftEqual);
+    $std::macro::Hash<Point>(hash);
+    $std::macro::Clone<Point>(clone);
+};
+
+void main()
+{
+    Point origin;
+    origin.x = 0;
+    origin.y = 0;
+    origin.label = "O";
+
+    Point copy = origin.clone();
+    println("equal={}", origin == copy);
+    println("sameHash={}", origin.hash(origin) == copy.hash(copy));
+
+    copy.label = "O2";
+    println("afterChange={}", origin == copy);
+    println("original={}", origin.label);
+}
+```
+
+```text
+equal=1
+sameHash=1
+afterChange=0
+original=O
+```
+
+The three member macros add the Equal, Hash, and Clone interfaces to Point. All three instance fields participate in the generated methods. Origin starts with coordinates zero, zero and label O. Cloning preserves those contents, making equal and sameHash true. The latter compares hash results rather than checking a fixed numeric hash.
+
+Changing copy.label to O2 changes overall equality even though coordinates still match. AfterChange becomes false while origin.label stays O, demonstrating independent mutation. Equal objects require consistent hashes, but equal hashes alone do not prove equality or provide persistent identity.
+
+Fields here mean instance fields. Static fields belong to shared type state and do not participate in these derives. Chinese and emoji labels are hashed as complete UTF-8 bytes; positive and negative zero also hash consistently for float32/64 fields. Nested types use their own protocols: if handwritten equality compares only id, handwritten hashing needs the same meaning.
+
+
+### Generating comparison and hashing for nested values
+
+<!-- verify-book -->
+```lepus
+import std::macro;
+
+struct BookKey
+{
+    String label;
+    int64 id;
+    $std::macro::Equal<BookKey>(leftEqual);
+    $std::macro::Hash<BookKey>(hash);
+    $std::macro::Clone<BookKey>(clone);
+}
+
+struct BookRecord
+{
+    BookKey key;
+    $std::macro::Equal<BookRecord>(leftEqual);
+    $std::macro::Hash<BookRecord>(hash);
+    $std::macro::Clone<BookRecord>(clone);
+}
+
+void main()
+{
+    BookRecord original;
+    original.key.label = "left";
+    original.key.id = 7;
+    BookRecord copied = original.clone();
+    Map<BookKey, int64> cache;
+    cache.put(original.key, 10);
+    println("{} {} {}", original == copied,
+            original.hash(original) == copied.hash(copied),
+            cache.has(original.key) != 0);
+    copied.key.label = "changed";
+    println("{} {}", original.key.label, copied.key.label);
+}
+```
+
+```text
+1 1 1
+left changed
+```
+
+The inner value declares derived capabilities, and the enclosing type composes them from its fields. Equal contents compare equal; using them as Map keys also checks compatible hashing. Derivation uses field behavior, not merely a type name, and missing field capabilities remain compilation errors.
+
+### Generating JSON encoding and decoding rules
+
+Program field names need not match external keys. This example keeps the language member id, publishes student_id, and excludes an internal string.
+
+<!-- verify-book -->
+```lepus
+import std::json;
+
+struct Profile
+{
+    @std::json::Field(name:"student_id")
+    int64 id;
+    String name;
+    @std::json::Field(skip:true)
+    String secret;
+    $Json<Profile>(toJson, fromJson);
+}
+
+void main()
+{
+    Profile profile;
+    profile.id = 7;
+    profile.name = "Ada";
+    profile.secret = "internal";
+    match (profile.toJson()) {
+        Ok(encoded) => { println("{}", encoded); }
+        Fail(error) => { println("{}", error.toString()); return; }
+    }
+
+    let decoded = Profile::fromJson("{\"student_id\":7,\"name\":\"Ada\"}");
+    match (decoded)
+    {
+        Ok(value) => { println("{} {}", value.id, value.name); }
+        Fail::MessageError(error) => { println("{}", error.toString()); }
+        Fail(_) => { println("unavailable"); }
+    }
+}
+```
+
+```text
+{"student_id":7,"name":"Ada"}
+7 Ada
+```
+
+Import std::json first. Json declares toJson; derivation also generates a static fromJson on the concrete type. Both return Result with Error: encoding produces String and decoding produces an independently owned Profile.
+
+The name annotation changes the JSON key, not profile.id. skip excludes secret from encoding and input reconstruction, leaving its default-constructed value after decoding. This annotation is restricted to instance fields of structures that derive Json; functions, static fields and unrelated types reject it.
+
+main constructs the value and prints its encoding in declaration order. The second half decodes external text. Ok receives the owned value, MessageError handles a concrete diagnostic, and Fail(_) covers other Error implementations. A real application must still validate the identifier and enforce account permissions.
+
+Missing required fields, unknown keys, wrong types and out-of-range values return Fail. A known skipped input key is ignored. Renamed fields use their new key. Duplicate mapped names, repeated field annotations and ASCII controls in key names are compile-time errors. Derived enum tag objects also reject unknown fields.
+
+Supported values include all base numeric types, bool, char, String, List, Set, String-keyed Map and recursively supported Option/Result. char encodes as a byte number. uint64 above the signed 64-bit range encodes as a decimal string to preserve precision. Floats must be finite and decoding checks the destination width. Enums use objects with $variant and $values in payload declaration order.
+
+Nested user types must also derive Json. References, functions, dynamic interfaces, arrays, noncopyable resources and other unsupported types fail at compile time, including skipped fields. Existing toJson/fromJson methods are never replaced. The implementation generates ordinary concrete methods. The `--no-reflection` option still allows these methods and their field annotations.
+
+Json derivation does not expose runtime fields through @Reflect. These are separate choices. Existing reflected types without Json derivation retain their previous serialization policy. Debug in Chapter 22 is for inspection, not JSON persistence.
+
+## 22.21 Compile-Time Computation and Loops
+
+### Compile-Time Bindings and Constant Expressions
+
+`$let name = expr;` infers the type from the initial value, and `$let<T> name = expr;` specifies it. Update an existing binding with `$set name = expr;`. Both the initial value and any later value must be computable during expansion and compatible with the binding's type.
+
+The binding is visible from its declaration through the end of its template block. Later `$let`, `$if`, and `$compile_assert` directives can read it, and generated code can use its value at that point. Bindings declared outside a loop can hold state across iterations. Those declared inside the loop body are created anew each time.
+
+This example uses arithmetic, comparisons, and logic to test integers below 49 for primality. Every composite number in that range has a prime divisor of 2, 3, or 5.
+
+<!-- verify-book -->
+```lepus
+$macro IS_PRIME_UNDER_49(value) -> expr {
+    $let n = value;
+    $let small_prime = n == 2 || n == 3 || n == 5;
+    $let has_small_divisor = n % 2 == 0 || n % 3 == 0 || n % 5 == 0;
+    $compile_assert(n < 49, "expected a value below 49");
+    $let is_prime = small_prime || (n > 5 && !has_small_divisor);
+    is_prime
+}
+
+void main() {
+    assert($IS_PRIME_UNDER_49(47));
+    assert(!$IS_PRIME_UNDER_49(25));
+    assert(!$IS_PRIME_UNDER_49(-7));
+    println("47 is prime");
+}
+```
+
+```text
+47 is prime
+```
+
+### Strings, floats, characters, and Booleans
+
+Use `+` to concatenate strings during expansion. The floating-point example uses `float32` and literals with the `f` suffix. The `grade` binding uses Lepus’s single-byte `char`, and the comparisons and logical operation infer `bool` for `enabled`.
+
+<!-- verify-book -->
+```lepus
+$macro SHOW_CONSTANTS() -> stmt {
+    $let<String> greeting = "Hello, " + "Lepus";
+    $let<float32> scale = 1.5f + 0.75f;
+    $let<char> grade = 'A';
+    $let enabled = grade == 'A' && scale > 2.0f;
+
+    $compile_assert(greeting == "Hello, Lepus", "unexpected greeting");
+    $compile_assert(enabled, "expected the feature to be enabled");
+    $if (enabled) {
+        println("{1} | {2:2F} | {3}", greeting, scale, grade);
+    }
+}
+
+void main() {
+    $SHOW_CONSTANTS();
+}
+```
+
+```text
+Hello, Lepus | 2.25 | A
+```
+
+### Compile-time string interpolation
+
+In `$let`, `$if`, and `$compile_assert`, `f"…{expression}…"` can use compile-time constants. Placeholders use the runtime interpolation format, which prints eight digits after the decimal point for floats by default. They can contain nested interpolation. Write `\{` and `\}` for literal braces.
+
+<!-- verify-book -->
+```lepus
+const int64 BASE = 2;
+const String LABEL = f"base={BASE + 1}";
+
+$if (LABEL != "base=3") {
+    MissingType unselected;
+}
+
+$macro SHOW_INTERPOLATION() -> stmt {
+    $let name = "Lepus";
+    $compile_assert(f"[{LABEL}]" == "[base=3]", "global constant interpolation");
+    $let<bool> enabled = true;
+    $let<char> grade = 'A';
+    $let<float32> scale = 2.25f;
+    $let detail = f"{scale}/{grade}/{enabled}";
+    $let message = f"{name}: {f"sum={BASE + 3}"}, {detail}, \{literal\}";
+    $compile_assert(message == "Lepus: sum=5, 2.25000000/A/1, {literal}", f"wrong message: {message}");
+    println("{}", message);
+}
+
+$macro WRAP(value) -> expr {
+    $let message = f"[{value}]";
+    message
+}
+
+void main() {
+    const String local = f"local={BASE + 5}";
+    assert($WRAP(local) == "[local=7]");
+    $SHOW_INTERPOLATION();
+    assert(LABEL == f"base={BASE + 1}");
+}
+```
+
+```text
+Lepus: sum=5, 2.25000000/A/1, {literal}
+```
+
+### Macro Loops and Loop Control
+
+`$for (element in source) { ... }` visits variadic arguments or a metadata collection in order during expansion. Section 22.11 shows how to iterate over variadic groups together. Each iteration can compute intermediate values with `$let` and choose which statements to emit with `$if`.
+
+`$while (condition) { ... }` reevaluates a compile-time `bool` before each iteration. A false initial condition expands the body zero times. `$loop { ... }` expands its body repeatedly until a `$break;` or the macro expansion budget is exhausted. Put each loop header on its own line with its opening brace.
+
+`$break;` exits a macro loop. `$continue;` skips the rest of the current template iteration and starts the next one. Both target the lexically nearest macro loop in the same macro invocation, including a `$for` loop. Code emitted earlier in the iteration is kept. Using either directive outside a macro loop produces a compile-time error.
+
+### Filter a List of Primes with $for
+
+Pass the candidates from 2 through 30 to the variadic loop. Each iteration computes its conditions with `$let`. For each prime, `$if` emits an assignment and `$set` advances the array index during expansion. The final `$compile_assert` checks the number of writes. At runtime, the program executes the 10 generated assignments with their indices already computed.
+
+<!-- verify-book -->
+```lepus
+$macro PRIMES_TO_30(...candidates: value) -> expr {
+    $let<uint8> max_candidate = 30;
+    $let index = 0;
+    int64 primes[10];
+    $for (n in candidates) {
+        $let in_range = n >= 2 && n <= max_candidate;
+        $let small_prime = n == 2 || n == 3 || n == 5;
+        $let has_small_divisor = n % 2 == 0 || n % 3 == 0 || n % 5 == 0;
+        $if (in_range && (small_prime || !has_small_divisor)) {
+            primes[index] = n;
+            $set index = index + 1;
+        }
+    }
+    $compile_assert(index == 10, "expected ten primes");
+    yield primes;
+}
+
+void main() {
+    let primes = $PRIMES_TO_30(
+         2,  3,  4,  5,  6,  7,  8,  9, 10,
+        11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+        21, 22, 23, 24, 25, 26, 27, 28, 29, 30
+    );
+    assert(primes[0] == 2 && primes[9] == 29);
+    println("{}, {}, {}, {}, {}, {}, {}, {}, {}, {}",
+        primes[0], primes[1], primes[2], primes[3], primes[4],
+        primes[5], primes[6], primes[7], primes[8], primes[9]);
+}
+```
+
+```text
+2, 3, 5, 7, 11, 13, 17, 19, 23, 29
+```
+
+### Filter primes by trial division at compile time
+
+For each candidate, start trial division at `d = 2`. The macro first checks `d > n / d`. For positive integers, this is equivalent to `d × d > n` and avoids multiplication overflow. If the divisor has not passed that bound and the remainder is zero, expansion for the candidate stops. A nonzero remainder triggers the next divisor.
+
+<!-- verify-book -->
+```lepus
+$macro TRIAL_PRIME(number, divisor, on_prime: block) -> stmt {
+    $let n = number;
+    $let d = divisor;
+    $if (n >= 2) {
+        $if (d > n / d) {
+            on_prime;
+        } $elif (n % d != 0) {
+            $let next = d + 1;
+            $TRIAL_PRIME(n, next, on_prime);
+        }
+    }
+}
+
+$macro TRIAL_PRIMES(...candidates: value) -> expr {
+    int64 primes[15];
+    int64 count = 0;
+    $for (candidate in candidates) {
+        $let number = candidate;
+        $TRIAL_PRIME(number, 2, { primes[count] = number; count += 1; });
+    }
+    assert(count == 15);
+    yield primes;
+}
+
+void main() {
+    let primes = $TRIAL_PRIMES(
+         2,  3,  4,  5,  6,  7,  8,  9, 10,
+        11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+        21, 22, 23, 24, 25, 26, 27, 28, 29, 30,
+        31, 32, 33, 34, 35, 36, 37, 38, 39, 40,
+        41, 42, 43, 44, 45, 46, 47, 48, 49, 50
+    );
+    for (int64 i = 0; i < 15; i += 1) {
+        if (i != 0) { print(", "); }
+        print("{}", primes[i]);
+    }
+    println("");
+}
+```
+
+```text
+2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47
+```
+
+The macro expands the `on_prime` block only after ruling out every possible divisor. Each `$for` iteration uses `$let` to get the candidate as a constant before passing it to the recursive macro. This call supplies the candidates from 2 through 50 and uses an array sized for the 15 primes in that interval. Division and remainder are evaluated during expansion. At runtime, the generated assignments fill the array and the program prints it.
+
+### Test for primality with $while
+
+<!-- verify-book -->
+```lepus
+$macro IS_PRIME(value: value) -> expr {
+    $let n = value;
+    $let prime = n >= 2;
+    $let divisor = 2;
+    $while (prime && divisor <= n / divisor) {
+        $if (n % divisor == 0) {
+            $set prime = false;
+            $break;
+        }
+        $set divisor = divisor + 1;
+    }
+    prime
+}
+
+void main() {
+    assert(!$IS_PRIME(1));
+    assert(!$IS_PRIME(49));
+    assert($IS_PRIME(97));
+    println("97 is prime");
+}
+```
+
+```text
+97 is prime
+```
+
+Trial division starts at 2 and only needs to reach the square root. The condition `divisor <= n / divisor` avoids squaring the divisor. On an exact division, set `prime` to false and exit with `$break;`. For 49 this happens at 7. For 97 the loop runs until its condition becomes false. The macro supplies the resulting boolean at the call site.
+
+### Count Collatz steps with $loop
+
+The Collatz conjecture asks whether every positive integer eventually reaches 1 under the same rule. Divide an even number by 2, or multiply an odd number by 3 and add 1. The macro takes a starting value and a step limit and counts the steps at compile time.
+
+<!-- verify-book -->
+```lepus
+$macro COLLATZ_STEPS(start: value, limit: value) -> expr {
+    $let n = start;
+    $let steps = 0;
+    $compile_assert(n > 0, "expected a positive starting value");
+    $loop {
+        $if (n == 1) {
+            $break;
+        }
+        $compile_assert(steps < limit, "Collatz step limit exceeded");
+        $set steps = steps + 1;
+        $if (n % 2 == 0) {
+            $set n = n / 2;
+            $continue;
+        }
+        $set n = 3 * n + 1;
+    }
+    steps
+}
+
+void main() {
+    assert($COLLATZ_STEPS(1, 0) == 0);
+    println("{} {}", $COLLATZ_STEPS(6, 32), $COLLATZ_STEPS(7, 32));
+}
+```
+
+```text
+8 16
+```
+
+At 1, `$break;` ends the expansion loop. The even branch divides the value and uses `$continue;` to skip the odd formula. A starting value of 1 takes zero steps. If the value has yet to reach 1 when it hits `limit`, the compile-time assertion fails. The example computes trajectories for the supplied starting values.
+
+### Conditional compilation outside macros
+
+Outside macros, `$if` keeps the first matching branch. An inner condition is evaluated only after its outer branch is selected. `$!A` is shorthand for `$build[A]`, and `-BA` enables A. The four branches define the same function name, with only the selected definition entering semantic checks.
+
+```lepus
+$if ($!A) {
+    $if ($!B) {
+        int64 featureLevel() { return 3; }
+    } $else {
+        int64 featureLevel() { return 2; }
+    }
+} $else {
+    $if ($!B) {
+        int64 featureLevel() { return 1; }
+    } $else {
+        int64 featureLevel() { return 0; }
+    }
+}
+```
+
+With both flags off, `featureLevel()` returns `0`. B alone gives `1`, A alone gives `2`, and both give `3`. A condition can read a declaration such as `const bool enabled = $!A;`. Its initializer is evaluated in the declaration scope, so an inner variable with the same name does not change what an outer constant references.
+
+## 22.22 Choosing a Form
+
+Start with functions and generics. Choose a macro when repetition concerns syntax positions, declarations or field sets. Decide what each input represents and where the result belongs; encode both decisions in the definition header.
+
+Generated code still undergoes name, type, borrow and resource checks. Start with a field-printing macro before adding serialization rules to a project.
+
+### Summary
+
+Prefer a regular function when it expresses the requirement; choose macros for necessary syntax composition. Identify which arguments become values, which remain fragments, where names originate and how result types are determined.
+
+Expansion does not execute arbitrary user runtime logic or legalize invalid borrowing and resource use. Runtime reflection next addresses metadata-based object access, a different mechanism from compile-time syntax generation.
+
+Next: [Chapter 23](23-annotations-reflection.md).

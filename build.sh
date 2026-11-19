@@ -1,0 +1,243 @@
+#!/bin/sh
+# lepus/build.sh —— 一键构建与打包。
+#
+# 用法（在本目录跑）：
+#   sh build.sh              生成解析器 → 构建原生扩展和静态 LLVM 编译器 → 按环境打包插件与书稿
+#   sh build.sh --no-gen     跳过文法生成，直接用现有解析器构建
+#   sh build.sh --jobs 4     指定并行度（默认取系统逻辑核心数的一半，向下取整，至少为 1）
+#   sh build.sh --help
+#
+# 四个阶段：
+#   1. gen.sh 生成解析器 / 驱动 / 工程文件。
+#   2. 以 LEPUS_STATIC_LLVM=1 构建原生扩展，再构建内嵌扩展的静态 LLVM 主程序。
+#   3. 环境检测：npm 决定是否打 VSCode 插件，latexmk / pdflatex 决定是否编书稿；
+#      缺哪个就打印提示跳过，**不中断构建**。
+#   4. 统一整理到 dist/，命名规范 lepus-<组件>-<平台>-<架构>.<扩展名>：
+#        dist/lepus-<平台>-<架构>[.exe]          CLI 可执行文件
+#        dist/lepus-vscode-<平台>-<架构>.vsix    VSCode 插件（标准 VSIX）
+#        dist/lepus-book.pdf                     书稿（需 LaTeX）
+#        dist/lepus-bundle-<平台>-<架构>.zip     上面已有的组件汇总成包
+#
+# 环境要求：g++ / make / python 必需；npm、LaTeX 可选。
+
+set -u
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd) || exit 2
+cd "$root" || exit 2
+
+run_gen=1
+jobs=''
+while [ "$#" -gt 0 ]; do
+    arg=$1
+    shift
+    case "$arg" in
+    --no-gen) run_gen=0 ;;
+    --jobs)
+        [ "$#" -gt 0 ] || { echo "--jobs 需要正整数" >&2; exit 2; }
+        jobs=$1
+        shift
+        ;;
+    --jobs=*) jobs=${arg#--jobs=} ;;
+    -h | --help)
+        awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"
+        exit 0
+        ;;
+    *)
+        echo "未知参数：$arg（用 --help 看用法）" >&2
+        exit 2
+        ;;
+    esac
+done
+
+case "$jobs" in
+'' | *[!0-9]*) jobs='' ;;
+esac
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+# 平台与架构：产物名里只出现这一套拼写（win64 / linux / macos + amd64 / arm64）。
+case "$(uname -s 2>/dev/null)" in
+MINGW* | MSYS* | CYGWIN* | Windows_NT) os=win64 ;;
+Darwin) os=macos ;;
+Linux) os=linux ;;
+*) os=$(uname -s 2>/dev/null | tr 'A-Z' 'a-z') ;;
+esac
+case "$(uname -m 2>/dev/null)" in
+x86_64 | amd64 | AMD64) arch=amd64 ;;
+aarch64 | arm64 | ARM64) arch=arm64 ;;
+i?86) arch=x86 ;;
+*) arch=$(uname -m 2>/dev/null) ;;
+esac
+[ -n "${os:-}" ] || os=unknown
+[ -n "${arch:-}" ] || arch=unknown
+exe=''
+[ "$os" = win64 ] && exe='.exe'
+
+dist="$root/dist"
+mkdir -p "$dist"
+
+# make：优先 GNU make，Windows（MSYS）环境退回 mingw32-make。
+if have make; then
+    make_cmd=make
+elif have mingw32-make; then
+    make_cmd=mingw32-make
+elif have gmake; then
+    make_cmd=gmake
+else
+    echo "未找到 make：装 GNU make 后重试" >&2
+    exit 2
+fi
+if [ -z "$jobs" ]; then
+    jobs=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo "${NUMBER_OF_PROCESSORS:-4}")
+    case "$jobs" in
+    '' | *[!0-9]*) jobs=4 ;;
+    esac
+    jobs=$((jobs / 2))
+    [ "$jobs" -ge 1 ] || jobs=1
+fi
+
+# python：书稿生成脚本与压缩包都用它。Windows 商店的 python3 可能只是个占位存根，
+# 所以除了「在 PATH 上」还要**真的执行一次**才算可用。
+py=''
+for candidate in python3 python py; do
+    if have "$candidate" && "$candidate" -c 'pass' >/dev/null 2>&1; then
+        py=$candidate
+        break
+    fi
+done
+
+echo "== 1/4 生成解析器 =="
+echo "准备静态 LLVM SDK..."
+"${py:-python3}" library/llvm/setup_static.py --jobs "$jobs" || {
+    echo "静态 LLVM SDK 准备失败，构建中止" >&2
+    exit 1
+}
+if [ "$run_gen" -eq 1 ]; then
+    sh gen.sh || { echo "文法生成失败，构建中止" >&2; exit 1; }
+else
+    echo "（--no-gen：跳过 gen.sh，直接用现有解析器）"
+fi
+
+echo "== 2/4 构建主程序（-j$jobs）=="
+# 静态 LLVM 变体只支持已准备好的 Windows x64 SDK；该变量同时让
+# tools/compiler_path.py 和 VSCode 打包流程选择同一份静态编译器产物。
+export LEPUS_STATIC_LLVM=1
+# 先生成原生归档，再由下一次 make 读取内嵌资产依赖。
+echo "构建原生扩展（-j$jobs）..."
+"$make_cmd" LEPUS_STATIC_LLVM=1 native-extensions \
+    LEPUS_NATIVE_EXTENSIONS_FLAGS="--jobs $jobs ${LEPUS_NATIVE_EXTENSIONS_FLAGS:-}" || {
+    echo "原生扩展构建失败，构建中止" >&2
+    exit 1
+}
+"$make_cmd" LEPUS_STATIC_LLVM=1 -j"$jobs" || { echo "构建失败" >&2; exit 1; }
+# 产物名带版本与 LLVM 链接方式（见 tools/compiler_path.py），与 ci.sh 取同一份口径，
+# 不要另猜一个固定文件名：Windows 的正式产物是 lepus-<版本>-llvm-static-windows-x64.exe。
+built=''
+if [ -n "${py:-}" ]; then
+    built=$("$py" tools/compiler_path.py 2>/dev/null) || built=''
+fi
+[ -n "$built" ] || built="$root/lepus$exe"
+[ -f "$built" ] || { echo "构建结束但没有找到 Lepus 可执行文件（$built）" >&2; exit 1; }
+
+echo "== 3/4 环境检测 =="
+have npm && echo "npm：有（打包 VSCode 插件）" || echo "npm：无（跳过 VSCode 插件）"
+if have latexmk || have pdflatex; then
+    echo "LaTeX：有（编译书稿）"
+else
+    echo "LaTeX：无（跳过书稿）"
+fi
+
+echo "== 4/4 打包 =="
+# VSCode 插件：内嵌编译器 → 清单自检 → vsce package（测试在 ci.sh 里跑，这里跳过）。
+if have npm; then
+    if (cd "$root/vscode" && npm run package -- --skip-tests --llvm-variant static --compiler "$root/$(basename "$built")" --out "$dist"); then
+        vsix=$(ls -1 "$dist"/lepus-editor-*-llvm-static.vsix 2>/dev/null | head -n 1)
+        if [ -n "$vsix" ] && [ -f "$vsix" ]; then
+            echo "已产出：$vsix"
+        else
+            echo "插件打包没有产出 .vsix，已跳过" >&2
+        fi
+    else
+        echo "插件打包失败（环境或网络问题），已跳过，不影响主程序产物" >&2
+    fi
+else
+    echo "跳过 VSCode 插件：未找到 npm"
+fi
+
+# 书稿：先由 Markdown 生成章节 .tex，再排版；封面单独跑一次，正文两遍使目录页码稳定。
+if have latexmk || have pdflatex; then
+    book_ok=0
+    if [ -n "$py" ] && [ -f "$root/doc/book/latex/tools/md2tex.py" ]; then
+        "$py" "$root/doc/book/latex/tools/md2tex.py" || echo "章节生成失败，继续用现有 .tex 排版" >&2
+    fi
+    if have latexmk && have xelatex; then
+        (cd "$root/doc/book/latex" &&
+            xelatex -interaction=nonstopmode -halt-on-error -output-directory=figure figure/cover.tex >/dev/null 2>&1 &&
+            latexmk -xelatex -interaction=nonstopmode -halt-on-error book.tex >book.build.log 2>&1) && book_ok=1
+        [ "$book_ok" -eq 1 ] || tail -20 "$root/doc/book/latex/book.build.log" 2>/dev/null
+    elif have xelatex; then
+        (cd "$root/doc/book/latex" &&
+            xelatex -interaction=nonstopmode -halt-on-error -output-directory=figure figure/cover.tex >/dev/null 2>&1 &&
+            xelatex -interaction=nonstopmode -halt-on-error book.tex >/dev/null 2>&1 &&
+            xelatex -interaction=nonstopmode -halt-on-error book.tex >/dev/null 2>&1) && book_ok=1
+    else
+        echo "跳过书稿：书稿用 xelatex 排版（中文字体），当前只有 pdflatex" >&2
+    fi
+    if [ "$book_ok" -eq 1 ] && [ -f "$root/doc/book/latex/book.pdf" ]; then
+        cp "$root/doc/book/latex/book.pdf" "$dist/lepus-book.pdf"
+        echo "已产出：dist/lepus-book.pdf"
+    elif [ "$book_ok" -eq 1 ]; then
+        echo "书稿排版结束但没有 book.pdf" >&2
+    fi
+else
+    echo "跳过书稿：未找到 latexmk / pdflatex"
+fi
+
+# 静态发行包：命令行包与 VS Code 包分开，另附发行说明和校验清单。
+if [ -n "$py" ]; then
+    version=$(tr -d '\r\n' < "$root/VERSION")
+    release_notes="$dist/Lepus-$version-release-notes.md"
+    cp "$root/CHANGELOG.md" "$release_notes"
+    cli_zip="$dist/lepus-$version-llvm-static-windows-x64.zip"
+    vscode_zip="$dist/lepus-$version-llvm-static-windows-x64-vscode.zip"
+    if [ -n "${vsix:-}" ] && [ -f "$vsix" ]; then
+        "$py" - "$dist" "$cli_zip" "$vscode_zip" "$release_notes" "$built" "$vsix" "$root" <<'PY'
+import hashlib, pathlib, sys, zipfile
+dist, cli_zip, vscode_zip, notes, binary, vsix, root = map(pathlib.Path, sys.argv[1:])
+def add(archive, source, name):
+    archive.write(source, name)
+with zipfile.ZipFile(cli_zip, 'w', zipfile.ZIP_DEFLATED) as archive:
+    add(archive, binary, binary.name)
+    add(archive, pathlib.Path(notes), pathlib.Path(notes).name)
+    add(archive, pathlib.Path(root) / 'doc/book/latex/book.pdf', 'Lepus-book.pdf')
+    add(archive, pathlib.Path(root) / 'LICENSE', 'LICENSE')
+    add(archive, pathlib.Path(root) / 'NOTICE', 'NOTICE')
+    add(archive, pathlib.Path(root) / 'VERSION', 'VERSION')
+    for sample in sorted((pathlib.Path(root) / 'example/samples').glob('*.lep')):
+        add(archive, sample, 'examples/' + sample.name)
+    for license_file in sorted((pathlib.Path(root) / 'licenses').glob('*/LICENSE')):
+        add(archive, license_file, 'licenses/' + license_file.parent.name + '/LICENSE')
+with zipfile.ZipFile(vscode_zip, 'w', zipfile.ZIP_DEFLATED) as archive:
+    add(archive, vsix, vsix.name)
+    add(archive, pathlib.Path(notes), pathlib.Path(notes).name)
+    add(archive, pathlib.Path(root) / 'LICENSE', 'LICENSE')
+    add(archive, pathlib.Path(root) / 'NOTICE', 'NOTICE')
+book = dist / 'lepus-book.pdf'
+checks = [cli_zip, vscode_zip, pathlib.Path(notes), book]
+(dist / 'SHA256SUMS.txt').write_text(''.join(hashlib.sha256(path.read_bytes()).hexdigest() + '  ' + path.name + '\n' for path in checks), encoding='utf-8')
+PY
+        echo "已产出：$cli_zip"
+        echo "已产出：$vscode_zip"
+        echo "已产出：$release_notes"
+        echo "已产出：$dist/SHA256SUMS.txt"
+    else
+        echo "未找到静态 VSIX，发行包生成中止" >&2
+        exit 1
+    fi
+else
+    echo "跳过发行包：未找到 python" >&2
+fi
+
+echo
+echo "== 产物清单 =="
+ls -lh "$dist"

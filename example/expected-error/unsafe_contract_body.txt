@@ -1,0 +1,1 @@
+lepus: example/samples-error/unsafe_contract_body.lep 第 1 行第 1 列：原始布局查询需要显式 unsafe 块

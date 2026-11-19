@@ -1,0 +1,33 @@
+import std::reflect;
+@Reflect interface View {
+    String name(){return "default";}
+    int64 bump(int64 by){return 100+by;}
+};
+@Reflect struct Actual : View {
+    String title;int64 value;
+    Actual(String title,int64 value){self.title=title;self.value=value;}
+    String name(){return self.title;}
+    int64 bump(int64 by){self.value+=by;return self.value;}
+};
+@Reflect struct DefaultView : View {int64 unused;};
+@Reflect enum State {Ready, Named(String text);
+    String name(){String result="ready";match(self){Named(text)=>{result=text;}Ready=>{}}return result;}
+};
+void main(){
+    Actual mut& actual=new Actual("actual",20);
+    Any actualBox;actualBox.set(&actual);View mut& view=actualBox.getReference();
+    assert(view.name()=="actual");
+    assert(view.bump(2)==22 && actual.value==22);
+    DefaultView mut& fallback=new DefaultView;
+    Any defaultBox;defaultBox.set(&fallback);View const& readonly=defaultBox.getReference();
+    assert(readonly.name()=="default" && readonly.bump(2)==102);
+    assert(getInterfaceInfo<View>().unwrap().implementedBy.len()==2);
+    State state=State::Ready;
+    assert(state.name()=="ready");
+    state=State::Named("working");
+    String snapshot=state.name();
+    state=State::Named("finished");
+    assert(snapshot=="working" && state.name()=="finished");
+    fallback.drop();actual.drop();
+    println("reflection dispatch OK");
+}

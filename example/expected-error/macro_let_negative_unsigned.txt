@@ -1,0 +1,1 @@
+lepus: example/samples-error/macro_let_negative_unsigned.lep 第 2 行第 2 列：$let 整数初始化式超出显式类型范围

@@ -1,0 +1,35 @@
+import std::sql;
+// 仅创建会话临时表，连接关闭后自动删除，不修改业务表。
+void main(){
+    String engine=std::core::inputLine(), credential=std::core::inputLine();
+    Database db;
+    if(engine=="mysql"){db=Database::mysql("127.0.0.1","root",credential,"mysql");}
+    else {db=Database::postgres(credential);}
+    if(!db.isOpen()){std::core::panic(db.lastError());}
+    std::core::assert(db.backendName()==engine);
+    ResultSet created=db.exec("CREATE TEMPORARY TABLE lepus_session_probe(id BIGINT PRIMARY KEY, name VARCHAR(255), amount DOUBLE PRECISION, note VARCHAR(255))");
+    if(!created.ok){std::core::panic(created.error);}
+    String name="中文 O'Reilly\\目录 😀";
+    ResultSet inserted=db.exec("INSERT INTO lepus_session_probe VALUES(9223372036854775807,"+db.quote(name)+",1.25,NULL)");
+    if(!inserted.ok){std::core::panic(inserted.error);}
+    std::core::assert(inserted.affected==1);
+    ResultSet result=db.exec("SELECT id,name,amount,note,'123' AS numeric_text FROM lepus_session_probe");
+    std::core::assert(result.ok && result.rowCount()==1 && result.colCount()==5);
+    std::core::assert(result.intAt(0,0)==9223372036854775807 && result.textAt(0,1)==name);
+    std::core::assert(result.realAt(0,2)==1.25 && result.at(0,3).isNull());
+    std::core::assert(result.at(0,4).kind==CELL_TEXT && result.textAt(0,4)=="123");
+    std::core::assert(std::core::len(result.render())>0);
+    std::core::assert(db.execOk("BEGIN; INSERT INTO lepus_session_probe VALUES(2,'rollback',2,NULL); ROLLBACK"));
+    std::core::assert(db.count("SELECT COUNT(*) FROM lepus_session_probe")==1);
+    std::core::assert(db.execOk("BEGIN; INSERT INTO lepus_session_probe VALUES(2,'commit',2,NULL); COMMIT"));
+    std::core::assert(db.count("SELECT COUNT(*) FROM lepus_session_probe")==2);
+    std::core::assert(!db.exec("INSERT INTO lepus_session_probe VALUES(2,'duplicate',0,NULL)").ok);
+    std::core::assert(db.count("SELECT COUNT(*) FROM lepus_session_probe")==2);
+    std::core::assert(db.exec("UPDATE lepus_session_probe SET amount=3.5 WHERE id=2").affected==1);
+    std::core::assert(db.exec("DELETE FROM lepus_session_probe WHERE id=2").affected==1);
+    std::core::assert(db.count("SELECT COUNT(*) FROM lepus_session_probe")==1);
+    String version=db.scalar("SELECT version()");
+    db.close();db.close();
+    std::core::assert(!db.exec("SELECT 1").ok);
+    std::core::println("{} live database checks passed: {}",engine,version);
+}

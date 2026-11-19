@@ -1,0 +1,10 @@
+void main() {
+    let source = RawStorage<int64>::allocate(300);
+    let destination = RawStorage<int64>::allocate(300);
+    unsafe {
+        int64 mut& value = borrowAt(source.pointer(299));
+        let first = source.pointer(0);
+        relocateNonOverlapping(destination.pointer(0), first, 300);
+        println("{}", *value);
+    }
+}

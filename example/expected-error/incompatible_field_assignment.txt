@@ -1,0 +1,1 @@
+lepus: example/samples-error/incompatible_field_assignment.lep 第 5 行第 9 列：不能隐式转换：std::core::String -> int64（请显式强转）

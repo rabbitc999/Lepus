@@ -1,0 +1,65 @@
+/** MySQL 连接配置与连接生命周期；教务表由 school_data 管理。 */
+
+module store;
+
+import std::sql;
+import std::reflect;
+
+/** 连接配置；数据库口令默认为空，可从启动参数指定的 JSON 配置读取。 */
+@Reflect
+struct Config
+{
+    String host;
+    String user;
+    String password;
+    String database;
+    int32 port;
+};
+
+/**
+ * @brief 生成默认配置。
+ */
+Config defaultConfig()
+{
+    Config config;
+    config.host = "127.0.0.1";
+    config.user = "root";
+    config.password = "";
+    config.database = "students_db";
+    config.port = (int32)3306;
+    return config;
+}
+
+/** 只允许由字母、数字与下划线组成的 1–64 字节数据库标识符。 */
+bool validDatabaseName(String name)
+{
+    if (len(name) < 1 || len(name) > 64) { return false; }
+    for (int64 index in range(0, len(name)))
+    {
+        char item = name[index];
+        if (!((item >= 'a' && item <= 'z') || (item >= 'A' && item <= 'Z') || (item >= '0' && item <= '9') || item == '_')) { return false; }
+    }
+    return true;
+}
+
+/** 按配置连接 MySQL；数据库标识符通过白名单检查后才允许自动建库。 */
+Database connect(Config const& config)
+{
+    assert(validDatabaseName(config.database));
+    Database database = Database::mysql(config.host, config.user, config.password, config.database, config.port);
+    if (database.isOpen()) { return move database; }
+    /* 常见原因是库还没建：连一个不带默认库的会话建库，再连一次。 */
+    Database bootstrap = Database::mysql(config.host, config.user, config.password, "", config.port);
+    if (bootstrap.isOpen())
+    {
+        ResultSet created = bootstrap.exec("CREATE DATABASE IF NOT EXISTS `" + config.database + "` DEFAULT CHARACTER SET utf8mb4");
+        bool created_ok = created.ok;
+        bootstrap.close();
+        if (created_ok)
+        {
+            Database retry = Database::mysql(config.host, config.user, config.password, config.database, config.port);
+            return move retry;
+        }
+    }
+    return move database;
+}

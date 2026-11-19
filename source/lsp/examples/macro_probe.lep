@@ -1,0 +1,16 @@
+/* macro_probe.lep —— 干净样例：宏定义、`$for` 分支与调用都配对正确。 */
+
+$macro ADD(x, y) -> {
+((x) + (y))
+}
+
+$macro DESCRIBE(...items) -> {
+$for (item in items) {
+std::core::println("{}", item);
+}
+}
+
+void main() {
+    int64 total = $ADD(1, 2);
+    $DESCRIBE(total);
+}

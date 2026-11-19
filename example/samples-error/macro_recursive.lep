@@ -1,0 +1,4 @@
+$macro LOOP(x) -> {
+$LOOP(x)
+}
+void main() { return $LOOP(1); }

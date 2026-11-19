@@ -1,0 +1,81 @@
+struct Fields {
+    int64 a;
+    int64 b;
+}
+
+$macro choose(value)[fallback: expr]{name: expr} -> expr {
+    $match (value is ident) {
+        $regex (value is "a") { name } $else { fallback }
+    } $else (is expr) {
+        value
+    } $else {
+        fallback
+    }
+}
+
+$macro sum() -> {
+    $let count = 0; $let total = 0;
+    $for (field in $fields<Fields>()) {
+        $set count = count + 1;
+    }
+    $while (count > 0) {
+        $set total = total + count;
+        $set count = count - 1;
+    }
+    $loop {
+        $set total = total + 1;
+        $break;
+    }
+    total
+}
+
+$macro addPairs(...left: expr)[...right: expr] -> {
+    $let sum = 0;
+    $for ((a, b) in (left, right)) {
+        $if (a == 0) {
+            $continue;
+        }
+        $set sum = sum + a * b;
+    }
+    sum
+}
+
+$macro nested() -> expr {
+    $if (true) {
+        $if (true) { 8 } $else { 0 }
+    }
+}
+
+$macro makeFunction(name: ident) -> item {
+    $if (false) {
+        $compile_error("skipped");
+    } $else_if (true) {
+        int64 name() { return 5; }
+    }
+}
+
+$macro makeMethod(name: ident) -> member {
+    $loop {
+        int64 name() { return 6; }
+        $break;
+    }
+}
+
+$makeFunction(five);
+struct Methods {
+    $makeMethod(six);
+}
+
+$if (true) {
+    const int64 topValue = 7;
+} $else {
+    $compile_error("skipped");
+}
+
+void main() {
+    Methods methods;
+    assert($nested() == 8);
+    assert($addPairs(0, 4, 5)[9, 3, 2] == 22);
+    println("{} {} {} {} {} {} {}", $choose(a)[1]{2}, $choose(3)[1]{2},
+            $choose(other)[1]{2}, $sum(), five(), methods.six(), topValue);
+}

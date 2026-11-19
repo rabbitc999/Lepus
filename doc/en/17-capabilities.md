@@ -1,0 +1,144 @@
+# 17 Current capabilities and implementation limits
+
+<!-- LANGUAGE NAVIGATION -->
+**English** · [简体中文](../17-capabilities.md)
+<!-- END LANGUAGE NAVIGATION -->
+
+Loops use `while`, `loop`, and `for (... in ...)`. Both `for-in` and `while` support value expressions with `else` and `yield`. List literals use `[a, b, c]`; Set literals use `{a, b, c}`. Intervals use `std::core::range(a, b)` (half open) and `rangeEq(a, b)` (inclusive). Integers and char support intervals directly; custom iteration types implement `NextValue<T>`. Interval match patterns accept integers and char, while ordinary custom value patterns use `Equal<T>`.
+
+[Documentation index](README.md) · [中文](17-capabilities.md)
+
+This page describes the current checkout. Read the version from [`VERSION`](../../VERSION) and
+release history from [`CHANGELOG.md`](../../CHANGELOG.md). Grammar, standard-library sources, build
+configuration and regressions define the implementation. Historical measurements retain the actual
+tested version, configuration and date; they do not automatically describe current builds or other targets.
+
+## Language and resources
+
+Standard-library failures use `Result<T, Error>` with an owned interface payload that retains the concrete error. IoError, ParseError, CsvError and other structured errors keep their variants, positions and messages. Text errors use MessageError::from(text) before boxing as Error. Shared handlers accept an Error value, Error const& or an E: Error generic constraint. Custom Result<T, E> values may retain a concrete E; when E implements Error, ? can propagate into a function returning Result<U, Error>.
+
+Heap object allocation uses `new T`, or `new T(args)` for construction. Ownership transfer uses `move value`; pointers and references dereference one level automatically, and an extra address-of operand is not accepted.
+
+Support includes [return control expressions, statement-level named closures and member macros](29-declaration-sugars.md). Hidden result bindings preserve moves, copies and borrow cleanup. Member macros can add interfaces with `$implement` and generate methods subject to normal interface, borrow and resource checks.
+
+Generic closures support `fn<T>`, inference from argument types, full specialization and uniquely most specific partial specialization. They can be direct struct members and can be passed or stored as values of a generic type parameter `F`. Calls with different types share one closure environment, preserving ordinary capture, copy and borrow rules. See the [language reference](04-language-reference.md).
+
+Sources and macros are shared through `module` / `import`; a macro definition is registered in the module that defines it and calls resolve by module visibility, with `std::core` always visible and qualified names (`$std::core::assert(...)`) naming a module directly. The generated parser builds macro ASTs; semantic analysis performs hygienic substitution and static type inference before quadruple generation. Ordered round, square and curly groups, type parameters, variadic fragments, five complete syntax categories and ECMAScript regex matching are supported. See [hygienic AST macros](25-literals-operators-macros.md#compile-time-hygienic-ast-macros).
+
+Executable entry points support only `void main`, with no parameters or `List<String>` arguments. It exits with code 0 on normal completion; panic still fails. Trailing semicolons on `struct`, `enum`, and `interface` declarations are optional.
+
+native shared libraries expose functions using `export` and may omit `main`. `lepus_init` and `lepus_finish` run global initialization and cleanup. Executables still require an entry function.
+
+| Area | Implemented capability and contract |
+| --- | --- |
+| Types | Fixed-width integers, float32/float64, bool, char, String, big numbers; arrays, tuples, structs, payload enums, containers and function types |
+| Abstraction | Overloads, generic monomorphization, interface constraints, associated types, constant generics, default type parameters, default interface methods and runtime interface dispatch |
+| Function values | Anonymous functions use `fn`; inline arguments, nested higher-order functions and const/mut/copy/move captures are supported |
+| Control flow | Match, guards, integer singleton/range overlap warnings, destructuring, ranges, if expressions, block expressions with `yield value;`, tuple exits with `yield (a, b);`, nested-loop exits with `break label;`, implicit moves of direct variables and value breaks across non-value loops, hygienic macros and compile-time template selection |
+| Errors and cleanup | Option, Result, custom error propagation, `?`, panic, defer, scope(exit), Drop and Closeable |
+| Ownership | Ordinary owned-value assignment and value arguments copy; move transfers resources. The old binding cannot be read, written or rebound; a complete move permits a new declaration using that name |
+| References | Non-null read-only/mutable references; `Option<T const&>` and `Option<T mut&>` represent an optional reference, with None constructing no reference |
+| Checking | Independent provenance and control-flow checking tracks locals, fields, aliases, moves, releases and closure captures; callable uses validate captured sources, preserving dependencies through copies, destructuring and aggregates; alias sharing is allowed, without a global exclusive-borrow rule |
+
+Owned values have deterministic cleanup without GC. References, host resources and aggregates containing
+references retain their individual contracts. Manually allocated storage must be released as specified.
+Static checking does not cover arbitrary raw memory, external host behavior or every concurrent invalidation.
+String indexing and slicing use UTF-8 bytes; slice endpoints may split multibyte encodings; use `std::utf8` for code-point operations.
+Ordinary string literals share generated data by byte contents and cannot be modified or mutably borrowed; independent String values retain value copying.
+Runtime array parameters `T[]` copy the length and elements. `T[] &` / `T[] const&`
+borrow read-only arrays; `T[] mut&` borrows a mutable array. Array references retain
+element layout, runtime length and the source lifetime.
+See the [language reference](04-language-reference.md), [core concepts](03-core-concepts.md) and
+[move rules](24-ownership-move.md).
+
+Explicit Any targets support contextual boxing in generics and heterogeneous List/Set/Map, exact extraction, clearing, and borrow checks. Interface references bind directly to implementing concrete references without an Any intermediary; views still borrow their source. See [Any and interface binding](23-any-generics-data.md).
+
+Every non-void value has default `toString()` and String conversion: structs `{...}`, List/arrays `[...]`, Set/Map `{...}`, and tuples `(...)`, with quoted and escaped nested strings. User toString and ImplicitConvert<String> supply missing counterparts; dedicated explicit conversions retain priority. Reflection is not required. See [value-text rules](04-language-reference.md#default-value-text-and-string-conversion).
+
+## Execution, optimization and deployment
+
+`run` compiles and executes checked native code. `build` defaults to unchecked export and accepts an explicit `--checked` flag. Quadruple export is available for analysis.
+
+Release builds run LLVM O3, global DCE, full LTO and section GC; quadruples are not optimized internally — LLVM does all optimization. Reachable data uses sparse initialization, and arrays reuse runtime zeroing. Hosts embed native shared libraries through generated C ABI headers.
+
+DWARF source locations and variables support GDB/MI breakpoints, stepping and variable inspection in VS Code. Actual platforms and hashes are recorded separately; cross-building a compiler does not establish native compilation support. See [LLVM build](38-build.md) and [native debugging](43-native-debugging.md).
+
+## Host integration and reflection
+
+Lepus calls actual C prototypes through per-function `#abi("C", "library", "symbol")` directives or host entries
+in an opaque C registry. `#export("symbol")` exports scalars and resource-free value structs through the C ABI.
+References, aggregates, arrays, optional references, owned returns and limited header import follow explicit ABI
+contracts; declarations must match the target's actual signatures.
+
+Hosts invoke named functions, inline functions and captured closures through `lepus_abi_invoke`, supplying slot
+kinds and checking result kind and status. Contexts remain valid only on the same thread during the enclosing
+synchronous call. Owned strings, temporary buffers and records use their respective release operations.
+`lepus_abi_tracked_temporary` joins aggregate storage to the runtime cleanup queue; early release removes its entry.
+See [host integration](08-host-integration.md) and the [callback example](../../example/native-callbacks/README.md).
+
+## Libraries, embedded Linux and tools
+
+Libraries cover containers/algorithms, iterators, math, numerical methods, text/encoding, JSON/TOML/CSV,
+files/directories, TCP/basic HTTP, SQL drivers, isolated threads, bounded channels, messages, explicit shared
+values and events. The [API index](../library/README.md) defines the module list; overview
+pages do not maintain a separate module count. HTTP excludes TLS; external databases need their
+clients and services. Events use weak host posting and explicit bounded receive; application event handlers run only when called by the receiver.
+
+Desktop and embedded Linux use the same `source/ircode/` core. The target needs a C++17 toolchain,
+sufficient memory and the system services required by its program. Build native glue and dependencies
+for the target architecture. Linux devices use ordinary hosts, with no separate embedded deployment
+mode or front-end module blacklist. Memory and instruction budgets use the general runtime options. See
+[deployment](06-deployment.md). Microcontroller, bare-metal firmware and board SDKs are outside the support scope.
+
+Installation packages target Windows x64, Ubuntu x64/ARM64 and CentOS x64. The x86 runtime fails startup validation, so x86 installers are not provided. Native host layouts currently target x64. See [installation and architecture builds](39-installation-packages.md) for LLVM variants and package formats.
+
+The CLI provides projects, checks, formatting, tests and dependency locks/caches. LSP provides diagnostics,
+completion, hover, signatures and cross-file navigation, plus complete inferred `let` type hover, optional type inlays,
+grouped macro signatures, expansion origins, references and rename based on unique bindings. Ownership diagnostics
+can link related declarations and cleanup locations. Ambiguous overloads or macro template bindings reject refactoring;
+see [LSP details](../man/en/lsp.md). DAP provides breakpoints, stepping and stacks;
+variable inspection and expression evaluation are not implemented. Dependencies support local directories,
+fixed Git commits and hashed HTTP/HTTPS archives. Feature implementation, regression evidence and
+long-term production validation are separate claims.
+
+Tool interfaces support Chinese and English; unsupported system locales fall back to English and unsupported explicit language selections are rejected. `man book`, `man keyword`, and `man skill` query embedded book, keyword and AI SKILL data. The VS Code package includes the same SKILL.
+
+API manuals require `lepus man api`; omitting `api` produces a usage error. `lepus man macro` displays embedded macro help.
+
+`opcode T { new = create; drop = destroy; copy = clone; };` declares an opaque glue object.
+Copies call the declared glue function. `#NonCopyable` disables copying and omits copy.
+BigInteger multiplication selects Karatsuba or dual-prime NTT by padded operation cost, reuses forward transforms for squares, and has no schoolbook kernel.
+Division combines Knuth limb division with Burnikel–Ziegler recursion, truncating toward zero with the dividend's remainder sign.
+Historical measurements remain in Git history; the current version comparison does not include big-number workloads.
+A struct may declare multiple opcode fields. BigInteger, BigDecimal, File and Process
+records and operations reside in standard library glue; the runtime core manages generic NativeRecord
+shells and a host service table. File and Process are noncopyable. Process is the public type name.
+List, Map and Set use parameterized opcode types and opaque standard library records; there is no
+frontend Container Kind or dedicated runtime collection Kind or method implementation. List uses ArrayList
+storage. Map/Set use HashMap/HashSet storage for intrinsic scalar keys and custom keys implementing
+Hash<T>; custom keys with Equal<bool,T> but no Hash<T> use ArrayMap/ArraySet with linear lookup.
+Hash collisions are resolved with Equal. Map and Set promise neither sorted nor insertion order,
+including keyAt, valAt, at, iteration and default text. String isolation remains unfinished.
+
+
+Image is a deeply copied opcode whose dimensions and contiguous RGBA pixels belong to glue. width()/height() query dimensions; pixels() returns an independent list snapshot. TcpSocket and TcpListener are noncopyable opcodes that close automatically at scope exit; explicit move transfers ownership, and each connection retains its own read status and error. Generic Vector<T> and Matrix<T> retain their aggregate API; ScalarArray<T> stores built-in integer and floating-point values in a ScalarStorage opcode with independent copies. Standard glue implements string concatenation, slicing, comparison, search and numeric-to-text conversion. Internal entry points use the __std_ prefix; the runtime retains execution control, memory safety and closures.
+
+Network async methods use nonblocking polling and NET_PENDING, with cancellable thread sleeps between polls; dedicated threads may use synchronous I/O. connectAsync currently accepts numeric IPv4 addresses only; synchronous connect retains hostname resolution. sendAsync returns a partial byte count and accepts an offset; receiveLineAsync preserves incomplete lines with a 1 MiB buffer limit.
+
+Isolated threads support `waitFor(thread, millis)` with a nonnegative millisecond timeout and `tryWait(thread)` for a zero-timeout wait. Both return `true` after completion and collection, or `false` on timeout without cancelling the target. Target failures retain their original diagnostics; a collected handle cannot be waited on again.
+
+Threads use `std::thread::Thread` with copied initial arguments, cancellation, completion results, groups and fixed pools. Bounded channels and explicit event queues replace coroutine scheduling and implicit interrupt callbacks. See [concurrency contracts](30-thread-concurrency.md) for timeouts, cleanup and blocking host I/O limits.
+
+## Backend layout and TOML saving
+
+Normal run/build sends the semantically checked AST directly to LLVM code generation. Quadruple export and compatibility input remain available for analysis and native generation. LLVM performs O3/LTO optimization; static and external LLVM variants share the backend sources.
+
+Saving a parsed std::toml document root retains its original comments and layout. In the underlying C++ value model, edits with the same container shape preserve layout. Structural edits retain all comment content, but may move comments to the beginning of the document. Parsing and saving repeatedly neither loses nor duplicates comments. See the [TOML API](../library/std-toml.md).
+
+`std::cas::Expr` provides string parsing, immutable AST traversal, exact rational arithmetic and calculus. Generic `std::math` functions support ordinary numbers, high precision decimals and symbolic expressions. See [symbolic computation and high precision mathematics](31-symbolic-computation.md) for algorithm, trimming and concurrency boundaries.
+
+Connections and timer sources have exclusive owners; containers and random generators copy their state, and JSON/TOML values own independent subtrees. String includes common text methods and explicit UTF-8 code point operations. See [ownership, snapshots and string boundaries](32-opcode-values-strings.md).
+
+Reflection provides exact typed field access and generates codecs for JSON, TOML, byte serialization, and annotated std::sql models. Dynamic SQL generation and direct binding currently support SQLite; bound execution on other backends reports an explicit error. See [reflection serialization and dynamic SQL](33-reflection-serialization-sql.md).
+
+The companion book contains 29 chapters, exercises with reference answers, literary adaptations and compilation and native compilation diagrams. General host callbacks and event APIs retain their documented protocols.

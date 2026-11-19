@@ -1,0 +1,4 @@
+$macro system -> {
+1
+}
+void main() {}

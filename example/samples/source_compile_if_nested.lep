@@ -1,0 +1,38 @@
+$if ($!A) {
+    $if ($!B) {
+        int64 featureLevel() { return 3; }
+    } $else {
+        int64 featureLevel() { return 2; }
+    }
+} $else {
+    $if ($!B) {
+        int64 featureLevel() { return 1; }
+    } $else {
+        int64 featureLevel() { return 0; }
+    }
+}
+$if (false) {
+    $if (missingCondition()) {
+        MissingType unused;
+    }
+}
+
+void main() {
+    const bool original = true;
+    const bool saved = original;
+    const bool flag = $!A;
+    {
+        bool original = false;
+        $if (saved) {
+            assert(!original);
+        } $else {
+            missingFunction();
+        }
+        $if (flag) {
+            assert(featureLevel() >= 2);
+        } $else {
+            assert(featureLevel() < 2);
+        }
+    }
+    println("{}", featureLevel());
+}

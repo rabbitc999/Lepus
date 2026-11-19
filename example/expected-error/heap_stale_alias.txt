@@ -1,0 +1,1 @@
+lepus: example/samples-error/heap_stale_alias.lep 第 5 行：[LEP1205] 借用来源已释放，不能继续访问：*

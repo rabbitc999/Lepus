@@ -1,0 +1,157 @@
+module std::toml;
+
+import std::serialization;
+
+/** 将反射模型编码为 TOML 文档；根值必须是对象。 */
+Result<String,Error> __encodeToml<T>(T const& value) {
+    let encoded = std::json::serialize<T>(value);
+    if (encoded.isErr()) { return Result<String,Error>::Fail(MessageError::from(encoded.error())); }
+    String converted = std::serialization::__transcode(encoded.unwrap(), true);
+    if (!converted.startsWith("1")) { return Result<String,Error>::Fail(MessageError::from(converted.removePrefix("0"))); }
+    return Result<String,Error>::Ok(converted.removePrefix("1"));
+}
+/** 按具体反射类型解码 TOML，不接受静默数值窄化。 */
+Result<T,Error> __decodeToml<T>(String text) {
+    String converted = std::serialization::__transcode(text, false);
+    if (!converted.startsWith("1")) { return Result<T,Error>::Fail(MessageError::from(converted.removePrefix("0"))); }
+    return std::json::deserialize<T>(converted.removePrefix("1"));
+}
+
+__TomlValueStorage __parse(String text);
+bool __valid(int64 document);
+String __takeError(int64 document);
+bool __close(int64 document);
+int64 __kind(int64 document, int64 node);
+int64 __size(int64 document, int64 node);
+int64 __int(int64 document, int64 node);
+float64 __float(int64 document, int64 node);
+bool __bool(int64 document, int64 node);
+bool __textAvailable(int64 document, int64 node);
+String __string(int64 document, int64 node);
+List<uint8> __bytes(int64 document, int64 node);
+String __dateTime(int64 document, int64 node);
+String __dump(int64 document, int64 node);
+__TomlValueStorage __find(int64 document, int64 node, String key);
+__TomlValueStorage __findBytes(int64 document, int64 node, List<uint8> key);
+__TomlValueStorage __at(int64 document, int64 node, int64 index);
+bool __keyAvailable(int64 document, int64 node, int64 index);
+String __key(int64 document, int64 node, int64 index);
+List<uint8> __keyBytes(int64 document, int64 node, int64 index);
+
+int64 __valueNew();
+int64 __valueCopy(int64 handle);
+void __valueDrop(int64 handle);
+opcode __TomlValueStorage {
+    new = std::toml::__valueNew;
+    copy = std::toml::__valueCopy;
+    drop = std::toml::__valueDrop;
+};
+
+/** 拥有独立子树的值；复制深复制，关闭只影响当前值。 */
+struct TomlValue : Iterator<TomlValue> {
+    __TomlValueStorage __storage;
+    /** 检查当前值是否有效。 */
+    bool isValid() { return __valid(self.__storage.opcode); }
+    /** 关闭当前值；副本与已提取的子值继续有效，重复关闭返回 false。 */
+    bool close() { return __close(self.__storage.opcode); }
+    int64 kind() { return __kind(self.__storage.opcode, 0); }
+    bool isNull() { return self.kind() == 0; }
+    bool isBool() { return self.kind() == 1; }
+    bool isInt() { return self.kind() == 2; }
+    bool isFloat() { return self.kind() == 3; }
+    bool isString() { return self.kind() == 4; }
+    bool isArray() { return self.kind() == 5; }
+    bool isObject() { return self.kind() == 6; }
+    bool isTable() { return self.isObject(); }
+    bool isDateTime() { return self.kind() == 7; }
+    /** 数组元素数或对象成员数，标量为零。 */
+    int64 len() { return __size(self.__storage.opcode, 0); }
+    Option<int64> asInt() {
+        if (!self.isInt()) { return Option<int64>::None; }
+        return Option<int64>::Value(__int(self.__storage.opcode, 0));
+    }
+    Option<float64> asFloat64() {
+        if (!self.isInt() && !self.isFloat()) { return Option<float64>::None; }
+        return Option<float64>::Value(__float(self.__storage.opcode, 0));
+    }
+    Option<bool> asBool() {
+        if (!self.isBool()) { return Option<bool>::None; }
+        return Option<bool>::Value(__bool(self.__storage.opcode, 0));
+    }
+    /** 非字符串或含零字节时返回 None；含零字节的文本使用 asBytes。 */
+    Option<String> asString() {
+        if (!__textAvailable(self.__storage.opcode, 0)) { return Option<String>::None; }
+        String result = __string(self.__storage.opcode, 0);
+        return Option<String>::Value(result);
+    }
+    Option<List<uint8>> asBytes() {
+        if (!self.isString()) { return Option<List<uint8>>::None; }
+        List<uint8> result = __bytes(self.__storage.opcode, 0);
+        return Option<List<uint8>>::Value(result);
+    }
+    Option<String> asDateTime() {
+        if (!self.isDateTime()) { return Option<String>::None; }
+        String result = __dateTime(self.__storage.opcode, 0);
+        return Option<String>::Value(result);
+    }
+    Option<TomlValue> find(String key) {
+        __TomlValueStorage child = __find(self.__storage.opcode, 0, key);
+        if (!__valid(child.opcode)) { return Option<TomlValue>::None; }
+        TomlValue value; value.__storage = move child;
+        return Option<TomlValue>::Value(move value);
+    }
+    /** 允许包含零字节的 UTF-8 键名。 */
+    Option<TomlValue> findBytes(List<uint8> key) {
+        __TomlValueStorage child = __findBytes(self.__storage.opcode, 0, key);
+        if (!__valid(child.opcode)) { return Option<TomlValue>::None; }
+        TomlValue value; value.__storage = move child;
+        return Option<TomlValue>::Value(move value);
+    }
+    /** 数组按索引读取；对象按插入顺序读取成员值。 */
+    Option<TomlValue> at(int64 index) {
+        __TomlValueStorage child = __at(self.__storage.opcode, 0, index);
+        if (!__valid(child.opcode)) { return Option<TomlValue>::None; }
+        TomlValue value; value.__storage = move child;
+        return Option<TomlValue>::Value(move value);
+    }
+    Option<TomlValue> iterator(int64 index) { return self.at(index); }
+    /** 对象成员的键名；越界或键中含零字节时返回 None。 */
+    Option<String> keyAt(int64 index) {
+        if (!__keyAvailable(self.__storage.opcode, 0, index)) { return Option<String>::None; }
+        String result = __key(self.__storage.opcode, 0, index);
+        return Option<String>::Value(result);
+    }
+    Option<List<uint8>> keyBytesAt(int64 index) {
+        if (!self.isObject() || index < 0 || index >= self.len()) { return Option<List<uint8>>::None; }
+        List<uint8> result = __keyBytes(self.__storage.opcode, 0, index);
+        return Option<List<uint8>>::Value(result);
+    }
+    String dump() { return __dump(self.__storage.opcode, 0); }
+};
+
+/** 解析文本；失败返回包含行列信息的诊断。 */
+Result<TomlValue, Error> parse(String text) {
+    __TomlValueStorage handle = __parse(text);
+    if (!__valid(handle.opcode)) { String message = __takeError(handle.opcode); return Result<TomlValue, Error>::Fail(MessageError::from(message)); }
+    TomlValue value; value.__storage = move handle;
+    return Result<TomlValue, Error>::Ok(move value);
+}
+
+/** 按具体类型编码值，返回独立结果。 */
+Result<String,Error> serialize<T>(T const& value) {
+    return __encodeToml<T>(value);
+}
+/** 按具体类型校验输入并恢复拥有型值。 */
+Result<T,Error> deserialize<T>(String text) {
+    return __decodeToml<T>(text);
+}
+
+/** 为具体模型生成实例 TOML 编码和静态解码方法。 */
+$macro Toml<T>(encode:ident, decode:ident) -> member {
+    Result<String,Error> encode() {
+        return __encodeToml<T>(&self);
+    }
+    static Result<T,Error> decode(String text) {
+        return __decodeToml<T>(text);
+    }
+}

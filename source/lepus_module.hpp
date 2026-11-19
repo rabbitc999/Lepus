@@ -1,0 +1,793 @@
+#include "allocator/lepus_allocator.hpp"
+#ifndef LEPUS_MODULE_HPP
+#define LEPUS_MODULE_HPP
+
+#include "preprocess.hpp"
+#include "lepus_incremental.hpp"
+#include "lepus_package.hpp"
+#include "lepus_report.hpp"
+#include "lepus_stdlib.hpp"
+#include "lepus_interpolation.hpp"
+
+#include <algorithm>
+#include <cctype>
+#include <filesystem>
+#include <fstream>
+#include <future>
+#include <thread>
+#include <map>
+#include <set>
+#include <sstream>
+#include <string>
+#include <vector>
+
+namespace lepus_module
+{
+
+/** @brief 同一物理行内的模块头声明与保留原列号的剩余源码。 */
+struct HeaderLine
+{
+    std::size_t index;
+    Memory::String text, rest;
+};
+
+/** @brief 由词法可见头部收集的模块身份、依赖及工程头部抽取信息。 */
+struct UnitInfo
+{
+    Memory::String name;
+    Memory::Vector<Memory::String> imports;
+    bool hasModule = false;
+    Memory::Vector<HeaderLine> headers;
+};
+
+inline Memory::String trim(const Memory::String &text)
+{
+    const std::size_t begin = text.find_first_not_of(" \t\r");
+    if (begin == Memory::String::npos) return {};
+    const std::size_t end = text.find_last_not_of(" \t\r");
+    return text.substr(begin, end - begin + 1u);
+}
+
+inline bool identifier(const Memory::String &text)
+{
+    if (text.empty() || !(std::isalpha(static_cast<unsigned char>(text[0])) || text[0] == '_'))
+        return false;
+    for (const unsigned char ch : text)
+        if (!(std::isalnum(ch) || ch == '_')) return false;
+    return true;
+}
+
+inline bool moduleName(const Memory::String &text)
+{
+    std::size_t begin = 0;
+    while (begin < text.size())
+    {
+        const std::size_t end = text.find("::", begin);
+        const Memory::String part = text.substr(begin, end == Memory::String::npos ? Memory::String::npos : end - begin);
+        if (!identifier(part)) return false;
+        if (end == Memory::String::npos) return true;
+        begin = end + 2u;
+    }
+    return false;
+}
+
+/**
+ * @brief 解析一条以分号结束的模块或导入声明，注释由调用方遮蔽。
+ * @param line 单条声明的词法可见源码。
+ * @param word 要求的声明关键字。
+ * @param name 成功时接收规范模块路径。
+ * @return 声明及路径均完整有效时为真。
+ */
+inline bool directive(const Memory::String &line, const Memory::String &word, Memory::String &name)
+{
+    const Memory::String value = trim(line);
+    if (value.compare(0, word.size(), word) != 0) return false;
+    if (value.size() <= word.size() || !std::isspace(static_cast<unsigned char>(value[word.size()])))
+        return false;
+    if (value.back() != ';') return false;
+    std::size_t at = word.size();
+    name.clear();
+    while (at < value.size())
+    {
+        while (at < value.size() && std::isspace(static_cast<unsigned char>(value[at]))) ++at;
+        const auto begin = at;
+        while (at < value.size() && (std::isalnum(static_cast<unsigned char>(value[at])) || value[at] == '_')) ++at;
+        const auto part = value.substr(begin, at - begin);
+        if (!identifier(part)) return false;
+        if (!name.empty()) name += "::";
+        name += part;
+        while (at < value.size() && std::isspace(static_cast<unsigned char>(value[at]))) ++at;
+        if (at + 1u == value.size() && value[at] == ';') return true;
+        if (value.compare(at, 2u, "::") != 0) return false;
+        at += 2u;
+    }
+    return false;
+}
+
+/**
+ * @brief 遮蔽注释及字符串内容，保留长度、换行及字面量的代码占位。
+ * @param source 尚未进行插值归一化的单元源码。
+ * @return 供模块头识别使用的同长度词法视图，不改写实际源码。
+ */
+inline Memory::String headerCode(const Memory::String &source)
+{
+    Memory::String visible = source;
+    for (std::size_t at = 0; at < source.size();)
+    {
+        const auto begin = at;
+        bool literal = false;
+        if (source.compare(at, 2u, "//") == 0)
+        {
+            const auto end = source.find('\n', at + 2u);
+            at = end == source.npos ? source.size() : end;
+        }
+        else if (source.compare(at, 2u, "/*") == 0)
+        {
+            const auto end = source.find("*/", at + 2u);
+            at = end == source.npos ? source.size() : end + 2u;
+        }
+        else if (source[at] == 'f' && at + 1u < source.size() && source[at + 1u] == '"'
+                 && (at == 0u || !(std::isalnum(static_cast<unsigned char>(source[at - 1u])) || source[at - 1u] == '_' || source[at - 1u] == '$')))
+        {
+            Memory::String ignored;
+            lepus_interpolation::Scanner scanner{ source, ignored };
+            scanner.at = at;
+            scanner.string();
+            at = ignored.empty() ? scanner.at : source.size();
+            literal = true;
+        }
+        else if (source[at] == '"' || source[at] == '\'')
+        {
+            const auto quote = source[at++];
+            while (at < source.size())
+            {
+                const auto ch = source[at++];
+                if (ch == '\\' && at < source.size()) ++at;
+                else if (ch == quote) break;
+            }
+            literal = true;
+        }
+        else
+        {
+            ++at;
+            continue;
+        }
+        for (auto index = begin; index < at; ++index)
+            if (visible[index] != '\n' && visible[index] != '\r' && visible[index] != '\t') visible[index] = ' ';
+        if (literal) visible[begin] = '@';
+    }
+    return visible;
+}
+
+/**
+ * @brief 按顶层语句边界收集模块头，保留同行后续代码及原始行列。
+ * @param input 已完成前处理的单元。
+ * @param info 接收身份、依赖和按物理行合并的头部信息。
+ * @param error 声明重复或位置不合法时接收诊断。
+ * @return 模块头满足装载约束时为真。
+ */
+inline bool inspect(const preprocess::Result &input, UnitInfo &info, Memory::String &error)
+{
+    const auto visible = headerCode(input.text);
+    Memory::Vector<std::pair<std::size_t, std::size_t>> headers;
+    bool code = false;
+    bool statement = true;
+    std::size_t braces = 0, parentheses = 0, brackets = 0;
+    for (std::size_t at = 0; at < visible.size();)
+    {
+        const auto ch = visible[at];
+        if (std::isspace(static_cast<unsigned char>(ch)))
+        {
+            ++at;
+            continue;
+        }
+        if (statement && braces == 0u && parentheses == 0u && brackets == 0u)
+        {
+            auto wordEnd = at;
+            while (wordEnd < visible.size() && (std::isalnum(static_cast<unsigned char>(visible[wordEnd])) || visible[wordEnd] == '_')) ++wordEnd;
+            const auto word = visible.substr(at, wordEnd - at);
+            const auto end = (word == "module" || word == "import") ? visible.find(';', wordEnd) : visible.npos;
+            Memory::String name;
+            if (end != visible.npos && directive(visible.substr(at, end - at + 1u), word, name))
+            {
+                if (word == "module")
+                {
+                    if (info.hasModule)
+                    {
+                        error = "同一文件只能声明一次 module";
+                        return false;
+                    }
+                    if (code)
+                    {
+                        error = "module 声明必须是文件开头的第一条有效语句";
+                        return false;
+                    }
+                    info.hasModule = true;
+                    info.name = name;
+                }
+                else
+                {
+                    if (code)
+                    {
+                        error = "import 必须写在模块文件头部、普通声明之前";
+                        return false;
+                    }
+                    info.imports.push_back(name);
+                }
+                headers.emplace_back(at, end + 1u);
+                at = end + 1u;
+                continue;
+            }
+            code = true;
+            statement = false;
+        }
+        if (ch == '{') ++braces;
+        else if (ch == '}' && braces) --braces;
+        else if (ch == '(') ++parentheses;
+        else if (ch == ')' && parentheses) --parentheses;
+        else if (ch == '[') ++brackets;
+        else if (ch == ']' && brackets) --brackets;
+        if ((ch == ';' || ch == '}') && braces == 0u && parentheses == 0u && brackets == 0u) statement = true;
+        ++at;
+    }
+    std::size_t row = 0, next = 0;
+    for (std::size_t begin = 0; begin < input.text.size(); ++row)
+    {
+        const auto newline = input.text.find('\n', begin);
+        const auto end = newline == input.text.npos ? input.text.size() : newline;
+        while (next < headers.size() && headers[next].second <= begin) ++next;
+        if (next == headers.size()) break;
+        if (headers[next].first >= end)
+        {
+            begin = newline == input.text.npos ? input.text.size() : newline + 1u;
+            continue;
+        }
+        HeaderLine line{ row, Memory::String(end - begin, ' '), input.text.substr(begin, end - begin) };
+        bool found = false;
+        for (auto index = next; index < headers.size() && headers[index].first < end; ++index)
+        {
+            found = true;
+            for (auto pos = std::max(begin, headers[index].first); pos < std::min(end, headers[index].second); ++pos)
+            {
+                line.text[pos - begin] = visible[pos];
+                if (!std::isspace(static_cast<unsigned char>(visible[pos]))) line.rest[pos - begin] = ' ';
+            }
+        }
+        if (found) info.headers.push_back(std::move(line));
+        begin = newline == input.text.npos ? input.text.size() : newline + 1u;
+    }
+    return true;
+}
+
+/**
+ * @brief 按模块限定名查找源文件。
+ * @param name 完整模块名。
+ * @param fromDir 导入者所在目录。
+ * @param includeDirs 显式包含目录。
+ * @param path 命中时接收规范路径。
+ * @param explicitOnly 仅查找显式目录，供内置原生模块的覆盖机制使用。
+ * @param cache 可选的增量缓存，包含尚未落盘的编辑器模块。
+ * @return 存在普通文件或编辑器覆盖时为真。
+ */
+inline bool findModule(const Memory::String &name, const Memory::String &fromDir,
+                       const Memory::Vector<Memory::String> &includeDirs, Memory::String &path,
+                       bool explicitOnly = false, const lepus_incremental::Cache *cache = nullptr)
+{
+    namespace fs = std::filesystem;
+    Memory::String relative = name;
+    for (std::size_t at = 0; (at = relative.find("::", at)) != Memory::String::npos;)
+        relative.replace(at, 2u, "/");
+    Memory::Vector<fs::path> candidates;
+    if (!explicitOnly)
+    {
+        candidates.push_back(Memory::u8path(fromDir) / (relative + ".lep"));
+        candidates.push_back(Memory::u8path(fromDir) / "modules" / (relative + ".lep"));
+    }
+    for (const Memory::String &dir : includeDirs)
+        candidates.push_back(Memory::u8path(dir) / (relative + ".lep"));
+    for (const fs::path &candidate : candidates)
+    {
+        std::error_code ec;
+        if (!fs::is_regular_file(candidate, ec) && !(cache && cache->hasOverlay(candidate.u8string().c_str()))) continue;
+        ec.clear();
+        path = fs::weakly_canonical(candidate, ec).u8string();
+        if (path.empty()) path = candidate.lexically_normal().u8string();
+        return true;
+    }
+    return false;
+}
+
+/**
+ * 把内嵌的标准库源码合成一份 preprocess::Result（行映射给合成来源，$line/$module 能对上）。
+ */
+inline preprocess::Result embeddedUnit(const Memory::String &name, const Memory::String &text)
+{
+    preprocess::Result result;
+    result.text = text;
+    std::size_t line = 1u;
+    std::size_t at = 0u;
+    /* 只给每个**内容行**（`\n` 之前的部分）记一条来源；末尾的 `\n` 不额外算一行，
+     * 与 preprocess 的 emitLine 语义一致，否则 lineMap 会比 text 多一条、后续行号错位。 */
+    while (at < text.size())
+    {
+        preprocess::LineOrigin origin;
+        origin.file = "<内建 " + name + ">";
+        origin.line = line++;
+        result.lineMap.push_back(origin);
+        const std::size_t newline = text.find('\n', at);
+        if (newline == Memory::String::npos) break;
+        at = newline + 1u;
+    }
+    return result;
+}
+
+/**
+ * @brief 在标准库核心末尾插入独立分界，后续导入与用户代码不进入核心资产。
+ * @param output 已装载标准库核心的合并输入及来源映射。
+ */
+inline void markStandardCore(preprocess::Result &output)
+{
+    if (!output.text.empty() && output.text.back() != '\n') output.text += '\n';
+    output.text += "// lepus-standard-core-boundary\n";
+    output.lineMap.push_back({ "<标准库核心分界>", 1u });
+}
+/**
+ * @brief 查找经过前端文本处理后保留的标准库核心分界。
+ * @param text 合并处理后的源码。
+ * @return 分界行起始位置，不存在时返回 npos。
+ */
+inline std::size_t findStandardCoreBoundary(const Memory::String &text)
+{
+    return text.find("// lepus-standard-core-boundary\n");
+}
+
+/**
+ * @brief 导入依赖段与入口单元的分界标记行。
+ *
+ * `Loader::load` 在追加入口单元之前插入；它之前可能包含标准库和用户导入模块。
+ * 内嵌核心资产使用独立的 core 分界，不将这段依赖整体固化到编译器中。
+ * 写成行注释：词法当空白处理，前处理与宏 / 插值 / 泛型各道文本 pass 都不改写它。
+ */
+inline const char *standardBoundaryLine() { return "// lepus-standard-boundary\n"; }
+
+/**
+ * @brief 在合并源码里定位标准库段的分界行。
+ * @param text 已经跑完整道文本 pass 的合并源码。
+ * @retval 分界行的起始下标；没有分界行时返回 `Memory::String::npos`。
+ * @note 返回的下标处正好是一行的开头，调用方按它把文本切成两半，后半段保留标记行，
+ *       于是后半段第一行的行号天然等于它在合并源码里的行号。
+ */
+inline std::size_t findStandardBoundary(const Memory::String &text)
+{
+    const Memory::String marker = "// lepus-standard-boundary";
+    std::size_t at = text.find(marker);
+    while (at != Memory::String::npos)
+    {
+        /* 必须是**独立一行**：前面只能是行首或换行，后面只能是换行或文本结束，
+         * 免得标准库或用户代码里出现同形文字（比如字符串字面量）时切错位置。 */
+        const bool lineStart = at == 0 || text[at - 1u] == '\n';
+        const std::size_t end = at + marker.size();
+        const bool lineEnd = end >= text.size() || text[end] == '\n' || text[end] == '\r';
+        if (lineStart && lineEnd) return at;
+        at = text.find(marker, end);
+    }
+    return Memory::String::npos;
+}
+
+class Loader
+{
+public:
+    Loader(preprocess::Options options, Memory::Vector<Memory::String> includeDirs,
+           lepus_incremental::Cache *cache = nullptr,
+           const lepus_package::Project *project = nullptr, bool parallelImports = false, bool mcu = false)
+        : options_(std::move(options)), includeDirs_(std::move(includeDirs)), cache_(cache), project_(project), parallelImports_(parallelImports), mcu_(mcu)
+    {
+        options_.allowIncludes = false;
+        options_.syntax = preprocess::Options::Syntax::Custom;
+        options_.directivePrefixes.clear();
+        options_.defines.clear();
+    }
+
+    bool rootFile(const Memory::String &path, preprocess::Result &output, Memory::String &error)
+    {
+        preprocessError_ = false;
+        preprocess::Result root;
+        if (!preprocessRoot(path, Memory::String(), root, error)) return false;
+        std::error_code ec;
+        const std::filesystem::path absolute = std::filesystem::weakly_canonical(path, ec);
+        const Memory::String base = (ec ? std::filesystem::path(path) : absolute).parent_path().string();
+        if (!loadStandard(base, output, error)) return false;
+        markStandardCore(output);
+        return load(root, base, Memory::String(), true, output, error);
+    }
+
+    bool rootText(const Memory::String &text, const Memory::String &label, const Memory::String &base,
+                  preprocess::Result &output, Memory::String &error)
+    {
+        preprocessError_ = false;
+        preprocess::Result root;
+        if (project_ && !project_->file.empty())
+        {
+            if (!preprocessRoot(label, text, root, error, base, true)) return false;
+        }
+        else
+        {
+            preprocess::Preprocessor preprocessor(options_);
+            if (!preprocessor.runText(text, label, base, root)) return diagnostics(root, error);
+        }
+        if (!loadStandard(base, output, error)) return false;
+        markStandardCore(output);
+        return load(root, base, Memory::String(), true, output, error);
+    }
+
+    bool preprocessError() const { return preprocessError_; }
+    /** @brief 返回本次检查并行提交的模块数。 @return 已提交模块总数。 */
+    std::size_t prefetchCount() const { return prefetchCount_; }
+    /**
+     * @brief 源文件 → 模块名（`$module` 的取值来源）。
+     *
+     * 按单元的来源映射登记模块身份，供导入模块中的宏正确取得定义位置。
+     */
+    const Memory::Map<Memory::String, Memory::String> &moduleByFile() const { return moduleByFile_; }
+
+    /**
+     * 某个模块（含经 import 传递加载的）是否真的进了本次编译。宿主胶水按它裁剪注册。
+     */
+    bool imported(const Memory::String &name) const { return loaded_.count(name) != 0u; }
+
+private:
+    bool preprocessRoot(const Memory::String &path, const Memory::String &text,
+                        preprocess::Result &root, Memory::String &error,
+                        const Memory::String &base = Memory::String(), bool inlineRoot = false)
+    {
+        if (!project_ || project_->file.empty())
+        {
+            if (!preprocessFile(path, root)) return diagnostics(root, error);
+            return true;
+        }
+        preprocess::Result entry;
+        bool ok;
+        if (inlineRoot)
+        {
+            preprocess::Preprocessor processor(options_);
+            ok = processor.runText(text, path, base, entry);
+        }
+        else
+            ok = preprocessFile(path, entry);
+        if (!ok)
+        {
+            root = entry;
+            return diagnostics(root, error);
+        }
+        entry.dependencies.push_back(project_->file);
+        UnitInfo entryInfo;
+        if (!inspect(entry, entryInfo, error)) return false;
+        // Keep the original entry's module/import header ahead of package values.
+        preprocess::Result header;
+        auto extractHeader = [&](preprocess::Result &unit, const UnitInfo &info) {
+            Memory::InputStringStream stream(unit.text);
+            Memory::String rebuilt, current;
+            std::size_t row = 0, next = 0;
+            while (std::getline(stream, current))
+            {
+                if (next < info.headers.size() && info.headers[next].index == row)
+                {
+                    const auto &declaration = info.headers[next++];
+                    header.text += declaration.text + "\n";
+                    header.lineMap.push_back(unit.lineMap[row]);
+                    rebuilt += declaration.rest + "\n";
+                }
+                else
+                    rebuilt += current + "\n";
+                ++row;
+            }
+            unit.text = rebuilt;
+        };
+        extractHeader(entry, entryInfo);
+        for (const auto &name : project_->imports)
+        {
+            header.text += "import " + name + ";\n";
+            header.lineMap.push_back({ project_->file, 1u });
+        }
+        root = header;
+        append(root, entry);
+        root.dependencies = entry.dependencies;
+        return true;
+    }
+
+    /**
+     * @brief 在语义遍历继续之前启动有限数量的独立源码前处理。
+     * @param imports 当前单元按源码顺序列出的导入。
+     * @param base 当前模块的目录。
+     * @param first 从当前导入之后开始前处理。
+     */
+    void prefetchImports(const Memory::Vector<Memory::String> &imports, const Memory::String &base, std::size_t first)
+    {
+        if (!parallelImports_ || first >= imports.size()) return;
+        const auto concurrency = std::thread::hardware_concurrency();
+        const auto limit = concurrency > 1 ? std::min(3u, concurrency - 1) : 0u;
+        if (prefetched_.size() >= limit) return;
+        Memory::Set<Memory::String> paths;
+        for (auto i = first; i < imports.size(); ++i)
+        {
+            const auto &name = imports[i];
+            if (name == "std" || name.compare(0, 5, "std::") == 0 || loaded_.count(name) || visiting_.count(name)) continue;
+            Memory::String path;
+            if (findModule(name, base, includeDirs_, path, false, cache_) && !prefetched_.count(path)) paths.insert(path);
+            if (paths.size() >= limit - prefetched_.size()) break;
+        }
+        for (const auto &path : paths)
+        {
+            try
+            {
+                prefetched_.emplace(path, std::async(std::launch::async, [this, path] {
+                    preprocess::Result unit;
+                    const bool ok = readModule(path, unit);
+                    return std::make_pair(ok, std::move(unit));
+                }));
+                ++prefetchCount_;
+            }
+            catch (const std::system_error &) { break; }
+        }
+    }
+
+    /**
+     * @brief 读取已开始的前处理，或在当前线程处理源码。
+     * @param path 模块源码文件。
+     * @param result 输出内容及诊断。
+     * @return 前处理成功时为真。
+     */
+    bool preprocessFile(const Memory::String &path, preprocess::Result &result)
+    {
+        const auto pending = prefetched_.find(path);
+        if (pending != prefetched_.end())
+        {
+            auto prepared = pending->second.get();
+            prefetched_.erase(pending);
+            result = std::move(prepared.second);
+            return prepared.first;
+        }
+        return readModule(path, result);
+    }
+
+    /**
+     * @brief 独立读取和前处理一个模块，可在工作线程上执行。
+     * @param path 模块源码文件。
+     * @param result 输出内容及诊断。
+     * @return 前处理成功时为真。
+     */
+    bool readModule(const Memory::String &path, preprocess::Result &result) const
+    {
+        if (cache_ != nullptr) return cache_->preprocessFile(path, options_, result);
+        preprocess::Preprocessor preprocessor(options_);
+        return preprocessor.runFile(path, result);
+    }
+
+    bool loadStandard(const Memory::String &base, preprocess::Result &output,
+                      Memory::String &error)
+    {
+        Memory::String embeddedText;
+        if (embedded::find("std::core", &embeddedText))
+        {
+            if (mcu_)
+            {
+                const Memory::String begin = "// LEPUS_MCU_OMIT_BEGIN";
+                const Memory::String end = "// LEPUS_MCU_OMIT_END";
+                for (std::size_t at = 0; (at = embeddedText.find(begin, at)) != Memory::String::npos;)
+                {
+                    const auto stop = embeddedText.find(end, at + begin.size());
+                    if (stop == Memory::String::npos)
+                    {
+                        error = "MCU 核心库裁剪标记未闭合";
+                        return false;
+                    }
+                    for (; at < stop + end.size(); ++at)
+                        if (embeddedText[at] != '\n' && embeddedText[at] != '\r') embeddedText[at] = ' ';
+                }
+            }
+            return load(embeddedUnit("std::core", embeddedText), base, "std::core",
+                        false, output, error);
+        }
+        Memory::String path;
+        if (!findModule("std::core", base, includeDirs_, path))
+        {
+            error = "找不到 Lepus 标准库 std/core.lep（可用 -I 指定其所在目录）";
+            return false;
+        }
+        preprocess::Result unit;
+        if (!preprocessFile(path, unit)) return diagnostics(unit, error);
+        if (!load(unit, std::filesystem::path(path).parent_path().string(), "std::core",
+                  false, output, error)) return false;
+        output.dependencies.push_back(path);
+        return true;
+    }
+
+    bool diagnostics(const preprocess::Result &result, Memory::String &error)
+    {
+        preprocessError_ = true;
+        if (result.diagnostics.empty())
+            error = "模块前处理失败";
+        else
+            error = result.diagnostics.front().toString();
+        return false;
+    }
+
+    void append(preprocess::Result &output, const preprocess::Result &input)
+    {
+        if (!output.text.empty() && output.text.back() != '\n')
+        {
+            output.text += '\n';
+            /* 补的换行也算一行（parser 按 `\n` 数行），必须同步补一个 lineMap 占位，
+             * 否则 text 的行数比 lineMap 条目多、后续行号整体偏一位。 */
+            preprocess::LineOrigin pad;
+            if (!input.lineMap.empty())
+                pad = input.lineMap.front();
+            else if (!output.lineMap.empty())
+                pad = output.lineMap.back();
+            output.lineMap.push_back(pad);
+        }
+        output.text += input.text;
+        output.lineMap.insert(output.lineMap.end(), input.lineMap.begin(), input.lineMap.end());
+        output.dependencies.insert(output.dependencies.end(), input.dependencies.begin(),
+                                   input.dependencies.end());
+        output.namingSuppressedFiles.insert(output.namingSuppressedFiles.end(), input.namingSuppressedFiles.begin(),
+                                            input.namingSuppressedFiles.end());
+    }
+
+    /**
+     * @brief 按普通导入路径装载源码或精确锁定的库包接口。
+     * @param name 完整模块名。
+     * @param base 当前模块目录。
+     * @param output 合并输入。
+     * @param error 失败诊断。
+     * @param path 已由显式搜索目录选定的文件；为空时使用普通路径查找。
+     * @return 成功为真。
+     */
+    bool importFile(const Memory::String &name, const Memory::String &base, preprocess::Result &output,
+                    Memory::String &error, Memory::String path = {})
+    {
+        if (path.empty() && !findModule(name, base, includeDirs_, path, false, cache_))
+        {
+            error = "找不到模块 " + name + "（需要 .lep）";
+            return false;
+        }
+        preprocess::Result child;
+        const auto parent = std::filesystem::u8path(path.c_str()).parent_path().u8string();
+        if (!preprocessFile(path, child)) return diagnostics(child, error);
+        if (!load(child, Memory::String(parent.c_str()), name, false, output, error)) return false;
+        output.dependencies.push_back(path);
+        return true;
+    }
+
+    bool load(const preprocess::Result &unit, const Memory::String &base,
+              const Memory::String &expected, bool root, preprocess::Result &output,
+              Memory::String &error)
+    {
+        UnitInfo info;
+        if (!inspect(unit, info, error)) return false;
+        /* 用户文件省略声明时属于 program，合并时显式补齐模块边界。 */
+        preprocess::Result effective = unit;
+        if (!info.hasModule)
+        {
+            preprocess::Result header;
+            header.text = "module program;\n";
+            header.lineMap.push_back(preprocess::LineOrigin{ "<入口>", 1u });
+            effective.text = header.text + unit.text;
+            effective.lineMap = header.lineMap;
+            effective.lineMap.insert(effective.lineMap.end(), unit.lineMap.begin(), unit.lineMap.end());
+            effective.dependencies = unit.dependencies;
+            info.hasModule = true;
+            info.name = "program";
+        }
+        /* 模块根保留：`std::core` 与 `std` 归标准库。导入方（root=false）本来就按 expected
+         * 核对模块名，这里挡的是**入口文件**自称标准库模块。 */
+        if (root && (info.name == "std::core" || info.name == "std" || info.name.compare(0u, 5u, "std::") == 0u))
+        {
+            error = "模块名 " + info.name + " 保留给标准库（核心 prelude 是 std::core，按需模块是 std::xxx）："
+                                            "用户文件不能用这个名字";
+            return false;
+        }
+        if (!root && !info.hasModule)
+        {
+            error = "导入文件必须以 `module " + expected + ";` 声明模块";
+            return false;
+        }
+        if (!expected.empty() && info.name != expected)
+        {
+            error = "import " + expected + " 找到的文件声明的是 module " + info.name;
+            return false;
+        }
+        const Memory::String key = info.hasModule ? info.name : Memory::String("__root");
+        if (visiting_.count(key) != 0u)
+        {
+            error = "模块循环导入：" + key;
+            return false;
+        }
+        if (!root && loaded_.count(key) != 0u) return true;
+        visiting_.insert(key);
+        /* 这个单元（连同它 `%include` 的文件）属于哪个模块 —— `$module` 就查这张表。 */
+        for (const preprocess::LineOrigin &origin : effective.lineMap)
+            if (!origin.file.empty()) moduleByFile_[origin.file] = key;
+        for (std::size_t i = 0; i < info.imports.size(); ++i)
+        {
+            const auto &imported = info.imports[i];
+            if (imported == "std::core") continue;
+            if (mcu_ && imported == "std::reflect")
+            {
+                error = "MCU 目标不提供 std::reflect";
+                return false;
+            }
+            prefetchImports(info.imports, base, i + 1);
+            /* `std::algorithms` 没有 LEPUS 文件，但仍在合并源码里保留模块边界。限定调用由
+             * 编译器直接降级到 StackVM 胶水，不在这里注入函数体。 */
+            if (imported == "std::algorithms")
+            {
+                if (loaded_.insert(imported).second)
+                {
+                    preprocess::Result intrinsic;
+                    intrinsic.text = "module std::algorithms;\n";
+                    intrinsic.lineMap.push_back(
+                        preprocess::LineOrigin{ "<内建 std::algorithms>", 1u });
+                    append(output, intrinsic);
+                }
+                continue;
+            }
+            /* 兼容显式安装的扩展版本；未指定 -I 时始终优先使用内建模块。 */
+            Memory::String overridePath;
+            if ((imported == "std::gui" || imported == "std::audio" || imported == "std::xml") &&
+                findModule(imported, base, includeDirs_, overridePath, true, cache_))
+            {
+                if (!importFile(imported, base, output, error, std::move(overridePath))) return false;
+                continue;
+            }
+            Memory::String embeddedText;
+            if (embedded::find(imported, &embeddedText))
+            {
+                preprocess::Result child = embeddedUnit(imported, embeddedText);
+                if (!load(child, base, imported, false, output, error)) return false;
+                continue;
+            }
+            if (!importFile(imported, base, output, error)) return false;
+        }
+        visiting_.erase(key);
+        loaded_.insert(key);
+        if (root)
+        {
+            /* 分界标记：到此为止（含本行之前）都是标准库，后面才是入口单元。
+             * 放 `module __root;` 合成声明之前，用户侧补模块名不会越过这条线。 */
+            preprocess::Result marker;
+            marker.text = standardBoundaryLine();
+            marker.lineMap.push_back(preprocess::LineOrigin{ "<标准库分界>", 1u });
+            append(output, marker);
+        }
+        if (root && !info.hasModule && !output.text.empty())
+        {
+            preprocess::Result reset;
+            reset.text = "module __root;\n";
+            preprocess::LineOrigin origin;
+            origin.file = "<module root>";
+            origin.line = 1u;
+            reset.lineMap.push_back(origin);
+            append(output, reset);
+        }
+        append(output, effective);
+        return true;
+    }
+
+    preprocess::Options options_;
+    Memory::Vector<Memory::String> includeDirs_;
+    Memory::Set<Memory::String> visiting_;
+    Memory::Set<Memory::String> loaded_;
+    Memory::Map<Memory::String, Memory::String> moduleByFile_;
+    lepus_incremental::Cache *cache_ = nullptr;
+    bool preprocessError_ = false;
+    const lepus_package::Project *project_ = nullptr;
+    bool parallelImports_ = false;
+    bool mcu_ = false;
+    std::size_t prefetchCount_ = 0;
+    std::map<Memory::String, std::future<std::pair<bool, preprocess::Result>>> prefetched_;
+};
+
+}  // namespace lepus_module
+
+#endif

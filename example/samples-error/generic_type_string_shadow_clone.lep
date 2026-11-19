@@ -1,0 +1,10 @@
+import std::macro;
+struct String { int64 code; }
+struct MyBox<T> {
+    T value;
+    $std::macro::Clone<MyBox<T>>(clone);
+}
+void main() {
+    MyBox<String> value;
+    let invalid = value.clone();
+}

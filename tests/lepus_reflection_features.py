@@ -1,0 +1,78 @@
+"""注解与反射基础模块：默认开启、显式关闭、JSON 诊断与增量缓存区分。"""
+from compiler_path import compiler_path
+from pathlib import Path
+import argparse
+import json
+import os
+import subprocess
+from project_temp import tempfile
+
+ROOT = Path(__file__).resolve().parents[1]
+EXE = '.exe' if os.name == 'nt' else ''
+
+
+def run(arguments, *, success=True, cwd=ROOT, timeout=1800):
+    """执行编译或产物，失败时保留完整诊断。"""
+    result = subprocess.run(list(map(str, arguments)), cwd=cwd, capture_output=True, text=True,
+                            encoding='utf-8', errors='replace', timeout=timeout)
+    assert (result.returncode == 0) == success, (arguments, result.returncode, result.stdout, result.stderr)
+    return result
+
+
+def main():
+    """验证唯一的 BUILD 工具链在开关两种状态下的诊断、产物与缓存行为。"""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--lepus', type=Path, default=compiler_path())
+    args = parser.parse_args()
+    lepus = args.lepus.resolve()
+    (ROOT / 'tmp').mkdir(exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='lepus-reflection-features-', dir=ROOT / 'tmp') as directory:
+        work = Path(directory)
+        source = work / 'main.lep'
+        source.write_text('void main() { println("feature:42"); }\n', encoding='utf-8')
+        annotated = work / 'annotated.lep'
+        annotated.write_text('@annotation Label(text:String="ok")\n@Label\nvoid main(){ println("feature:42"); }\n',
+                             encoding='utf-8')
+
+        # 默认开启：不加开关也能用注解，BUILD 产物照常运行。
+        prefix = work / 'initial'
+        assert run([lepus, 'run', source, '--out', prefix]).stdout == 'feature:42\n'
+        assert prefix.with_suffix('.ll').is_file()
+        assert not prefix.with_suffix('.quad').exists()
+        product = Path(str(work / 'annotated') + EXE)
+        run([lepus, 'build', annotated, '--out', work / 'annotated'])
+        assert run([product]).stdout == 'feature:42\n'
+
+        # 显式关闭后注解不可用：文本诊断与 JSON 诊断都要说清楚是功能开关，而不是语法错误。
+        rejected = run([lepus, '--no-reflection', '--check', annotated], success=False)
+        assert '功能未开启' in rejected.stderr, rejected.stderr
+        document = json.loads(run([lepus, '--no-reflection', '--diagnostics=json', '--check', annotated],
+                                  success=False).stdout)
+        assert document['schemaVersion'] == 1
+        assert [item['code'] for item in document['diagnostics']] == ['LEP1200'], document
+        accepted = json.loads(run([lepus, '--reflection', '--diagnostics=json', '--check', annotated]).stdout)
+        assert [item['code'] for item in accepted['diagnostics']] == [], accepted
+
+        run([lepus, 'check', source, '--hard-realtime'])
+        hard_realtime = run([lepus, 'check', annotated, '--reflection', '--hard-realtime', '--lang', 'zh'], success=False)
+        assert '硬实时' in hard_realtime.stderr, hard_realtime.stderr
+
+        # 已缓存的带注解模块仍须遵守当前开关，关闭后不能沿用开启时的接受结果。
+        shared = work / 'shared.lep'
+        shared.write_text('module shared;\n@Reflect int64 seed() { return 1; }\n', encoding='utf-8')
+        source.write_text('import shared;\nvoid main() { println("{}", shared::seed()); }\n', encoding='utf-8')
+        incremental = work / 'incremental'
+        for active in (True, False, True):
+            command = [lepus, 'build', source, '--emit-llvm', '--reflection' if active else '--no-reflection',
+                       '--incremental', '-I', work, '--out', incremental]
+            result = run(command, success=active)
+            if active:
+                assert incremental.with_suffix('.ll').is_file()
+                assert not incremental.with_suffix('.quad').exists()
+            else:
+                assert '功能未开启' in result.stderr, result.stderr
+        print('[通过] 默认开启、显式关闭、JSON 诊断与增量缓存区分全部符合预期')
+
+
+if __name__ == '__main__':
+    main()

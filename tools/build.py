@@ -1,0 +1,156 @@
+"""自动检测本机与 WSL，构建可用架构及快速安装包，不运行测试门禁。"""
+import argparse
+import json
+import os
+from pathlib import Path
+import platform
+import shutil
+import subprocess
+import sys
+from project_temp import tempfile
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def execute(command, capture=False):
+    """执行构建或工具链探测，保留失败的退出状态。"""
+    print('+ ' + subprocess.list2cmdline(list(map(str, command))), flush=True)
+    return subprocess.run(list(map(str, command)), cwd=ROOT, check=True, capture_output=capture)
+
+
+def wsl_distributions():
+    """只返回可以执行 Linux 命令的 WSL 发行版，不把工具存在当作已安装系统。"""
+    if os.name != 'nt' or not shutil.which('wsl'):
+        return []
+    try:
+        result = subprocess.run(['wsl', '--list', '--quiet'], capture_output=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    if result.returncode:
+        return []
+    text = result.stdout.decode('utf-16-le' if b'\0' in result.stdout else 'utf-8', errors='replace')
+    names = [name.strip('\ufeff\r\n ') for name in text.splitlines() if name.strip('\ufeff\r\n ')]
+    available = []
+    for name in names:
+        if name.lower().startswith('docker-desktop'):
+            continue
+        try:
+            probe = subprocess.run(['wsl', '-d', name, '--', 'uname', '-s'], capture_output=True, timeout=30)
+            if probe.returncode == 0 and probe.stdout.strip() == b'Linux':
+                available.append(name)
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+    return available
+
+
+def native_windows(jobs, variant):
+    """构建当前受支持的 Windows 编译器及 MSI，不发布启动验证失败的 x86 版本。"""
+    machine = platform.machine().lower()
+    arch = {'amd64': 'amd64', 'x86_64': 'amd64', 'x86': 'x86', 'i386': 'x86', 'arm64': 'arm64'}.get(machine)
+    if arch is None:
+        raise ValueError('未登记的 Windows 架构：' + machine)
+    if arch == 'x86':
+        raise ValueError('当前不提供 x86 安装包：32 位运行时未通过启动验证')
+    version = (ROOT / 'VERSION').read_text().strip()
+    label = 'x64' if arch == 'amd64' else arch
+    binary = ROOT / f'lepus-{version}-llvm-{variant}-windows-{label}.exe'
+    execute(['sh', '-c', 'exec "$@"', 'lepus-build', 'make', '-j' + str(jobs),
+             'LEPUS_STATIC_LLVM=' + ('1' if variant == 'static' else '0'), 'LEPUS_TARGET_ARCH=' + label, 'TARGET=' + binary.name])
+    execute([sys.executable, 'tools/package_installers.py', '--binary', binary, '--platform', 'windows',
+             '--arch', arch, '--variant', variant, '--formats', 'msi'])
+    print('当前不发布 x86 安装包。', flush=True)
+
+
+def cross_windows(architectures, sdk, jobs, make):
+    """用独立对象目录生成 ARM64 与 x86 PE，使用可在宿主运行的标准库阶段编译器。"""
+    from package_installers import validate
+    from release import compiler_version
+
+    version = (ROOT / 'VERSION').read_text().strip()
+    sdk = sdk.resolve()
+    if any(character.isspace() for character in str(sdk)):
+        raise ValueError('GNU Make 交叉构建需要不含空白的 SDK 路径')
+    host = ROOT / 'build/windows-cross-host/lepus-bootstrap-source.exe'
+    output = ROOT / 'dist/installers'
+    output.mkdir(parents=True, exist_ok=True)
+    tools = {}
+    python = 'PYTHON="' + Path(sys.executable).as_posix() + '"'
+    for arch in architectures:
+        triple = {'arm64': 'aarch64-w64-mingw32', 'x86': 'i686-w64-mingw32'}[arch]
+        commands = [sdk / 'bin' / name for name in
+                    (triple + '-clang.exe', triple + '-clang++.exe', 'llvm-ar.exe')]
+        if not all(command.is_file() for command in commands):
+            raise ValueError('LLVM-MinGW SDK 缺少目标工具：' + triple)
+        tools[arch] = commands
+    execute([make, '-j' + str(jobs), python, 'LEPUS_STATIC_LLVM=0',
+             'LEPUS_BUILD_ROOT=build/windows-cross-host',
+             'TARGET=' + host.relative_to(ROOT).as_posix(),
+             'build/windows-cross-host/lepus-frontend/lepus-stdlib-bootstrap.exe'])
+    bootstrap = host.parent / 'lepus-frontend/lepus-stdlib-bootstrap.exe'
+    execute([make, python, 'LEPUS_BUILD_ROOT=build/windows-cross-host',
+             'LEPUS_STDLIB_COMPILER=' + bootstrap.relative_to(ROOT).as_posix(), 'stdlib-units'])
+    for arch, (cc, cxx, ar) in tools.items():
+        binary = output / f'lepus-{version}-llvm-external-windows-{arch}.exe'
+        execute([make, '-j' + str(jobs), python, 'LEPUS_STATIC_LLVM=0',
+                 'LEPUS_BUILD_ROOT=build/windows-cross-' + arch,
+                 'TARGET=' + binary.relative_to(ROOT).as_posix(),
+                 'CC=' + cc.as_posix(), 'CXX=' + cxx.as_posix(),
+                 'AR=' + ar.as_posix(), binary.relative_to(ROOT).as_posix()])
+        validate(binary, 'windows', arch)
+        machine = platform.machine().lower()
+        can_run = machine in ('arm64', 'aarch64') or (
+            arch == 'x86' and machine in ('amd64', 'x86_64', 'i386', 'i686', 'x86'))
+        if can_run and compiler_version(binary) != version:
+            raise ValueError('目标编译器启动后报告了错误版本：' + arch)
+        if not can_run:
+            print('已核对 PE 架构，尚需在 Windows ARM64 上启动验证：' + str(binary), flush=True)
+
+
+def main():
+    """按宿主能力选择构建目标，WSL 缺失时正常完成本机交付。"""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--jobs', type=int, default=4)
+    parser.add_argument('--wsl', choices=['auto', 'never'], default='auto')
+    parser.add_argument('--variant', choices=['external', 'static'],
+                        default='static' if os.name == 'nt' and platform.machine().lower() in ('amd64', 'x86_64') else 'external',
+                        help='Windows x64 默认静态内置 LLVM；external 构建外置工具链版本')
+    parser.add_argument('--linux-only', action='store_true', help='Windows 上仅调度 WSL，不重复构建本机')
+    parser.add_argument('--windows-cross', nargs='+', choices=['arm64', 'x86'])
+    parser.add_argument('--llvm-mingw', type=Path, help='完整的 LLVM-MinGW SDK 目录')
+    parser.add_argument('--make', default='make', help='Windows 交叉构建使用的 GNU Make')
+    args = parser.parse_args()
+    if args.jobs < 1:
+        parser.error('jobs 必须大于零')
+    if args.windows_cross:
+        if os.name != 'nt' or args.linux_only or args.llvm_mingw is None:
+            parser.error('--windows-cross 需要 Windows 宿主和 --llvm-mingw')
+        if not (ROOT / 'source/lepus_main.cpp').is_file():
+            execute(['sh', 'gen.sh'])
+        cross_windows(args.windows_cross, args.llvm_mingw, args.jobs, args.make)
+        return
+    if os.name == 'nt' or not (ROOT / 'source/lepus_main.cpp').is_file():
+        execute(['sh', 'gen.sh'])
+    else:
+        execute([sys.executable, 'tools/embed_manual.py'])
+        execute([sys.executable, 'tools/stackvm_sources.py', '--build-assets'])
+        execute([sys.executable, 'tools/cas_sources.py', '--build-assets'])
+    if os.name == 'nt' and not args.linux_only:
+        if args.variant == 'static':
+            execute([sys.executable, 'library/llvm/setup_static.py', '--jobs', args.jobs])
+        native_windows(args.jobs, args.variant)
+    if sys.platform == 'linux':
+        execute([sys.executable, 'tools/build_linux_packages.py', '--available', '--jobs', args.jobs])
+        return
+    distributions = wsl_distributions() if args.wsl == 'auto' else []
+    if not distributions:
+        print('没有可用 WSL：只保留本机可构建架构及安装包。', flush=True)
+        return
+    root = execute(['wsl', '--exec', 'wslpath', '-a', str(ROOT)], capture=True).stdout.decode().strip()
+    for distribution in distributions:
+        execute(['wsl', '-d', distribution, '--', 'sh', '-c',
+                 'cd "$1" && if command -v python3.11 >/dev/null; then py=python3.11; else py=python3; fi; exec "$py" tools/build_linux_packages.py --available --jobs "$2"',
+                 'lepus-wsl-build', root, args.jobs])
+
+
+if __name__ == '__main__':
+    main()

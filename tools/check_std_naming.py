@@ -1,0 +1,57 @@
+#!/usr/bin/env python3
+"""检查标准库公开函数、方法、类型的命名及 `__` 内部函数的可见性。"""
+import re
+from library_reference import ROOT
+from check_stdlib_naming import main as check_public_names
+
+# `__` 内部函数的声明形态：可选 inline，返回类型里可以有 `::`、`<>`、`,`、空格。
+# 只约束顶格书写（顶层）的声明：文法只允许顶层函数写 `inline`，类型体里的成员方法无从声明。
+DUNDER = re.compile(r'^[ \t]*(inline[ \t]+)?[A-Za-z_][\w \t:<>,]*?(__\w+)[ \t]*\(', re.M)
+
+# 编译器与布局验收直接调用的低层协议入口；其余有函数体的内部辅助函数仍须模块私有。
+# 这些入口沿用既有名字，不通过额外宿主胶水转发，也不允许任意 __boot 名称自动豁免。
+PROTOCOL_BODIES = frozenset('''
+__bootBufferCapacity __bootListReserve __bootListPushI __bootListFindI
+__bootStringOwnedData __bootStringBuffer __bootStringNew __bootStringDrop __bootStringByte
+__bootFloat32Bits __bootFloat32FromBits __bootFloat64Bits __bootFloat64FromBits
+__bootStringFromInt
+'''.split())
+
+
+def non_inline_bodies():
+    """收集顶层带函数体却没有 `inline` 的 `__` 函数：它们在语言层面仍是可跨模块调用的。"""
+    errors = []
+    for path in sorted((ROOT / 'source/std').glob('*.lep')):
+        text = path.read_text(encoding='utf-8')
+        for match in DUNDER.finditer(text):
+            line_start = text.rfind('\n', 0, match.start()) + 1
+            # 缩进的声明是类型体里的成员方法，不在本规则范围内。
+            if text[line_start:line_start + 1] in (' ', '\t'):
+                continue
+            if match.group(1):
+                continue
+            if path.name == 'core.lep' and match.group(2) in PROTOCOL_BODIES:
+                continue
+            depth, index = 1, match.end()
+            while index < len(text) and depth:
+                depth += (text[index] == '(') - (text[index] == ')')
+                index += 1
+            # 形参表之后第一个非空字符为 `{` 说明这是定义而不是宿主声明。
+            if text[index:].lstrip().startswith('{'):
+                line = text.count('\n', 0, match.start()) + 1
+                errors.append(f'{path.relative_to(ROOT).as_posix()}:{line}：顶层带函数体的 {match.group(2)} '
+                              '必须声明为 inline（模块私有）；无函数体的宿主声明不受此限')
+    return errors
+
+
+def main():
+    """扫描源码及编译器内建签名，拒绝不符合命名约定或可见性约定的公开符号。"""
+    errors = non_inline_bodies()
+    if errors:
+        raise SystemExit('\n'.join(errors))
+    check_public_names()
+    print('标准库内部函数可见性检查通过。')
+
+
+if __name__ == '__main__':
+    main()

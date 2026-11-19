@@ -1,0 +1,45 @@
+# Lepus compiler
+
+This project was generated from `lepus.gram`. It includes the checked-AST to LLVM backend,
+native runtime services, preprocessor, big-number runtime, the referenced `core.lep` template, and host adapters.
+Standard modules, including `std::collections` and `std::reflect`, are embedded in the compiler.
+
+SQLite and miniz sources are downloaded into the build directory from fixed releases in
+`tools/dependencies.lock.json`. Python 3 and network access are required for the first build;
+verified caches can be reused offline. The exported source tree contains no copies of these libraries.
+
+```sh
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release
+./build/lepus program.lep
+```
+
+## 构建裁剪
+
+CMake 提供 `NO_LEPUS_XXX` 布尔选项，默认 OFF。例如 `-DNO_LEPUS_BIG_INT=ON` 同时关闭大整数和大浮点，`-DNO_LEPUS_STD_REGEX=ON` 关闭正则宿主胶水。定义在运行时和前端之间统一传播。启用 `NO_LEPUS_DEFAULT_POOL` 后，嵌入宿主需要显式提供分配器。编译器命令行入口使用系统 malloc。
+
+旧版 MinGW 在低优化构建大型生成解析器时可能遇到 COFF 字符串表上限；推荐 Release 配置或更新工具链。
+
+## 注解与反射能力
+
+`LEPUS_WITH_REFLECTION` 与 `RUNTIME_WITH_REFLECTION` 两个 CMake 选项均默认 ON。构建时同时开启后，单次编译默认启用；`--reflection` 显式要求，`--no-reflection` 显式关闭。根目录工具链和生成工程均默认编入两端反射能力。支持编译期用户注解、显式 @Reflect 元数据和 import std::reflect 类型化查询。--hard-realtime 禁止启用反射。
+
+```sh
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DLEPUS_WITH_REFLECTION=ON -DRUNTIME_WITH_REFLECTION=ON
+cmake --build build --config Release
+./build/lepus program.lep --reflection
+```
+
+使用 `lepus new hello-lepus` 新建应用工程，再用 `lepus hello-lepus/src/main.lep` 运行。新建指令无需 Python 或磁盘模板，目标目录必须不存在。完整的 test / fmt 等开发命令由仓库统一工具链 lepus 提供。
+
+原生运行时核心与大数、SQLite 宿主后端分别构建为静态目标；标准胶水通过通用不透明记录接口访问宿主对象。
+
+## C 头文件导入
+
+独立工程包含 `gen abi` 的命令分发和 `tools/abi_import.hpp` 实现，无需本体编译器或 Python 预先生成声明：
+
+```sh
+lepus gen abi native.h --library ./native.dll --out native.lep
+```
+
+导入器检查固定宽度标量、简单值结构体、整数枚举及支持的函数原型。不支持的 C 结构返回失败，原有输出保持不变。调用实际库时，仍需按其目标 ABI 准备动态库，并核对缓冲区长度、回调和分配释放约定。

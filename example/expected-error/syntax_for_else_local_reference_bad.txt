@@ -1,0 +1,1 @@
+lepus: example/samples-error/syntax_for_else_local_reference_bad.lep 第 4 行：[LEP1204] 保存的引用不能超过来源的生命周期

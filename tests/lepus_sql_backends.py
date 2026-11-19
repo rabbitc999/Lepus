@@ -1,0 +1,60 @@
+"""验证 PostgreSQL libpq ABI 夹具与真实 ODBC 数据源；不要求网络数据库服务。"""
+from pathlib import Path
+import json
+import argparse
+import os
+from project_temp import tempfile
+from lepus_glue_edges import ROOT, LEPUS, EXE, run
+POSTGRES_SOURCE = '\nimport std::sql;\nvoid main() {\n    Database failed = Database::postgres("fixture-fail");\n    std::core::assert(!failed.isOpen() && std::core::len(failed.lastError()) > 0);\n    Database setup = Database::postgres("fixture-setup-fail");\n    std::core::assert(!setup.isOpen() && std::core::len(setup.lastError()) > 0);\n    Database db = Database::postgres("fixture-ok");\n    if (!db.isOpen()) { std::core::panic(db.lastError()); }\n    std::core::assert(db.backendName() == "postgresql" && db.quote("O\'Reilly\\\\path") == "\'O\'\'Reilly\\\\path\'");\n    ResultSet result = db.exec("SELECT fixtures");\n    std::core::assert(result.ok && result.rowCount() == 1 && result.colCount() == 6 && result.affected == 0);\n    std::core::assert(result.intAt(0, 0) == 9223372036854775807 && result.realAt(0, 1) == 1.25);\n    DataCell text = result.at(0, 2);\n    DataCell absent = result.at(0, 4);\n    std::core::assert(text.kind == CELL_TEXT && text.text() == "123" && absent.isNull());\n    std::core::assert(result.textAt(0, 3) == "中文" && result.intAt(0, 5) == 1);\n    std::core::assert(result.columnName(0) == "big");\n    ResultSet written = db.exec("UPDATE fixtures");\n    std::core::assert(written.ok && written.affected == 7 && db.affectedRows() == 7);\n    ResultSet huge = db.exec("UPDATE huge");\n    std::core::assert(huge.ok && huge.affected == 5000000000 && db.affectedRows() == 5000000000);\n    std::core::assert(!db.exec("SELECT fail").ok);\n    {\n        int64 i = 0;\n        while (i < 300) {\n std::core::assert(db.exec("SELECT fixtures").ok); \n            i = i + 1;\n        }\n    }\n    db.close(); db.close();\n    std::core::assert(!db.exec("SELECT fixtures").ok);\n    Database copy = Database::postgres("fixture-ok");\n    std::core::assert(!copy.exec("COPY fixtures").ok);\n    copy.close();\n    std::core::assert(fixture_live_connections() == 0 && fixture_live_results() == 0);\n    std::core::println("postgres ABI checks passed");\n    return;\n}\n'
+ODBC_SOURCE = '\nimport std::sql;\nvoid main(std::core::List<String> arguments) {\n    Database microsoft = Database::sqlServer("DRIVER={Lepus Missing Driver};SERVER=invalid;");\n    std::core::assert(!microsoft.isOpen() && std::core::len(microsoft.lastError()) > 0);\n    std::core::assert(microsoft.backendName() == "sqlserver" && microsoft.quote("中文") == "N\'中文\'");\n    Database db = Database::odbc(arguments[0]);\n    if (!db.isOpen()) { std::core::panic(db.lastError()); }\n    std::core::assert(db.backendName() == "odbc");\n    ResultSet created = db.exec("CREATE TABLE items(id BIGINT, name TEXT, amount DOUBLE, note TEXT)");\n    if (!created.ok) { std::core::panic(created.error); }\n    String longText = "";\n    {\n        int64 i = 0;\n        while (i < 1400) {\n longText = longText + "中文🙂"; \n            i = i + 1;\n        }\n    }\n    ResultSet inserted = db.exec("INSERT INTO items VALUES(9223372036854775807, " + db.quote(longText) + ", 1.25, NULL)");\n    std::core::assert(inserted.ok && inserted.affected == 1);\n    ResultSet result = db.exec("SELECT id, name, amount, note, \'123\' AS numeric_text FROM items");\n    std::core::assert(result.ok && result.rowCount() == 1 && result.colCount() == 5);\n    std::core::assert(result.intAt(0, 0) == 9223372036854775807);\n    std::core::assert(result.textAt(0, 1) == longText && result.realAt(0, 2) == 1.25);\n    DataCell absent = result.at(0, 3);\n    DataCell text = result.at(0, 4);\n    std::core::assert(absent.isNull() && text.kind == CELL_TEXT && text.text() == "123");\n    ResultSet empty = db.exec("SELECT id FROM items WHERE 0");\n    std::core::assert(empty.ok && empty.rowCount() == 0 && empty.colCount() == 1);\n    std::core::assert(db.execOk("BEGIN TRANSACTION"));\n    std::core::assert(db.execOk("INSERT INTO items(id) VALUES(2)"));\n    std::core::assert(db.execOk("ROLLBACK"));\n    std::core::assert(db.count("SELECT COUNT(*) FROM items") == 1);\n    std::core::assert(!db.exec("SELECT FROM items").ok);\n    {\n        int64 i = 0;\n        while (i < 300) {\n std::core::assert(db.count("SELECT COUNT(*) FROM items") == 1); \n            i = i + 1;\n        }\n    }\n    ResultSet deleted = db.exec("DELETE FROM items");\n    std::core::assert(deleted.ok && deleted.affected == 1);\n    db.close(); db.close();\n    std::core::println("odbc database checks passed");\n    return;\n}\n'
+
+def triplet(source, expected, work, arguments_factory=lambda mode: []):
+    prefix = work / source.stem
+    result = run(LEPUS, 'run', source, '--out', prefix, '--', *arguments_factory('interpreter'))
+    assert result.stdout == expected and (not result.stderr), (result.stdout, result.stderr)
+    print(source.stem+': '+result.stdout.strip(),flush=True)
+
+def main():
+    global LEPUS
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--lepus',type=Path,default=LEPUS)
+    LEPUS=parser.parse_args().lepus.resolve()
+    work = Path(tempfile.mkdtemp(prefix='sql-backends-'))
+    work.mkdir(parents=True, exist_ok=True)
+    fixture = work / ('libpq-fixture.dll' if os.name == 'nt' else 'libpq-fixture.so')
+    run('gcc', '-shared', *([] if os.name == 'nt' else ['-fPIC']), ROOT / 'tests/fixtures/lepus_sql_pg.c', '-o', fixture)
+    old = os.environ.get('POSTGRES_LIBRARY')
+    os.environ['POSTGRES_LIBRARY'] = str(fixture)
+    try:
+        source = work / 'postgres.lep'
+        declarations = '#abi("C", ' + json.dumps(fixture.as_posix()) + ', "fixture_live_connections")\nint32 fixture_live_connections();\n#abi("C", ' + json.dumps(fixture.as_posix()) + ', "fixture_live_results")\nint32 fixture_live_results();\n'
+        source.write_text(POSTGRES_SOURCE.replace('import std::sql;', 'import std::sql;\n' + declarations, 1), encoding='utf-8')
+        triplet(source, 'postgres ABI checks passed\n', work)
+    finally:
+        if old is None:
+            os.environ.pop('POSTGRES_LIBRARY', None)
+        else:
+            os.environ['POSTGRES_LIBRARY'] = old
+    driver = os.environ.get('LEPUS_TEST_ODBC_DRIVER')
+    if not driver and os.name == 'nt':
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, 'SOFTWARE\\ODBC\\ODBCINST.INI\\ODBC Drivers') as key:
+            try:
+                installed, _ = winreg.QueryValueEx(key, 'SQLite3 ODBC Driver')
+                if installed == 'Installed':
+                    driver = 'SQLite3 ODBC Driver'
+            except FileNotFoundError:
+                pass
+    if not driver:
+        print('ODBC 实库测试未运行：可用 LEPUS_TEST_ODBC_DRIVER 指定 SQLite ODBC 驱动', flush=True)
+        return
+    with tempfile.TemporaryDirectory(prefix='database-', dir=work) as temporary:
+        source = work / 'odbc.lep'
+        source.write_text(ODBC_SOURCE, encoding='utf-8')
+
+        def arguments(mode):
+            path = (Path(temporary) / (mode + '.db')).as_posix()
+            return [f'DRIVER={{{driver}}};Database={path};BigInt=1;']
+        triplet(source, 'odbc database checks passed\n', work, arguments)
+if __name__ == '__main__':
+    main()

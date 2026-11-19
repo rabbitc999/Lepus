@@ -1,0 +1,1 @@
+lepus: example/samples-error/fn_capture_list_parameter.lep 第 4 行第 5 列：lambda 捕获变量与形参重名：value

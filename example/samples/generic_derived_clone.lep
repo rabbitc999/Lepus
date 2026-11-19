@@ -1,0 +1,21 @@
+import std::macro;
+
+struct MyBox<T>
+{
+    T value;
+    $std::macro::Clone<MyBox<T>>(clone);
+}
+
+void main()
+{
+    MyBox<int64> number;
+    number.value = 7;
+    MyBox<int64> copiedNumber = number.clone();
+    println("{}", copiedNumber.value);
+
+    MyBox<String> text;
+    text.value = "kept";
+    MyBox<String> copiedText = text.clone();
+    text.value = "changed";
+    println("{}", copiedText.value);
+}

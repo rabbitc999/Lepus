@@ -1,0 +1,1 @@
+lepus: example/samples-error/unsafe_macro_argument.lep 第 3 行第 1 列：调用 unsafe 函数需要显式 unsafe 上下文：program::raw

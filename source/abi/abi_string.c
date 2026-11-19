@@ -1,0 +1,59 @@
+/**
+ * @file abi_string.c
+ * @brief `std::core` 字符串构造原语的直通 C 实现。
+ *
+ * 浮点 → 文本的完整规则（去尾随零、孤立小数点）在 std/core.lep 的 Lepus 函数
+ * `__std_str_of_flt` 里实现；本模块只保留不可约的格式化核心 `__std_str_fixed`：
+ * 按 `%.*f` 输出固定小数位文本。BUILD 直连降级时由生成代码直接调用 libc snprintf，
+ * 不经过本表。
+ */
+#include "lepus_abi_internal.h"
+
+#include <stdio.h>
+#include <string.h>
+
+/**
+ * @brief 文本缓冲区容量；与旧实现一致，超长结果按此截断。
+ */
+#define LEPUS_ABI_TEXT_CAPACITY 256
+
+/**
+ * @brief 把双精度值按 `%.*f` 格式化成固定小数位文本。
+ * @param frame 帧：0 = 值，1 = 小数位数（负数按 3 位）。
+ * @return 新 运行时 字符串；不含去尾零处理。
+ */
+static void abiStrFixed(LepusAbiFrame *frame)
+{
+    double value = 0.0;
+    int64_t precision = 3;
+    if (!lepus_abi_argument_real(frame, 0, &value)) return;
+    if (!lepus_abi_argument_integer(frame, 1, &precision)) return;
+    if (precision < 0) precision = 3;
+
+    char buffer[LEPUS_ABI_TEXT_CAPACITY];
+    const int written = snprintf(buffer, sizeof(buffer), "%.*f", (int)precision, value);
+    if (written < 0)
+    {
+        lepus_abi_fail(frame, "浮点数格式化失败");
+        lepus_abi_return_integer(frame, 0);
+        return;
+    }
+    const size_t length = (size_t)written < sizeof(buffer) ? (size_t)written : sizeof(buffer) - 1u;
+    lepus_abi_return_integer(frame, lepus_abi_string(frame, buffer, length));
+}
+
+/**
+ * @brief 本模块入口表，按名称升序排列。
+ */
+static const LepusAbiRecord kRecords[] = {
+    { "std::core::__std_str_fixed", abiStrFixed, 2 },
+};
+
+const LepusAbiRecord *abi_string_records(size_t *count)
+{
+    if (count != NULL) *count = sizeof(kRecords) / sizeof(kRecords[0]);
+    return kRecords;
+}
+
+#define LEPUS_BUILD_BIND_MODULE string
+#include "aot_bind_module.h"

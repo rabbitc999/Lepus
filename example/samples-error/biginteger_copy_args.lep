@@ -1,0 +1,4 @@
+void main() {
+    std::big_number::BigInteger number = std::big_number::BigInteger(12);
+    std::big_number::BigInteger duplicate = number.copy(1);
+}

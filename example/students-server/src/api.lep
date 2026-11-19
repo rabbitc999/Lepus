@@ -1,0 +1,47 @@
+/** HTTP 响应与固定格式的编号解析，业务路由由 school_api 负责。 */
+module api;
+import std::reflect;
+
+/** 一次 HTTP 交互的应答。 */
+struct Reply
+{
+    int64 status;
+    String contentType;
+    String body;
+};
+
+/**
+ * @brief 组一个 JSON 应答。
+ */
+Reply jsonReply(int64 status, String body)
+{
+    Reply reply;
+    reply.status = status;
+    reply.contentType = "application/json; charset=utf-8";
+    reply.body = body;
+    return reply;
+}
+
+/**
+ * @brief 组一个错误应答（统一 {"error":"…"} 形状）。
+ */
+Reply errorReply(int64 status, String message)
+{
+    return jsonReply(status, "{\"error\":" + std::reflect::__serdeQuote(message) + "}");
+}
+
+/**
+ * @brief 把十进制文本解析成学号；含非数字或超长给 -1。
+ */
+int64 parseId(String text)
+{
+    if (text.isEmpty() || len(text) > 18) { return -1; }
+    int64 value = 0;
+    for (int64 index in range(0, len(text)))
+    {
+        char item = text[index];
+        if (item < '0' || item > '9') { return -1; }
+        value = value * 10 + ((int64)item - '0');
+    }
+    return value;
+}

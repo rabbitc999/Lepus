@@ -1,0 +1,1 @@
+lepus: example/samples-error/enum_duplicate_variant.lep 第 1 行第 1 列：enum State 的变体重名：Ready

@@ -1,0 +1,1250 @@
+# std::algorithms — 通用算法
+
+<!-- LANGUAGE NAVIGATION -->
+[English（中文原文）](std-algorithms.md) · **简体中文**
+<!-- END LANGUAGE NAVIGATION -->
+
+[返回库目录](README.md) · [全部符号](symbols.md)
+
+## 引入
+
+```lepus
+import std::algorithms;
+```
+
+## 公共约定与错误边界
+
+需 import std::algorithms;；无冲突时使用短名，能从实参推导时省略泛型类型实参。Value 族由 Lepus 实现列表遍历与回调；sortValue 采用稳定索引归并并返回独立副本，shuffleValue 也返回副本。Reference 族直接操作连续存储，调用者保证 count 对应有效元素数；返回的引用不能越过缓冲区生命周期。Reference 排序比较使用 >；默认稳定插入排序，构建时 SIMPLE_SORT 可切换到不稳定希尔排序。二分查找要求已升序排列。
+
+## 参考代码
+
+完整程序：[example/samples/std_algorithms_extra.lep](../../example/samples/std_algorithms_extra.lep)。
+
+```powershell
+lepus run example/samples/std_algorithms_extra.lep
+```
+
+<details>
+<summary>展开完整参考代码</summary>
+
+```lepus
+/* std_algorithms_extra.lep —— `algorithms` 的 map / filter / reduce / sum / count。
+ *
+ * 这一批和 `fold` / `all` / `any` 是同一套"回调式内建"：源码里写
+ * `mapValue(表, 回调)`，元素和回调类型由实参推导，
+ * 类型检查与派发由 `LowerAlgorithmCall` 完成，遍历、回调与清理由 Lepus 自举实现。
+ *
+ * 回调有两种写法，效果相同：
+ *   ① 顶层函数名：`mapValue(values, doubled)`，按 `R fn(T)` 的函数值语义传入，
+ *      写在 `module X;` 的文件里同样可用；
+ *   ② 闭包：`mapValue(values, fn(int64 v) { v * 2 })`，可以捕获外层局部变量，
+ *      生命周期与借用按函数值规则检查。
+ */
+
+import std::algorithms;
+
+import std::text;
+
+int64 doubled(int64 value) { return value * 2; }
+float64 halved(int64 value) { return (float64)value / 2.0; }
+String stars(int64 value) { return Text::repeat("*", value); }
+int64 lengthOf(String text) { return len(text); }
+bool odd(int64 value) { return value % 2 != 0; }
+int64 addInt(int64 total, int64 value) { return total + value; }
+float64 addReal(float64 total, float64 value) { return total + value; }
+
+void main() {
+    List<int64> values;
+    values.push(3);
+    values.push(1);
+    values.push(4);
+    values.push(1);
+    values.push(5);
+
+    /* map：结果表的元素类型由**回调的返回类型**定，`map<int64>` 只给一个类型实参。 */
+    List<int64> tripled = mapValue(values, doubled);
+    List<float64> halves = mapValue(values, halved);
+    List<String> marks = mapValue(values, stars);
+    List<int64> lengths = mapValue(marks, lengthOf);
+
+    /* filter：留下判定为真的元素，元素类型不变。 */
+    List<int64> odds = filterValue(values, odd);
+
+    println("map    {} {} {}", tripled.len(), tripled[0], tripled[4]);
+    println("map    {} {} {}", halves[0], marks[2], lengths[4]);
+    println("filter {} {} {}", odds.len(), odds[0], odds[3]);
+
+    /* reduce 两种写法：两参拿第一个元素当初值，三参等同 fold。 */
+    println("reduce {} {}", reduceValue(values, addInt),
+    reduceValue(values, 100, addInt));
+    /* sum / count：count 的第二参是回调（函数值）就按判定数，是值就按相等数统计。 */
+    println("sum    {} {}", sumValue(values),
+    sumValue(halves));
+    println("count  {} {}", countValue(values, 1),
+    countValue(values, odd));
+
+    /* 回调也可以是闭包：捕获外层局部变量，借用与生命周期按函数值规则检查。 */
+    int64 offset = 10;
+    List<int64> shifted = mapValue(values, fn(int64 value) { value + offset });
+    println("closure {} {}", shifted[0], shifted[4]);
+
+    List<float64> reals;
+    reals.push(1.5);
+    reals.push(2.25);
+    println("float64    {}", reduceValue(reals, addReal));
+}
+```
+
+</details>
+
+<details>
+<summary>示例输出</summary>
+
+```text
+map    5 6 10
+map    1.50000000 **** 5
+filter 4 3 5
+reduce 14 114
+sum    14 7.00000000
+count  2 4
+closure 13 15
+float64    3.75000000
+```
+
+</details>
+
+聚合入口的具体操作参见对应子模块；本页类型/方法的调用形式列在下方。
+
+## 函数索引
+
+| 名称 | 声明 |
+| --- | --- |
+| [choiceValue](#api-0) | `T choiceValue<T>(std::core::List<T> items, uint64 seed)` |
+| [shuffleValue](#api-1) | `std::core::List<T> shuffleValue<T>(std::core::List<T> items, uint64 seed)` |
+| [shuffleReference](#api-2) | `void shuffleReference<T>(T mut& data, int64 count, uint64 seed)` |
+| [zipValue](#api-3) | `std::core::List<(T, U)> zipValue<T, U>(std::core::List<T> left, std::core::List<U> right)` |
+| [sortReference](#api-4) | `void sortReference<T>(T mut& data, int64 count)` |
+| [reverseReference](#api-5) | `void reverseReference<T>(T mut& data, int64 count)` |
+| [findReference](#api-6) | `int64 findReference<T>(T const& data, int64 count, T value)` |
+| [binarySearchReference](#api-7) | `int64 binarySearchReference<T>(T const& data, int64 count, T value)` |
+| [minReference](#api-8) | `Option<T mut&> minReference<T>(T mut& data, int64 count)` |
+| [maxReference](#api-9) | `Option<T mut&> maxReference<T>(T mut& data, int64 count)` |
+| [countReference](#api-10) | `int64 countReference<T>(T const& data, int64 count, T value)` |
+| [sumReference](#api-11) | `T sumReference<T>(T mut& data, int64 count)` |
+| [sortValue](#api-12) | `List<T> sortValue<T>(List<T> items)` |
+| [findValue](#api-13) | `int64 findValue<T>(List<T> items,T value)` |
+| [binarySearchValue](#api-14) | `int64 binarySearchValue<T>(List<T> items,T value)` |
+| [minValue](#api-15) | `T minValue<T>(T first,T rest...)` |
+| [maxValue](#api-16) | `T maxValue<T>(T first,T rest...)` |
+| [clampValue](#api-17) | `T clampValue<T>(T value,T low,T high)` |
+| [allValue](#api-18) | `bool allValue<T>(List<T> items,bool fn(T) predicate)` |
+| [anyValue](#api-19) | `bool anyValue<T>(List<T> items,bool fn(T) predicate)` |
+| [foldValue](#api-20) | `T foldValue<T>(List<T> items,T initial,T fn(T,T) folder)` |
+| [mapValue](#api-21) | `List<R> mapValue<T>(List<T> items,R fn(T) mapper)` |
+| [filterValue](#api-22) | `List<T> filterValue<T>(List<T> items,bool fn(T) predicate)` |
+| [reduceValue](#api-23) | `T reduceValue<T>(List<T> items,T fn(T,T) folder)` |
+| [reduceValue](#api-24) | `T reduceValue<T>(List<T> items,T initial,T fn(T,T) folder)` |
+| [sumValue](#api-25) | `T sumValue<T>(List<T> items)` |
+| [countValue](#api-26) | `int64 countValue<T>(List<T> items,T value)` |
+| [countValue](#api-27) | `int64 countValue<T>(List<T> items,bool fn(T) predicate)` |
+
+<a id="api-0"></a>
+
+### choiceValue（1）
+
+**声明**
+
+```lepus
+T choiceValue<T>(std::core::List<T> items, uint64 seed);
+```
+
+**行为**
+
+从表里随机取一个元素；空表直接停机（和 `at` 越界一个口径）。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `items` | `std::core::List<T> items` | 参与处理的列表元素 | 无 |
+| `seed` | `uint64 seed` | 随机种子 | 无 |
+
+**返回值**
+
+`T`。从表里随机取一个元素；空表直接停机（和 `at` 越界一个口径）。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+显式前置检查：`items.len() > 0, "std::algorithms::choiceValue 不能作用在空表上"`。
+
+**调用形式**
+
+```lepus
+choiceValue(items, seed);
+```
+
+**源码**：[source/lepus_generic.cpp:2333](../../source/lepus_generic.cpp#L2333)。
+
+**完整示例**：[example/samples/std_algorithms_extra.lep](../../example/samples/std_algorithms_extra.lep)。
+
+<a id="api-1"></a>
+
+### shuffleValue（2）
+
+**声明**
+
+```lepus
+std::core::List<T> shuffleValue<T>(std::core::List<T> items, uint64 seed);
+```
+
+**行为**
+
+Fisher-Yates 洗牌，返回**打乱后的副本**（原表不动）。 从后往前逐个和前面 `[0, i]` 里的一个随机位置交换；同一个 `seed` 结果可复现。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `items` | `std::core::List<T> items` | 参与处理的列表元素 | 无 |
+| `seed` | `uint64 seed` | 随机种子 | 无 |
+
+**返回值**
+
+`std::core::List<T>`。Fisher-Yates 洗牌，返回**打乱后的副本**（原表不动）。 从后往前逐个和前面 `[0, i]` 里的一个随机位置交换；同一个 `seed` 结果可复现。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+shuffleValue(items, seed);
+```
+
+**源码**：[source/lepus_generic.cpp:2342](../../source/lepus_generic.cpp#L2342)。
+
+**完整示例**：[example/samples/std_algorithms_extra.lep](../../example/samples/std_algorithms_extra.lep)。
+
+<a id="api-2"></a>
+
+### shuffleReference（3）
+
+**声明**
+
+```lepus
+void shuffleReference<T>(T mut& data, int64 count, uint64 seed);
+```
+
+**行为**
+
+Fisher-Yates 洗牌的**引用形式**：直接在 `data` 里 `count` 个元素上原地打乱。 同一个 `seed` 结果可复现，和 `shuffleValue` 用同一条 LCG。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `data` | `T mut& data` | 连续存储的首元素引用，调用者保证范围有效 | 无 |
+| `count` | `int64 count` | 元素或字节数量，具体单位见行为说明 | 无 |
+| `seed` | `uint64 seed` | 随机种子 | 无 |
+
+**返回值**
+
+无返回值。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+shuffleReference<T>(data, count, seed);
+```
+
+**源码**：[source/lepus_generic.cpp:2362](../../source/lepus_generic.cpp#L2362)。
+
+**完整示例**：[example/samples/std_algorithms_extra.lep](../../example/samples/std_algorithms_extra.lep)。
+
+<a id="api-3"></a>
+
+### zipValue（4）
+
+**声明**
+
+```lepus
+std::core::List<(T, U)> zipValue<T, U>(std::core::List<T> left, std::core::List<U> right);
+```
+
+**行为**
+
+按较短列表长度配对元素并返回元组列表，较长列表的多余元素忽略。
+
+Pair corresponding elements; excess elements in the longer list are ignored.
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `left` | `std::core::List<T> left` | 左操作数或区间左端 | 无 |
+| `right` | `std::core::List<U> right` | 右操作数或区间右端 | 无 |
+
+**返回值**
+
+`std::core::List<(T, U)>`。按较短列表长度配对元素并返回元组列表，较长列表的多余元素忽略。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+zipValue(left, right);
+```
+
+**源码**：[source/lepus_generic.cpp:2376](../../source/lepus_generic.cpp#L2376)。
+
+**完整示例**：[example/samples/std_algorithms_extra.lep](../../example/samples/std_algorithms_extra.lep)。
+
+<a id="api-4"></a>
+
+### sortReference（5）
+
+**声明**
+
+```lepus
+void sortReference<T>(T mut& data, int64 count);
+```
+
+**行为**
+
+原地排序，O(1) 额外空间：`data` 里 `count` 个元素直接排好。 默认是插入排序（稳定）；构建编译器时定义 `SIMPLE_SORT` 改用希尔排序（把间距逐步 缩到 1，同样就地、不额外分配，但**不稳定**）。列表排序 `sortValue` 使用独立的语言稳定归并实现，不受此开关影响。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `data` | `T mut& data` | 连续存储的首元素引用，调用者保证范围有效 | 无 |
+| `count` | `int64 count` | 元素或字节数量，具体单位见行为说明 | 无 |
+
+**返回值**
+
+无返回值。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+sortReference<T>(data, count);
+```
+
+**源码**：[source/lepus_generic.cpp:2406](../../source/lepus_generic.cpp#L2406)。
+
+**完整示例**：[example/samples/std_algorithms_extra.lep](../../example/samples/std_algorithms_extra.lep)。
+
+<a id="api-5"></a>
+
+### reverseReference（6）
+
+**声明**
+
+```lepus
+void reverseReference<T>(T mut& data, int64 count);
+```
+
+**行为**
+
+原地反转 `[0, count)`。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `data` | `T mut& data` | 连续存储的首元素引用，调用者保证范围有效 | 无 |
+| `count` | `int64 count` | 元素或字节数量，具体单位见行为说明 | 无 |
+
+**返回值**
+
+无返回值。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+reverseReference<T>(data, count);
+```
+
+**源码**：[source/lepus_generic.cpp:2411](../../source/lepus_generic.cpp#L2411)。
+
+**完整示例**：[example/samples/std_algorithms_extra.lep](../../example/samples/std_algorithms_extra.lep)。
+
+<a id="api-6"></a>
+
+### findReference（7）
+
+**声明**
+
+```lepus
+int64 findReference<T>(T const& data, int64 count, T value);
+```
+
+**行为**
+
+线性查找，返回下标；找不到返回 -1。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `data` | `T const& data` | 连续存储的首元素引用，调用者保证范围有效 | 无 |
+| `count` | `int64 count` | 元素或字节数量，具体单位见行为说明 | 无 |
+| `value` | `T value` | 输入值或写入的新值 | 无 |
+
+**返回值**
+
+`int64`。线性查找，返回下标；找不到返回 -1。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+findReference<T>(data, count, value);
+```
+
+**源码**：[source/lepus_generic.cpp:2424](../../source/lepus_generic.cpp#L2424)。
+
+**完整示例**：[example/samples/std_algorithms_extra.lep](../../example/samples/std_algorithms_extra.lep)。
+
+<a id="api-7"></a>
+
+### binarySearchReference（8）
+
+**声明**
+
+```lepus
+int64 binarySearchReference<T>(T const& data, int64 count, T value);
+```
+
+**行为**
+
+在按 `>` 升序排好的区间上二分，返回下标；找不到返回 -1。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `data` | `T const& data` | 连续存储的首元素引用，调用者保证范围有效 | 无 |
+| `count` | `int64 count` | 元素或字节数量，具体单位见行为说明 | 无 |
+| `value` | `T value` | 输入值或写入的新值 | 无 |
+
+**返回值**
+
+`int64`。在按 `>` 升序排好的区间上二分，返回下标；找不到返回 -1。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+binarySearchReference<T>(data, count, value);
+```
+
+**源码**：[source/lepus_generic.cpp:2434](../../source/lepus_generic.cpp#L2434)。
+
+**完整示例**：[example/samples/std_algorithms_extra.lep](../../example/samples/std_algorithms_extra.lep)。
+
+<a id="api-8"></a>
+
+### minReference（9）
+
+**声明**
+
+```lepus
+Option<T mut&> minReference<T>(T mut& data, int64 count);
+```
+
+**行为**
+
+最小元素的地址；空区间返回 `None`。拿着它可以直接改元素。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `data` | `T mut& data` | 连续存储的首元素引用，调用者保证范围有效 | 无 |
+| `count` | `int64 count` | 元素或字节数量，具体单位见行为说明 | 无 |
+
+**返回值**
+
+`Option<T mut&>`。最小元素的地址；空区间返回 `None`。拿着它可以直接改元素。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+minReference<T>(data, count);
+```
+
+**源码**：[source/lepus_generic.cpp:2446](../../source/lepus_generic.cpp#L2446)。
+
+**完整示例**：[example/samples/std_algorithms_extra.lep](../../example/samples/std_algorithms_extra.lep)。
+
+<a id="api-9"></a>
+
+### maxReference（10）
+
+**声明**
+
+```lepus
+Option<T mut&> maxReference<T>(T mut& data, int64 count);
+```
+
+**行为**
+
+最大元素的地址；空区间返回 `None`。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `data` | `T mut& data` | 连续存储的首元素引用，调用者保证范围有效 | 无 |
+| `count` | `int64 count` | 元素或字节数量，具体单位见行为说明 | 无 |
+
+**返回值**
+
+`Option<T mut&>`。最大元素的地址；空区间返回 `None`。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+maxReference<T>(data, count);
+```
+
+**源码**：[source/lepus_generic.cpp:2458](../../source/lepus_generic.cpp#L2458)。
+
+**完整示例**：[example/samples/std_algorithms_extra.lep](../../example/samples/std_algorithms_extra.lep)。
+
+<a id="api-10"></a>
+
+### countReference（11）
+
+**声明**
+
+```lepus
+int64 countReference<T>(T const& data, int64 count, T value);
+```
+
+**行为**
+
+等于 `value` 的元素个数。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `data` | `T const& data` | 连续存储的首元素引用，调用者保证范围有效 | 无 |
+| `count` | `int64 count` | 元素或字节数量，具体单位见行为说明 | 无 |
+| `value` | `T value` | 输入值或写入的新值 | 无 |
+
+**返回值**
+
+`int64`。等于 `value` 的元素个数。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+countReference<T>(data, count, value);
+```
+
+**源码**：[source/lepus_generic.cpp:2470](../../source/lepus_generic.cpp#L2470)。
+
+**完整示例**：[example/samples/std_algorithms_extra.lep](../../example/samples/std_algorithms_extra.lep)。
+
+<a id="api-11"></a>
+
+### sumReference（12）
+
+**声明**
+
+```lepus
+T sumReference<T>(T mut& data, int64 count);
+```
+
+**行为**
+
+求和；空区间直接停机（泛型里没有通用的"零值"可造）。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `data` | `T mut& data` | 连续存储的首元素引用，调用者保证范围有效 | 无 |
+| `count` | `int64 count` | 元素或字节数量，具体单位见行为说明 | 无 |
+
+**返回值**
+
+`T`。求和；空区间直接停机（泛型里没有通用的"零值"可造）。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+显式前置检查：`count > 0, "std::algorithms::sumReference 需要至少一个元素"`。
+
+**调用形式**
+
+```lepus
+sumReference<T>(data, count);
+```
+
+**源码**：[source/lepus_generic.cpp:2481](../../source/lepus_generic.cpp#L2481)。
+
+**完整示例**：[example/samples/std_algorithms_extra.lep](../../example/samples/std_algorithms_extra.lep)。
+
+<a id="api-12"></a>
+
+### sortValue（13）
+
+**声明**
+
+```lepus
+List<T> sortValue<T>(List<T> items);
+```
+
+**行为**
+
+返回升序排序副本，原列表保持不变。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `items` | `List<T> items` | 参与处理的列表元素 | 无 |
+
+**返回值**
+
+`List<T>`。返回升序排序副本，原列表保持不变。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+sortValue(items);
+```
+
+**源码**：[source/semantics/boxing.cpp:447](../../source/semantics/boxing.cpp#L447)（编译器内建，签名为等价调用形式）。
+
+**完整示例**：[example/samples/std_algorithms_extra.lep](../../example/samples/std_algorithms_extra.lep)。
+
+<a id="api-13"></a>
+
+### findValue（14）
+
+**声明**
+
+```lepus
+int64 findValue<T>(List<T> items,T value);
+```
+
+**行为**
+
+线性查找，返回首个下标；未找到为 -1。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `items` | `List<T> items` | 参与处理的列表元素 | 无 |
+| `value` | `T value` | 输入值或写入的新值 | 无 |
+
+**返回值**
+
+`int64`。线性查找，返回首个下标；未找到为 -1。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+findValue(items, value);
+```
+
+**源码**：[source/semantics/boxing.cpp:475](../../source/semantics/boxing.cpp#L475)（编译器内建，签名为等价调用形式）。
+
+**完整示例**：[example/samples/std_algorithms_extra.lep](../../example/samples/std_algorithms_extra.lep)。
+
+<a id="api-14"></a>
+
+### binarySearchValue（15）
+
+**声明**
+
+```lepus
+int64 binarySearchValue<T>(List<T> items,T value);
+```
+
+**行为**
+
+在已升序排序的列表二分查找，未找到为 -1。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `items` | `List<T> items` | 参与处理的列表元素 | 无 |
+| `value` | `T value` | 输入值或写入的新值 | 无 |
+
+**返回值**
+
+`int64`。在已升序排序的列表二分查找，未找到为 -1。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+binarySearchValue(items, value);
+```
+
+**源码**：[source/semantics/boxing.cpp:475](../../source/semantics/boxing.cpp#L475)（编译器内建，签名为等价调用形式）。
+
+**完整示例**：[example/samples/std_algorithms_extra.lep](../../example/samples/std_algorithms_extra.lep)。
+
+<a id="api-15"></a>
+
+### minValue（16）
+
+**声明**
+
+```lepus
+T minValue<T>(T first,T rest...);
+```
+
+**行为**
+
+返回参数中的最小值，至少一个实参。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `first` | `T first` | 第一分量 | 无 |
+| `rest` | `T rest...` | 后续变长实参 | 无 |
+
+**返回值**
+
+`T`。返回参数中的最小值，至少一个实参。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+minValue(first, rest);
+```
+
+**源码**：[source/semantics/boxing.cpp:339](../../source/semantics/boxing.cpp#L339)（编译器内建，签名为等价调用形式）。
+
+**完整示例**：[example/samples/std_algorithms_extra.lep](../../example/samples/std_algorithms_extra.lep)。
+
+<a id="api-16"></a>
+
+### maxValue（17）
+
+**声明**
+
+```lepus
+T maxValue<T>(T first,T rest...);
+```
+
+**行为**
+
+返回参数中的最大值，至少一个实参。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `first` | `T first` | 第一分量 | 无 |
+| `rest` | `T rest...` | 后续变长实参 | 无 |
+
+**返回值**
+
+`T`。返回参数中的最大值，至少一个实参。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+maxValue(first, rest);
+```
+
+**源码**：[source/semantics/boxing.cpp:339](../../source/semantics/boxing.cpp#L339)（编译器内建，签名为等价调用形式）。
+
+**完整示例**：[example/samples/std_algorithms_extra.lep](../../example/samples/std_algorithms_extra.lep)。
+
+<a id="api-17"></a>
+
+### clampValue（18）
+
+**声明**
+
+```lepus
+T clampValue<T>(T value,T low,T high);
+```
+
+**行为**
+
+将 value 限制到闭区间 [low,high]。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `value` | `T value` | 输入值或写入的新值 | 无 |
+| `low` | `T low` | 闭区间下界 | 无 |
+| `high` | `T high` | 闭区间上界 | 无 |
+
+**返回值**
+
+`T`。将 value 限制到闭区间 [low,high]。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+clampValue(value, low, high);
+```
+
+**源码**：[source/semantics/boxing.cpp:447](../../source/semantics/boxing.cpp#L447)（编译器内建，签名为等价调用形式）。
+
+**完整示例**：[example/samples/std_algorithms_extra.lep](../../example/samples/std_algorithms_extra.lep)。
+
+<a id="api-18"></a>
+
+### allValue（19）
+
+**声明**
+
+```lepus
+bool allValue<T>(List<T> items,bool fn(T) predicate);
+```
+
+**行为**
+
+判断全部元素是否满足谓词，空列表为 true。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `items` | `List<T> items` | 参与处理的列表元素 | 无 |
+| `predicate` | `bool fn(T) predicate` | 判断回调，返回 bool | 无 |
+
+**返回值**
+
+`bool`。判断全部元素是否满足谓词，空列表为 true。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+allValue(items, predicate);
+```
+
+**源码**：[source/semantics/boxing.cpp:486](../../source/semantics/boxing.cpp#L486)（编译器内建，签名为等价调用形式）。
+
+**完整示例**：[example/samples/std_algorithms_extra.lep](../../example/samples/std_algorithms_extra.lep)。
+
+<a id="api-19"></a>
+
+### anyValue（20）
+
+**声明**
+
+```lepus
+bool anyValue<T>(List<T> items,bool fn(T) predicate);
+```
+
+**行为**
+
+判断是否有元素满足谓词，空列表为 false。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `items` | `List<T> items` | 参与处理的列表元素 | 无 |
+| `predicate` | `bool fn(T) predicate` | 判断回调，返回 bool | 无 |
+
+**返回值**
+
+`bool`。判断是否有元素满足谓词，空列表为 false。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+anyValue(items, predicate);
+```
+
+**源码**：[source/semantics/boxing.cpp:486](../../source/semantics/boxing.cpp#L486)（编译器内建，签名为等价调用形式）。
+
+**完整示例**：[example/samples/std_algorithms_extra.lep](../../example/samples/std_algorithms_extra.lep)。
+
+<a id="api-20"></a>
+
+### foldValue（21）
+
+**声明**
+
+```lepus
+T foldValue<T>(List<T> items,T initial,T fn(T,T) folder);
+```
+
+**行为**
+
+从 initial 开始顺序累积。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `items` | `List<T> items` | 参与处理的列表元素 | 无 |
+| `initial` | `T initial` | 迭代/累积初值 | 无 |
+| `folder` | `T fn(T,T) folder` | 按签名接收累积值与当前元素的折叠回调 | 无 |
+
+**返回值**
+
+`T`。从 initial 开始顺序累积。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+foldValue(items, initial, folder);
+```
+
+**源码**：[source/semantics/boxing.cpp:447](../../source/semantics/boxing.cpp#L447)（编译器内建，签名为等价调用形式）。
+
+**完整示例**：[example/samples/std_algorithms_extra.lep](../../example/samples/std_algorithms_extra.lep)。
+
+<a id="api-21"></a>
+
+### mapValue（22）
+
+**声明**
+
+```lepus
+List<R> mapValue<T>(List<T> items,R fn(T) mapper);
+```
+
+**行为**
+
+对各元素调用 mapper，返回新列表；R 由回调结果类型推导。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `items` | `List<T> items` | 参与处理的列表元素 | 无 |
+| `mapper` | `R fn(T) mapper` | 转换回调，签名决定输入和输出类型 | 无 |
+
+**返回值**
+
+`List<R>`。对各元素调用 mapper，返回新列表；R 由回调结果类型推导。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+mapValue(items, mapper);
+```
+
+**源码**：[source/semantics/boxing.cpp:374](../../source/semantics/boxing.cpp#L374)（编译器内建，签名为等价调用形式）。
+
+**完整示例**：[example/samples/std_algorithms_extra.lep](../../example/samples/std_algorithms_extra.lep)。
+
+<a id="api-22"></a>
+
+### filterValue（23）
+
+**声明**
+
+```lepus
+List<T> filterValue<T>(List<T> items,bool fn(T) predicate);
+```
+
+**行为**
+
+返回满足 predicate 的元素列表副本。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `items` | `List<T> items` | 参与处理的列表元素 | 无 |
+| `predicate` | `bool fn(T) predicate` | 判断回调，返回 bool | 无 |
+
+**返回值**
+
+`List<T>`。返回满足 predicate 的元素列表副本。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+filterValue(items, predicate);
+```
+
+**源码**：[source/semantics/boxing.cpp:394](../../source/semantics/boxing.cpp#L394)（编译器内建，签名为等价调用形式）。
+
+**完整示例**：[example/samples/std_algorithms_extra.lep](../../example/samples/std_algorithms_extra.lep)。
+
+<a id="api-23"></a>
+
+### reduceValue（24）
+
+**声明**
+
+```lepus
+T reduceValue<T>(List<T> items,T fn(T,T) folder);
+```
+
+**行为**
+
+用首元素作初值累积；空列表报错。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `items` | `List<T> items` | 参与处理的列表元素 | 无 |
+| `folder` | `T fn(T,T) folder` | 按签名接收累积值与当前元素的折叠回调 | 无 |
+
+**返回值**
+
+`T`。用首元素作初值累积；空列表报错。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+reduceValue(items, folder);
+```
+
+**源码**：[source/semantics/boxing.cpp:427](../../source/semantics/boxing.cpp#L427)（编译器内建，签名为等价调用形式）。
+
+**完整示例**：[example/samples/std_algorithms_extra.lep](../../example/samples/std_algorithms_extra.lep)。
+
+<a id="api-24"></a>
+
+### reduceValue（25）
+
+**声明**
+
+```lepus
+T reduceValue<T>(List<T> items,T initial,T fn(T,T) folder);
+```
+
+**行为**
+
+从显式 initial 累积，等价 foldValue。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `items` | `List<T> items` | 参与处理的列表元素 | 无 |
+| `initial` | `T initial` | 迭代/累积初值 | 无 |
+| `folder` | `T fn(T,T) folder` | 按签名接收累积值与当前元素的折叠回调 | 无 |
+
+**返回值**
+
+`T`。从显式 initial 累积，等价 foldValue。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+reduceValue(items, initial, folder);
+```
+
+**源码**：[source/semantics/boxing.cpp:427](../../source/semantics/boxing.cpp#L427)（编译器内建，签名为等价调用形式）。
+
+**完整示例**：[example/samples/std_algorithms_extra.lep](../../example/samples/std_algorithms_extra.lep)。
+
+<a id="api-25"></a>
+
+### sumValue（26）
+
+**声明**
+
+```lepus
+T sumValue<T>(List<T> items);
+```
+
+**行为**
+
+对数值列表求和。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `items` | `List<T> items` | 参与处理的列表元素 | 无 |
+
+**返回值**
+
+`T`。对数值列表求和。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+sumValue(items);
+```
+
+**源码**：[source/semantics/boxing.cpp:361](../../source/semantics/boxing.cpp#L361)（编译器内建，签名为等价调用形式）。
+
+**完整示例**：[example/samples/std_algorithms_extra.lep](../../example/samples/std_algorithms_extra.lep)。
+
+<a id="api-26"></a>
+
+### countValue（27）
+
+**声明**
+
+```lepus
+int64 countValue<T>(List<T> items,T value);
+```
+
+**行为**
+
+统计等于 value 的元素数量。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `items` | `List<T> items` | 参与处理的列表元素 | 无 |
+| `value` | `T value` | 输入值或写入的新值 | 无 |
+
+**返回值**
+
+`int64`。统计等于 value 的元素数量。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+countValue(items, value);
+```
+
+**源码**：[source/semantics/boxing.cpp:405](../../source/semantics/boxing.cpp#L405)（编译器内建，签名为等价调用形式）。
+
+**完整示例**：[example/samples/std_algorithms_extra.lep](../../example/samples/std_algorithms_extra.lep)。
+
+<a id="api-27"></a>
+
+### countValue（28）
+
+**声明**
+
+```lepus
+int64 countValue<T>(List<T> items,bool fn(T) predicate);
+```
+
+**行为**
+
+统计满足 predicate 的元素数量。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `items` | `List<T> items` | 参与处理的列表元素 | 无 |
+| `predicate` | `bool fn(T) predicate` | 判断回调，返回 bool | 无 |
+
+**返回值**
+
+`int64`。统计满足 predicate 的元素数量。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+countValue(items, predicate);
+```
+
+**源码**：[source/semantics/boxing.cpp:405](../../source/semantics/boxing.cpp#L405)（编译器内建，签名为等价调用形式）。
+
+**完整示例**：[example/samples/std_algorithms_extra.lep](../../example/samples/std_algorithms_extra.lep)。

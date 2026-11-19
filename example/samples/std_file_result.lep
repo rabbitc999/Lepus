@@ -1,0 +1,17 @@
+module stdFileResult;
+
+import std::io;
+
+void main() {
+    Result<File, Error> opened =
+    fileOpen("missing-file-for-lepus-tests.txt", "r");
+    match (opened) {
+        Result<File, Error>::Ok(handle) => {
+            fileClose(&handle);
+            println("opened");
+        }
+        Result<File, Error>::Fail(message) => {
+            println("{}", message);
+        }
+    }
+}

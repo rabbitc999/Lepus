@@ -1,0 +1,128 @@
+"""LEPUS project packages: metadata, includes/imports, origins and cache invalidation."""
+from compiler_path import compiler_path
+from pathlib import Path
+import argparse
+import os
+import shutil
+import subprocess
+from project_temp import tempfile
+ROOT = Path(__file__).resolve().parents[1]
+COMPILER = compiler_path()
+
+def run(args, success=True, cwd=ROOT, input=None, env=None):
+    result = subprocess.run(list(map(str, args)), cwd=cwd, input=input, capture_output=True, text=True, encoding='utf-8', env=env or dict(os.environ, LEPUS_LANG='zh'))
+    assert (result.returncode == 0) == success, f'exit={result.returncode}\n' + result.stdout + result.stderr
+    return result
+
+def main():
+    global COMPILER
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--lepus', type=Path, default=COMPILER)
+    COMPILER = parser.parse_args().lepus.resolve()
+    (ROOT / 'tmp').mkdir(exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='lepus-package-', dir=ROOT / 'tmp') as directory:
+        work = Path(directory)
+        project = work / 'app'
+        shutil.copytree(ROOT / 'tests/fixtures/package', project)
+        manifest = project / 'lepus.toml'
+        native = project / 'include/native.c'
+        native.write_text('#include <stdint.h>\n#ifdef _WIN32\n#define API __declspec(dllexport)\n#else\n#define API\n#endif\nAPI int32_t identity(int32_t n) { return n; }\n', encoding='utf-8')
+        library = project / 'include' / ('native.dll' if os.name == 'nt' else 'native.so')
+        run(['gcc', '-shared', *(['-fPIC'] if os.name != 'nt' else []), native, '-o', library])
+        (project / 'include/nativeapi.lep').write_text('module nativeapi;\n#abi("C", "./' + library.name + '", "identity") int32 nativeIdentity(int32 n);\n', encoding='utf-8')
+        original = manifest.read_text(encoding='utf-8').replace('commands = [', 'commands = [\n    \'import nativeapi;\',')
+        manifest.write_text(original, encoding='utf-8')
+        source = project / 'src/main.lep'
+        prefix = work / 'program'
+        args = [COMPILER, 'run', source, '--out', prefix]
+
+        def execute(*extra, success=True):
+            """在项目目录里执行：`#abi` 的动态库放在 include 下，运行时要能从 PATH 找到它。"""
+            env = dict(os.environ, LEPUS_LANG='zh',
+                       PATH=str(project / 'include') + os.pathsep + os.environ.get('PATH', ''))
+            return run([*args, *extra], success=success, cwd=project, env=env)
+        source.write_text('/*\nmodule hidden;\nimport absent;\n*/\n' + source.read_text(encoding='utf-8').replace('    std::core::println("lepus-ok");', '    std::core::assert(nativeapi::nativeIdentity((int32)7) == 7);\n    std::core::println("lepus-ok");'), encoding='utf-8')
+        assert execute().stdout == 'lepus-ok\n'
+        emitted = [args[0], 'build', *args[2:], '--emit-llvm', '--incremental']
+        first = run(emitted)
+        llvm = prefix.with_suffix('.ll')
+        text = llvm.read_text(encoding='utf-8')
+        assert 'lepus_host_abi_symbol' in text and not prefix.with_suffix('.abi.cpp').exists()
+        original_llvm = llvm.read_bytes()
+        cached = run(emitted)
+        assert '个模块复用' in cached.stderr, cached.stderr
+        assert llvm.read_bytes() == original_llvm
+        dependencies = execute('--deps').stdout.replace('\\', '/')
+        for file in (manifest, source, project / 'include/shared.lep', project / 'modules/tools/math.lep'):
+            assert file.as_posix() in dependencies, dependencies
+        manifest.write_text(original.replace('version = "0.1.0"', 'version = "0.1.1"'), encoding='utf-8')
+        rebuilt = run(emitted)
+        assert '增量缓存命中' not in rebuilt.stderr, rebuilt.stderr
+        (project / 'include/extra.lep').write_text('module extra;\nint64 extraValue() { return 2; }\n', encoding='utf-8')
+        assert '增量缓存命中' not in run(emitted).stderr
+        (project / 'include/extra.lep').write_text('module extra;\nint64 extraValue() { return 1; }\n', encoding='utf-8')
+        manifest.write_text(original, encoding='utf-8')
+        assert execute().stdout == 'lepus-ok\n'
+        (project / 'include/extra.lep').write_text('module extra;\nint64 extraValue( { return 1; }\n', encoding='utf-8')
+        failed = execute(success=False)
+        assert 'extra.lep' in failed.stderr and '第 2 行' in failed.stderr, failed.stderr
+        (project / 'include/extra.lep').write_text('module extra;\nint64 extraValue() { return 1; }\n', encoding='utf-8')
+        manifest.write_text(original.replace('tools::math', 'missing::module'), encoding='utf-8')
+        assert 'missing::module' in execute(success=False).stderr
+        for invalid in ('[package]\nname = "a"\nname = "b"\n', '[lepus]\ncommands = ["%define BAD 1"]\n', '[lepus]\nimport = ["bad::"]\n', '[lepus]\ninclude = ["missing.inc"]\n', '[other]\ninclude = []\n', '[package]\nversion = 42\n', '[lepus]\ndebug = "yes"\n', '[lepus]\nrun = "bogus"\n', '[lepus]\ninclude = ["unfinished"\n'):
+            manifest.write_text(invalid, encoding='utf-8')
+            assert execute(success=False).stderr
+        manifest.write_text(original, encoding='utf-8')
+        nested = project / 'src/nested'
+        nested.mkdir()
+        (nested / 'lepus.toml').write_text('[package]\nname="nested"\nversion="1.0.0"\nauthor="A"\n', encoding='utf-8')
+        nested_source = nested / 'main.lep'
+        nested_source.write_text('void main() { }\n', encoding='utf-8')
+        assert run([COMPILER, 'run', nested_source, '--out', work / 'nested']).stdout == ''
+        binary = work / 'binary'
+
+        def product(prefix):
+            """返回 BUILD 导出产物路径（Windows 带 .exe）。"""
+            return Path(str(prefix) + ('.exe' if os.name == 'nt' else ''))
+
+        # 项目 `debug = true` 等价于命令行 `--debug`：不裁剪符号、降低优化级别，产物更大。
+        run([COMPILER, 'build', source, '--out', binary], cwd=project)
+        released = product(binary).stat().st_size
+        manifest.write_text(original.replace('[lepus]', '[lepus]\ndebug = true'), encoding='utf-8')
+        run([COMPILER, 'build', source, '--out', binary], cwd=project)
+        assert product(binary).stat().st_size > released
+        manifest.write_text(original, encoding='utf-8')
+        run([COMPILER, 'build', source, '--out', binary, '--debug'], cwd=project)
+        assert product(binary).stat().st_size > released
+        run([COMPILER, 'build', source, '--out', binary, '--no-debug'], cwd=project)
+        assert product(binary).stat().st_size == released
+        manifest.write_text(original.replace('[lepus]', '[lepus]\nencrypt = true'), encoding='utf-8')
+        rejected = run([COMPILER, 'run', source, '--out', binary], success=False, cwd=project)
+        assert 'unknown key: lepus.encrypt' in rejected.stderr
+        manifest.write_text(original, encoding='utf-8')
+        run([COMPILER, 'svmb', source, '--out', binary], success=False)
+        rejected = run([COMPILER, 'run', source, '--out', binary, '--encrypt'], success=False, cwd=project)
+        assert '--encrypt' in rejected.stderr
+        manifest.write_text(original + '\n[embedded]\nenabled = true\nmax_memory = 1024\nrestrict_modules = ["std::net"]\n', encoding='utf-8')
+        rejected = run([COMPILER, 'run', source, '--out', binary], success=False)
+        assert 'unknown or repeated table: embedded' in rejected.stderr, rejected.stderr
+        manifest.write_text(original, encoding='utf-8')
+        probe = work / 'metadata.cpp'
+        probe.write_text('#include "lepus_package.hpp"\n#include <iostream>\nint main(int argc, char **argv) { lepus_package::Project p; Memory::String e; if (!lepus_package::read(std::filesystem::u8path(argv[1]), p, e)) { std::cerr << e.c_str() << "\\n"; return 1; } std::cout << p.name << "\\n" << p.version << "\\n" << p.authors.at(0) << "\\n" << (p.debug ? "debug=1" : "debug=0") << "\\n" << p.run << "\\n"; }\n', encoding='utf-8')
+        exe = work / ('metadata.exe' if os.name == 'nt' else 'metadata')
+        run(['g++', '-std=c++17', '-I', ROOT / 'source', '-I', ROOT / 'library', probe,
+             ROOT / 'source/lepus_package.cpp', ROOT / 'source/lepus_aot_target.cpp',
+             ROOT / 'source/toml/toml.cpp', ROOT / 'source/toml/toml_source.cpp',
+             ROOT / 'source/json/json.cpp', '-o', exe])
+        assert run([exe, manifest]).stdout == 'lepus-demo\n0.1.0\n示例作者\ndebug=0\nrun\n'
+        manifest.write_text(original.replace('[lepus]', '[lepus]\ndebug = true'), encoding='utf-8')
+        assert run([exe, manifest]).stdout == 'lepus-demo\n0.1.0\n示例作者\ndebug=1\nrun\n'
+        # `interpret` 是 1.0.8 之前的名字，仍归一化到唯一的运行方式；`smvb` / `svmb` 一律拒绝。
+        manifest.write_text(original.replace('[lepus]', '[lepus]\nrun = "interpret"'), encoding='utf-8')
+        assert run([exe, manifest]).stdout == 'lepus-demo\n0.1.0\n示例作者\ndebug=0\nrun\n'
+        manifest.write_text(original.replace('[lepus]', '[lepus]\nrun = "smvb"'), encoding='utf-8')
+        run([exe, manifest], success=False)
+        manifest.write_text(original, encoding='utf-8')
+    print('LEPUS package checks passed')
+if __name__ == '__main__':
+    main()

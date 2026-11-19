@@ -1,0 +1,1 @@
+lepus: example/samples-error/lifetime_static_argument.lep 第 6 行：[LEP1214] program::install 要求 'static 实参，但 x 是局部或形参来源；只能传全局变量或用 'static 存储

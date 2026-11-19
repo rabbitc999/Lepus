@@ -1,0 +1,36 @@
+/* macro_for.lep —— 变长宏里的 `$for (变量 in 尾参) { ... }`：按尾部实参逐个重复宏体里的那一段。
+ *
+ * 只能遍历**变长尾参**（`...values`）：每轮把循环变量整体换成该轮的实参文本，所以
+ * `$for` 体里可以放心写 `(v) * (v)` 这种把变量包在中间的形式。
+ * 循环和宏体分别用花括号包住，模板展开后不额外创建运行时块。
+ */
+
+$macro PRINT_ALL(label, ...values) -> {
+$for (v in values) {
+println(label, v);
+}
+}
+
+$macro SUM_SQUARES(...values) -> {
+int64 total = 0;
+$for (v in values) {
+total = total + (v) * (v);
+}
+println("平方和 = {}", total);
+}
+
+/* 嵌套 `$for`：里层每轮都跟着外层走一遍，一共 len(values)² 行。 */
+$macro PAIRS(...values) -> {
+$for (a in values) {
+$for (b in values) {
+println("({}, {})", a, b);
+}
+}
+}
+
+void main() {
+    $PRINT_ALL("值={}", 1);
+    $PRINT_ALL("值={}", 2, 3, 4);
+    $SUM_SQUARES(2, 3, 4);
+    $PAIRS(1, 2);
+}

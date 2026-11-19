@@ -1,0 +1,1 @@
+void main(){std::core::List<String> values; values.push("abc"); std::core::List<String> const& readonly=&values; for(String item in readonly){item[0]='X';}}

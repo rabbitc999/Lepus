@@ -1,0 +1,1 @@
+lepus: example/samples-error/macro_end_for_unpaired.lep 第 7 行第 15 列：未定义宏：end_for

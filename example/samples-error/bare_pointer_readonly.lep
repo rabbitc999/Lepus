@@ -1,0 +1,4 @@
+void main() {
+    int64* pointer;
+    unsafe { *pointer = 1; }
+}

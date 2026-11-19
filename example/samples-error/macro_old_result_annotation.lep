@@ -1,0 +1,4 @@
+$macro !ADD(a, b) -> {
+a + b
+}
+void main() { }

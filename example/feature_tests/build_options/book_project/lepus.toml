@@ -1,0 +1,13 @@
+[package]
+name = "demo"
+version = "0.1.0"
+
+[lepus]
+main = "src/main.lep"
+search_paths = ["src"]
+
+[build]
+build_option = ["A", "B"]
+output = "executable"
+lto = "full"
+allocator = "malloc"

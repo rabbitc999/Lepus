@@ -1,0 +1,1 @@
+lepus: example/samples-error/enum_unknown_variant.lep 第 3 行第 28 列：enum Option 没有变体 Missing

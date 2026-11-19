@@ -1,0 +1,7 @@
+/* 循环块必须用右花括号结束。 */
+$macro BROKEN(...values) -> {
+$for (value in values) {
+$end_for;
+}
+}
+void main() { $BROKEN(1); }

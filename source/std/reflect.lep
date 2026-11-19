@@ -1,0 +1,194 @@
+module std::reflect;
+
+bool __compiledReflection();
+/** 反射裁剪构建调用依赖反射的高级接口时直接 panic。 */
+void requireReflection() {
+    if (!__compiledReflection()) { panic("编译器未编入反射支持"); }
+}
+
+/** 注解常量载荷的类型错误。 */
+enum ReflectError : Error {
+    TypeMismatch;
+
+    /** 返回注解常量的类型不匹配诊断。 */
+    String toString() { return "反射值类型不匹配"; }
+};
+
+/** 封闭值集合：精确保存位宽、符号及字符串所有权。 */
+enum ReflectValue {
+    Empty,
+    Bool(bool value),
+    Char(char value),
+    I8(int8 value),
+    I16(int16 value),
+    I32(int32 value),
+    I64(int64 value),
+    U8(uint8 value),
+    U16(uint16 value),
+    U32(uint32 value),
+    U64(uint64 value),
+    F32(float32 value),
+    F64(float64 value),
+    Text(String value);
+    uint64 typeId() {
+        uint64 id = getTypeId<void>();
+        match(self) {
+            Empty => {}
+            Bool(value) => { id = getTypeId<bool>(); }
+            Char(value) => { id = getTypeId<char>(); }
+            I8(value) => { id = getTypeId<int8>(); }
+            I16(value) => { id = getTypeId<int16>(); }
+            I32(value) => { id = getTypeId<int32>(); }
+            I64(value) => { id = getTypeId<int64>(); }
+            U8(value) => { id = getTypeId<uint8>(); }
+            U16(value) => { id = getTypeId<uint16>(); }
+            U32(value) => { id = getTypeId<uint32>(); }
+            U64(value) => { id = getTypeId<uint64>(); }
+            F32(value) => { id = getTypeId<float32>(); }
+            F64(value) => { id = getTypeId<float64>(); }
+            Text(value) => { id = getTypeId<String>(); }
+        }
+        return id;
+    }
+    Result<bool,Error> asBool() {
+        Result<bool,Error> result = Result<bool,Error>::Fail(ReflectError::TypeMismatch);
+        match(self) { Bool(value) => {result = Result<bool,Error>::Ok(value);} _ => {} }
+        return result;
+    }
+    Result<char,Error> asChar() {
+        Result<char,Error> result = Result<char,Error>::Fail(ReflectError::TypeMismatch);
+        match(self) { Char(value) => {result = Result<char,Error>::Ok(value);} _ => {} }
+        return result;
+    }
+    Result<int8,Error> asI8() {
+        Result<int8,Error> result = Result<int8,Error>::Fail(ReflectError::TypeMismatch);
+        match(self) { I8(value) => {result = Result<int8,Error>::Ok(value);} _ => {} }
+        return result;
+    }
+    Result<int16,Error> asI16() {
+        Result<int16,Error> result = Result<int16,Error>::Fail(ReflectError::TypeMismatch);
+        match(self) { I16(value) => {result = Result<int16,Error>::Ok(value);} _ => {} }
+        return result;
+    }
+    Result<int32,Error> asI32() {
+        Result<int32,Error> result = Result<int32,Error>::Fail(ReflectError::TypeMismatch);
+        match(self) { I32(value) => {result = Result<int32,Error>::Ok(value);} _ => {} }
+        return result;
+    }
+    Result<int64,Error> asI64() {
+        Result<int64,Error> result = Result<int64,Error>::Fail(ReflectError::TypeMismatch);
+        match(self) { I64(value) => {result = Result<int64,Error>::Ok(value);} _ => {} }
+        return result;
+    }
+    Result<uint8,Error> asU8() {
+        Result<uint8,Error> result = Result<uint8,Error>::Fail(ReflectError::TypeMismatch);
+        match(self) { U8(value) => {result = Result<uint8,Error>::Ok(value);} _ => {} }
+        return result;
+    }
+    Result<uint16,Error> asU16() {
+        Result<uint16,Error> result = Result<uint16,Error>::Fail(ReflectError::TypeMismatch);
+        match(self) { U16(value) => {result = Result<uint16,Error>::Ok(value);} _ => {} }
+        return result;
+    }
+    Result<uint32,Error> asU32() {
+        Result<uint32,Error> result = Result<uint32,Error>::Fail(ReflectError::TypeMismatch);
+        match(self) { U32(value) => {result = Result<uint32,Error>::Ok(value);} _ => {} }
+        return result;
+    }
+    Result<uint64,Error> asU64() {
+        Result<uint64,Error> result = Result<uint64,Error>::Fail(ReflectError::TypeMismatch);
+        match(self) { U64(value) => {result = Result<uint64,Error>::Ok(value);} _ => {} }
+        return result;
+    }
+    Result<float32,Error> asF32() {
+        Result<float32,Error> result = Result<float32,Error>::Fail(ReflectError::TypeMismatch);
+        match(self) { F32(value) => {result = Result<float32,Error>::Ok(value);} _ => {} }
+        return result;
+    }
+    Result<float64,Error> asF64() {
+        Result<float64,Error> result = Result<float64,Error>::Fail(ReflectError::TypeMismatch);
+        match(self) { F64(value) => {result = Result<float64,Error>::Ok(value);} _ => {} }
+        return result;
+    }
+    Result<String,Error> asText() {
+        Result<String,Error> result = Result<String,Error>::Fail(ReflectError::TypeMismatch);
+        match(self) { Text(value) => {result = Result<String,Error>::Ok(value);} _ => {} }
+        return result;
+    }
+};
+
+struct ParameterInfo { String name; uint64 typeId; };
+struct AnnotationParameter { String name; uint64 typeId; Option<std::reflect::ReflectValue> defaultValue; };
+struct AnnotationInfo { String name; uint64 typeId; List<std::reflect::AnnotationParameter> params; };
+struct Annotation { uint64 annotationId; List<std::reflect::ReflectValue> args; };
+struct FuncInfo { String name; uint64 typeId; List<std::reflect::ParameterInfo> params; uint64 returnTypeId; List<std::reflect::Annotation> annotations; };
+struct MethodInfo { FuncInfo function; bool isStatic; bool isConstructor; bool isConst; bool hasDefaultBody; };
+struct FieldInfo { String name; uint32 offset; uint64 typeId; bool isOwned; List<std::reflect::Annotation> annotations; };
+struct StaticMemberInfo { String name; uint64 typeId; bool isOwned; List<std::reflect::Annotation> annotations; };
+struct VariantInfo { String name; uint32 tag; List<std::reflect::ParameterInfo> payloads; };
+struct StructInfo { String name; uint64 typeId; List<std::reflect::FieldInfo> fields; List<std::reflect::MethodInfo> methods; List<std::reflect::StaticMemberInfo> staticMembers; List<uint64> implementedInterfaces; List<std::reflect::Annotation> annotations; };
+struct EnumInfo { String name; uint64 typeId; List<std::reflect::VariantInfo> variants; List<std::reflect::MethodInfo> methods; List<std::reflect::StaticMemberInfo> staticMembers; List<uint64> implementedInterfaces; List<std::reflect::Annotation> annotations; };
+struct InterfaceInfo { String name; uint64 typeId; List<std::reflect::MethodInfo> methods; List<uint64> implementedBy; List<std::reflect::Annotation> annotations; };
+
+// 下列内部声明由编译器在完整具体类型和布局确定后生成函数体。
+uint64 __reflect_typeId(int64 id);
+Option<std::reflect::StructInfo> __reflect_struct(uint64 id);
+Option<std::reflect::EnumInfo> __reflect_enum(uint64 id);
+Option<std::reflect::InterfaceInfo> __reflect_interface(uint64 id);
+Option<std::reflect::FuncInfo> getFuncInfo(String name);
+Option<std::reflect::AnnotationInfo> getAnnotationInfo(String name);
+
+uint64 getTypeId<T>() { return __reflect_typeId(__typeTag(T)); }
+uint64 getInterfaceId<I>() { return getTypeId<I>(); }
+Option<std::reflect::StructInfo> getStructInfo<T>() { return __reflect_struct(getTypeId<T>()); }
+Option<std::reflect::EnumInfo> getEnumInfo<T>() { return __reflect_enum(getTypeId<T>()); }
+Option<std::reflect::InterfaceInfo> getInterfaceInfo<I>() { return __reflect_interface(getTypeId<I>()); }
+bool implementsInterface<T>(uint64 interfaceId) {
+    Option<std::reflect::StructInfo> s = getStructInfo<T>();
+    if(s.isValue()) { for(uint64 id in s.unwrap().implementedInterfaces) { if(id==interfaceId) {return true;} } }
+    Option<std::reflect::EnumInfo> e = getEnumInfo<T>();
+    if(e.isValue()) { for(uint64 id in e.unwrap().implementedInterfaces) { if(id==interfaceId) {return true;} } }
+    return false;
+}
+List<std::reflect::Annotation> getAnnotations<T>() {
+    Option<std::reflect::StructInfo> s=getStructInfo<T>(); if(s.isValue()){return s.unwrap().annotations;}
+    Option<std::reflect::EnumInfo> e=getEnumInfo<T>(); if(e.isValue()){return e.unwrap().annotations;}
+    Option<std::reflect::InterfaceInfo> i=getInterfaceInfo<T>(); if(i.isValue()){return i.unwrap().annotations;}
+    List<std::reflect::Annotation> empty;return empty;
+}
+List<std::reflect::Annotation> getFieldAnnotations<T>(String name) {
+    Option<std::reflect::StructInfo> s=getStructInfo<T>();
+    if(s.isValue()){for(FieldInfo f in s.unwrap().fields){if(f.name==name){return f.annotations;}}}
+    List<std::reflect::Annotation> empty;return empty;
+}
+List<std::reflect::Annotation> getFuncAnnotations(String name) {
+    Option<std::reflect::FuncInfo> f=getFuncInfo(name);if(f.isValue()){return f.unwrap().annotations;}
+    List<std::reflect::Annotation> empty;return empty;
+}
+List<std::reflect::MethodInfo> __methods<T>() {
+    Option<std::reflect::StructInfo> s=getStructInfo<T>();if(s.isValue()){return s.unwrap().methods;}
+    Option<std::reflect::EnumInfo> e=getEnumInfo<T>();if(e.isValue()){return e.unwrap().methods;}
+    Option<std::reflect::InterfaceInfo> i=getInterfaceInfo<T>();if(i.isValue()){return i.unwrap().methods;}
+    List<std::reflect::MethodInfo> empty;return empty;
+}
+List<std::reflect::Annotation> getMethodAnnotations<T>(String name) {
+    for(MethodInfo m in __methods<T>()){if(m.function.name==name){return m.function.annotations;}}
+    List<std::reflect::Annotation> empty;return empty;
+}
+List<std::reflect::Annotation> getStaticMemberAnnotations<T>(String name) {
+    Option<std::reflect::StructInfo> s=getStructInfo<T>();
+    if(s.isValue()){for(StaticMemberInfo m in s.unwrap().staticMembers){if(m.name==name){return m.annotations;}}}
+    Option<std::reflect::EnumInfo> e=getEnumInfo<T>();
+    if(e.isValue()){for(StaticMemberInfo m in e.unwrap().staticMembers){if(m.name==name){return m.annotations;}}}
+    List<std::reflect::Annotation> empty;return empty;
+}
+
+/** 根据反射暴露的具体类型生成精确 JSON 编码。 */
+Result<String,Error> __serializeJson<T>(T const& value);
+/** 根据反射暴露的具体类型生成校验后的 JSON 解码。 */
+Result<T,Error> __deserializeJson<T>(String text);
+String __serdeQuote(String value);
+String __serdeFloat(float64 value);
+bool __serdeFinite(float64 value);
+bool __serdeNumber(String value, bool decimal);
+int64 __serdeBigPrecision(BigDecimal value);

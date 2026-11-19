@@ -1,0 +1,1 @@
+void main() { match ("a") { std::core::rangeEq("a", 3) => { } _ => { } } }

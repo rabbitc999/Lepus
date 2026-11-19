@@ -1,0 +1,583 @@
+/**
+ * @brief 识别标准集合的参数化 opcode 表示，不为容器分配独立类型类别。
+ * @param type 待查询的类型及其元素参数。
+ * @return 类型是 List、Set 或 Map 的内部标准集合名称时返回 true。
+ */
+bool IsContainer(const std::shared_ptr<MType> &type)
+{
+    return type && type->kind == MType::Opcode && type->elem && (type->name == "vec" || type->name == "set" || type->name == "map");
+}
+
+/**
+ * @brief 识别标准库声明的具名 opcode，避免与用户同名类型混淆。
+ * @param type 待查询的类型。
+ * @param name 标准模块中的公开类型名称。
+ * @return 类型是指定标准 opcode 时返回 true。
+ */
+bool IsStandardOpcode(const std::shared_ptr<MType> &type, const char *name)
+{
+    if (!type || type->kind != MType::Opcode) return false;
+    const std::string_view shortName(name);
+    const char *prefix = shortName == "BigInteger" || shortName == "BigDecimal" ? "std::big_number::" : "std::core::";
+    return type->name == Memory::String(prefix) + name;
+}
+/**
+ * @brief 查找已经登记的标准库 void 裸指针表示。
+ * @param owner 当前类型的规范名称。
+ * @param readOnly 是否查询只读形式。
+ * @return 类型属于标准库的对应表示时为真。
+ */
+bool IsOpaqueBarePointerName(const Memory::String &owner, bool readOnly)
+{
+    const auto *name = readOnly ? "__ReadOnlyOpaqueBarePtr" : "__OpaqueBarePtr";
+    const auto *qualified = readOnly ? "std::core::__ReadOnlyOpaqueBarePtr" : "std::core::__OpaqueBarePtr";
+    if (owner == qualified) return true;
+    if (owner != name) return false;
+    return std::any_of(g_top.begin(), g_top.end(), [&](int declaration) {
+        const auto &node = g_nodes[static_cast<std::size_t>(declaration)];
+        return node.kind == MNode::StructDecl && node.module == "std::core" && node.s == owner;
+    });
+}
+/**
+ * @brief 识别核心裸指针表示，只用于编译期选择内存 intrinsic 的地址形式。
+ * @param type 静态类型。
+ * @return 类型是 std::core::BarePtr 的具体实例时为真。
+ */
+bool IsBarePointerType(const std::shared_ptr<MType> &type)
+{
+    if (!type || type->kind != MType::Struct) return false;
+    if (IsOpaqueBarePointerName(type->name, false)) return true;
+    if (type->name.rfind("std::core::BarePtr__", 0u) == 0u) return true;
+    const auto instance = lepus_generic::session.made.find(type->name);
+    return instance != lepus_generic::session.made.end() && instance->second.generic
+        && instance->second.generic->module == "std::core" && instance->second.generic->sourceName == "BarePtr";
+}
+/**
+ * @brief 查找只读裸指针使用的核心类型实例。
+ * @param type 已解析的语义类型。
+ * @return 类型是核心只读裸指针时为真。
+ */
+bool IsReadOnlyBarePointer(const std::shared_ptr<MType> &type)
+{
+    if (!type || type->kind != MType::Struct) return false;
+    if (IsOpaqueBarePointerName(type->name, true)) return true;
+    if (type->name.rfind("std::core::__ReadOnlyBarePtr__", 0u) == 0u) return true;
+    const auto instance = lepus_generic::session.made.find(type->name);
+    return instance != lepus_generic::session.made.end() && instance->second.generic
+        && instance->second.generic->module == "std::core" && instance->second.generic->sourceName == "__ReadOnlyBarePtr";
+}
+std::shared_ptr<MType> BarePointerElement(const std::shared_ptr<MType> &type);
+/**
+ * @brief 判断原始存储的内部字段是否对指定模块隐藏。
+ * @param owner 字段所属的具体结构体名称。
+ * @param module 访问字段的模块。
+ * @return 字段属于封装的原始存储表示且模块无权限时为真。
+ */
+bool HidesRawStorageFields(const Memory::String &owner, const Memory::String &module)
+{
+    if (module == "std::core") return false;
+    if (IsOpaqueBarePointerName(owner, false) || IsOpaqueBarePointerName(owner, true)) return true;
+    if (owner.rfind("std::core::BarePtr__", 0u) == 0u || owner.rfind("std::core::__ReadOnlyBarePtr__", 0u) == 0u) return true;
+    if (module != "std::memory" && (owner.rfind("std::core::RawStorage__", 0u) == 0u || owner.rfind("std::core::RawPtr__", 0u) == 0u)) return true;
+    const auto expansion = lepus_generic::session.made.find(owner);
+    if (expansion == lepus_generic::session.made.end() || !expansion->second.generic || expansion->second.generic->module != "std::core")
+        return false;
+    const auto &generic = *expansion->second.generic;
+    return generic.sourceName == "BarePtr" || generic.sourceName == "__ReadOnlyBarePtr"
+        || (module != "std::memory" && (generic.sourceName == "RawStorage" || generic.sourceName == "RawPtr"));
+}
+/* ---------- 内部执行期类型标签 ---------- */
+
+/**
+ * @brief 单次编译的内部标签，只供 Any 校验、接口分派与反射桥接使用。
+ *
+ * 内建标签与匹配的 运行时 保持一致；用户类型和复合类型在编译期登记。
+ * 不保证跨程序、版本或增删声明后的编号稳定；持久化身份使用 std::reflect 的元数据 ID。
+ */
+Memory::Map<Memory::String, std::int64_t> g_typeIdIndex;
+Memory::Map<std::int64_t, std::shared_ptr<MType>> g_debugTypeIds;  ///< 本次实际使用的类型号及检查后类型，供只读布局生成。
+/**
+ * @brief 下一个内部标签，运行时与编译器都以 64 位有符号整数存储。
+ */
+std::int64_t g_nextTypeId = 1;
+/**
+ * 内建固定占 `1..9`，`10..32` 预留给**以后新增的内建** —— 新内建只能往这段空号里加，
+ *  保持编译器与匹配 运行时 的内建标签一致。
+ */
+constexpr std::int64_t kFirstUserTypeId = 33;
+/**
+ * 号用尽的上界（实际任何程序都远远到不了，这是防回绕的兜底）。
+ */
+constexpr std::int64_t kMaxTypeId = 9223372036854775807LL; /* INT64_MAX */
+
+/**
+ * 普通函数签名。
+ */
+struct MFuncSig
+{
+    std::shared_ptr<MType> result;
+    Memory::Vector<MParam> params;
+};
+
+/**
+ * 一个普通函数声明（重载时每个签名一份，标签重名会带 `$类型` 后缀）。
+ */
+struct MFunctionDecl
+{
+    int declarationId = -1;  ///< 原始声明节点，供重载契约与外部函数值核对。
+    Memory::String source; /* 源程序里的函数名 */
+    Memory::String module; /* 空字符串表示兼容的全局模块 */
+    Memory::String label;  /* 四元式标签 */
+    MFuncSig signature;
+    int bodyId = -1;          /* 函数体（Block 节点） */
+    int captureSyntax = -1;   ///< AST 闭包的显式捕获项，保存片段替换后的绑定身份。
+    bool unsafeRequired = false; ///< 调用方必须显式承担不安全前置条件。
+    Memory::String exportSymbol; ///< 对外原生符号，与内部语言标签分离。
+    Memory::String abiConvention; ///< 外部边界采用的已验证调用约定。
+    bool exported = false;    ///< 是否由源码 export 公开给原生调用方。
+    bool external = false;    /* 只有签名；实现从 runtime::NativeRegistry 取得 */
+    bool moduleLocal = false; /* `inline`：只允许声明模块内部调用，不导出。 */
+    bool superseded = false;  /* 同名同签名又被定义了一次：这一条不降级（后面的覆盖前面的） */
+    Memory::String abiLibrary;
+    Memory::String abiSymbol;
+    int abiResultCountIndex = -1;
+    Memory::String abiRelease;
+};
+
+/**
+ * @brief 为模块内符号生成限定名称。
+ * @param module 当前模块的名称。
+ * @param name 名称文本。
+ * @retval 生成或读取的结果文本。
+ */
+Memory::String ModuleSymbol(const Memory::String &module, const Memory::String &name)
+{
+    return module.empty() ? name : module + "::" + name;
+}
+
+/**
+ * @brief 为调用目标生成内部符号名称。
+ * @param callee 被调用函数的名称或表达式。
+ * @retval 生成或读取的结果文本。
+ */
+Memory::String CallSymbol(const MNode &callee)
+{
+    if (callee.kind == MNode::Var) return ModuleSymbol(callee.module, callee.s);
+    if (callee.kind == MNode::EnumCtor && !callee.s.empty() && (callee.s == "program" || std::islower(static_cast<unsigned char>(callee.s[0]))))
+        return ModuleSymbol(callee.s, callee.s2);
+    return {};
+}
+
+/**
+ * @brief 裸核心库调用是否未被当前作用域变量或用户函数遮蔽。
+ */
+bool CanUseImplicitCore(const Memory::String &module, const Memory::String &name);
+
+/**
+ * @brief 将标准库调用名转换为规范名称。
+ * @param callee 被调用函数的名称或表达式。
+ * @retval 生成或读取的结果文本。
+ */
+Memory::String StandardCallName(const MNode &callee)
+{
+    if (callee.kind == MNode::Var && CanUseImplicitCore(callee.module, callee.s))
+        return callee.s;
+    /* `__` 前缀是**编译器内部名字**（`__fileTryOpen`、`__processRun`、`__stringBytes` …）：
+     * 标准库模块（`lepus/source/std/*.lep`）里也要能直接调，所以不按模块过滤，
+     * 这样"文件/进程包装搬进 std::io / std::process"之后它们仍然认得出来。
+     * 用户侧不可能声明 `__` 开头的公开 API，所以放宽这一步不会让用户拿到不该有的名字。 */
+    if (callee.kind == MNode::Var && callee.s.compare(0u, 2u, "__") == 0)
+        return callee.s;
+    if (callee.kind == MNode::EnumCtor)
+    {
+        const bool bigNumber = callee.s2 == "BigInteger" || callee.s2 == "BigDecimal";
+        if (callee.s == (bigNumber ? "std::big_number" : "std::core")) return callee.s2;
+    }
+    return {};
+}
+
+bool CanUseImportedAlgorithm(const MNode &callee);
+
+/**
+ * @brief `std::algorithms::name<T>` 经泛型预处理后会成为 `name__T`；这里还原公开名。
+ * @param callee 被调用函数的名称或表达式。
+ * @retval 生成或读取的结果文本。
+ */
+Memory::String AlgorithmCallName(const MNode &callee)
+{
+    const bool qualified = callee.kind == MNode::EnumCtor && callee.s == "std::algorithms";
+    if (!qualified && !CanUseImportedAlgorithm(callee)) return {};
+    Memory::String name = qualified ? callee.s2 : callee.s;
+    const std::size_t specialization = name.find("__");
+    if (specialization != Memory::String::npos) name.resize(specialization);
+    static const Memory::Set<Memory::String> names{
+        "findValue", "sortValue", "binarySearchValue", "minValue", "maxValue", "clampValue",
+        "allValue", "anyValue", "foldValue",
+        "mapValue", "filterValue", "reduceValue", "sumValue", "countValue"
+    };
+    return names.count(name) != 0u ? name : Memory::String();
+}
+
+/**
+ * 变量：前端类型 + 降级后的名字（+ 是不是 `const` 不可变变量）。
+ */
+struct MVar
+{
+    std::shared_ptr<MType> type;   /* 前端类型（含数组维数 / 引用） */
+    Memory::String emitted;        /* 降级后的名字（局部变量重名时改名） */
+    bool isConst = false;          /* `const T x` 声明的：不能再赋值 */
+    bool elementReference = false; /* foreach 隐藏引用，源码变量自动解引用。 */
+    Memory::String elementList{};  /* 原生列表元素以容器和索引作为可写引用。 */
+    Memory::String elementIndex{};
+    int constantExpression = -1;        ///< 可按需求值的 const 初始化式；普通变量不登记。
+    std::size_t borrowDepth = 0;        ///< 借用来源的最短作用域；0 为全局，1 为调用方，2 起为函数局部。
+    bool allocatedReference = false;    ///< 显式 new 的引用存储可接管调用方借用，仍禁止保存函数局部来源。
+    Memory::String borrowOwner{};       ///< 直接引用别名对应的局部拥有值，用于回传字段及容器写入的来源。
+    std::uint32_t bindingIdentity = 0;  ///< 原声明的稳定绑定身份，避免宏导出名字捕获既有实参。
+};
+
+bool g_macroSyntaxFiltering = false;
+std::unique_ptr<lepus_macro::HygieneResolver> g_macroResolver;
+std::unique_ptr<lepus_macro::Registry> g_macroRegistry;
+int g_macroDiagnosticFrame = -1;
+std::size_t g_macroSemanticDepth = 0;
+Memory::Set<const MNode *> g_macroActiveNodes;
+Memory::Set<const MType *> g_macroActiveTypes;
+
+Memory::Map<Memory::String, Memory::Set<Memory::String>> g_moduleImports;  ///< 模块可省略限定的直接导入。
+Memory::Map<Memory::String, MStructDef> g_structs;                         /* struct 名 → 定义 */
+
+/**
+ * @brief 类型名的"裸名"：去掉模块前缀（`custom::Box__int` → `Box__int`）。
+ */
+inline Memory::String BareTypeName(const Memory::String &name)
+{
+    const std::size_t scope = name.rfind("::");
+    return scope == Memory::String::npos ? name : name.substr(scope + 2u);
+}
+/* 编译器匿名元组：内部 struct 名 → 按位置排列的元素类型。 */
+Memory::Map<Memory::String, Memory::Vector<std::shared_ptr<MType>>> g_tupleElements;
+Memory::Map<Memory::String, MStaticField> g_staticFields;                    /* `Type::field` → 全局槽 */
+Memory::Map<Memory::String, MEnumDef> g_enums;                               /* enum 名 → 变体定义 */
+Memory::Map<Memory::String, MFuncSig> g_funcs;                               /* 四元式标签 → 签名（重载后一个标签一份） */
+Memory::Map<Memory::String, Memory::Vector<Memory::String>> g_functionIndex; /* 源函数名 → 重载标签 */
+Memory::Map<Memory::String, MFuncSig> g_inferenceFunctions;                  /* auto 返回类型推导期间可见的函数 */
+Memory::Vector<MFunctionDecl> g_functionDecls;                               /* 普通函数声明（降级按顺序取） */
+Memory::Map<Memory::String, Memory::Vector<MParam>> g_lambdaCaptures;        ///< 词法作用域确定的只读、可写、拷贝或移动捕获。
+Memory::Set<Memory::String> g_lambdaAutoReturns;                             ///< 等捕获类型确定后推导返回值。
+Memory::Set<Memory::String> g_lambdaPrepared;                                ///< 已绑定环境的具体 lambda。
+Memory::Map<Memory::String, std::shared_ptr<MType>> g_hostTypes;             /* 宿主类型名 → 运行时 ABI 类型 */
+/**
+ * @brief 不透明胶水类型的创建、销毁和复制协议。
+ */
+struct MOpcodeDefinition
+{
+    Memory::String create;
+    Memory::String destroy;
+    Memory::String copy;
+    bool nonCopyable = false;
+    bool aggregate = false;
+    bool internal = false;
+    Memory::String module;
+    Memory::String handleType;
+};
+Memory::Map<Memory::String, MOpcodeDefinition> g_opcodeTypes;
+Memory::Map<Memory::String, std::shared_ptr<MType>> g_opcodeValueTypes;
+
+struct MHostInterfaceImpl
+{
+    std::shared_ptr<MType> owner;
+    Memory::String interfaceName;
+    Memory::String function;
+    /* 多方法接口：方法 m 查 `function.m`；单方法（含协议接口）沿用 `function`。 */
+    bool methodQualified = false;
+};
+Memory::Vector<MHostInterfaceImpl> g_hostInterfaceImpls;
+const runtime::NativeRegistry *g_nativeRegistry = nullptr;
+/* 这次编译完成后会**立刻在本进程执行**（`--emit` / `--svmb` 只产出文件时为 false）。
+ * 立刻跑就必须现在绑好宿主符号；导出的程序等到目标进程自己 setNativeRegistry 再绑。 */
+bool g_executeNow = false;
+Memory::Vector<Memory::String> g_programArguments;
+bool g_threadsEnabled = false;
+/**
+ * `--debug`：执行时打印源码位置轨迹、出错时给位置与调用栈（都在 stderr 上）。
+ */
+bool g_debugEnabled = false;
+/**
+ * `--step-limit N`：本次执行的指令条数上限；0 表示不设上限（缺省）。
+ */
+std::size_t g_stepLimit = 0u;
+/* 运算符重载表（`g_operators`）在 MOperatorDecl 之后定义。 */
+Memory::Map<Memory::String, std::shared_ptr<ast::Type>> g_structType; /* struct 名 → ast 类型 */
+/**
+ * @brief 字面量构造函数的容器类型与扁平实参数量。
+ */
+struct MCollectionConstructor
+{
+    std::shared_ptr<MType> type;
+    std::size_t count;
+};
+Memory::Map<Memory::String, MCollectionConstructor> g_collectionConstructors;
+ast::Program *g_loweringProgram = nullptr;                 /* 降级期懒登记新推导出的元组形状 */
+Memory::Vector<Memory::Map<Memory::String, MVar>> g_scope; /* 0 号是全局作用域 */
+Memory::Vector<ast::NodePtr> g_globalInit;                 /* 全局初始化：塞到 main 最前面 */
+Memory::Set<Memory::String> g_usedNames;                   /* 已经占用的降级名（局部变量去重） */
+Memory::Map<int, Memory::String> g_globalNames;            /* 全局声明节点 → 降级名 */
+Memory::String g_owner;                                    /* 正在降级的方法属于哪个 struct */
+Memory::String g_currentModule;                            /* 正在检查/降级的函数所属模块 */
+
+/**
+ * @brief 合成一个 `std::core::List<element>` 类型。
+ *
+ * 给 `map` / `filter` 这类"结果表"用：`TypeKey` 对参数化集合 opcode 会写成
+ * `vec<T>`，所以合成的类型照样能发类型号、能 `LowerType` 成 i64 句柄。
+ *
+ * @param element 元素类型。
+ * @return 列表类型。
+ */
+std::shared_ptr<MType> MakeListType(const std::shared_ptr<MType> &element)
+{
+    auto list = Memory::makeShared<MType>();
+    list->kind = MType::Opcode;
+    list->name = "vec";
+    list->elem = element;
+    return list;
+}
+
+/**
+ * @brief 按名字找结构体：**裸名按当前模块补全**，再退裸名兜底。
+ *
+ * 类型名的规范形式是 `module::name`（模块里的类型就这么登记），所以查找顺序是：
+ *   1. 写出来的名字（`custom::Box__int` 直接命中）；
+ *   2. 裸名 → 补上当前模块（模块内写 `Box__int` 时命中）；
+ *   3. 去掉模块前缀的裸名（注入标准库正文里的类型是裸名登记的，`FileStream` 之类）。
+ *
+ * @param name 类型名。
+ * @param key  非空时回填**实际命中的注册键**。调用方要用它拼 `g_funcs` 的键
+ *             （`键.方法名`）——写出名可能与注册键不同（`custom::Box__int` ↔ `Box__int`），
+ *             用写出名拼会查不到签名，表现为"候选非空但参数类型对不上"。
+ * @return 定义；找不到返回 nullptr。
+ */
+inline const MStructDef *FindStruct(const Memory::String &name, Memory::String *key = nullptr)
+{
+    if (name.empty()) return nullptr;
+    auto found = g_structs.find(name);
+    if (found != g_structs.end())
+    {
+        if (key != nullptr) *key = found->first;
+        return &found->second;
+    }
+    const Memory::String bare = BareTypeName(name);
+    if (bare == name && !g_currentModule.empty())
+    {
+        found = g_structs.find(g_currentModule + "::" + name);
+        if (found != g_structs.end())
+        {
+            if (key != nullptr) *key = found->first;
+            return &found->second;
+        }
+    }
+    if (bare != name)
+    {
+        found = g_structs.find(bare);
+        if (found != g_structs.end())
+        {
+            if (key != nullptr) *key = found->first;
+            return &found->second;
+        }
+    }
+    return nullptr;
+}
+
+/**
+ * @brief 按名字找静态字段：探测顺序与 FindStruct 一致（写出名 → 补当前模块 → 去前缀裸名）。
+ *
+ * `g_staticFields` 的键是 `类型注册名::字段名`，而类型一律按**裸名**登记
+ * （实测：`Point::origin`、`Box__int.of`）。所以 `custom::Point::origin` 这样的
+ * 限定写法必须先去前缀再查，否则会落空。
+ *
+ * @param owner 静态字段所属的类型名（可能是限定写法）。
+ * @param name  字段名。
+ * @return 定义；找不到返回 nullptr。
+ */
+inline const MStaticField *FindStaticField(const Memory::String &owner, const Memory::String &name)
+{
+    if (owner.empty() || name.empty()) return nullptr;
+    auto found = g_staticFields.find(owner + "::" + name);
+    if (found != g_staticFields.end()) return &found->second;
+    const Memory::String bare = BareTypeName(owner);
+    if (bare == owner && !g_currentModule.empty())
+    {
+        found = g_staticFields.find(g_currentModule + "::" + owner + "::" + name);
+        if (found != g_staticFields.end()) return &found->second;
+    }
+    if (bare != owner)
+    {
+        found = g_staticFields.find(bare + "::" + name);
+        if (found != g_staticFields.end()) return &found->second;
+    }
+    return nullptr;
+}
+int g_localSerial = 0;
+
+/**
+ * `obj.get()` 的目标类型：**由上下文给**（`int x = b.get();` / `(int)b.get()`）。
+ *
+ * 盒子里装着什么是运行期才知道的，而"取出来当什么用"必须静态写上，所以 `get` 的类型
+ * 从"接它的那个位置"取（和 `new` 从声明取元素类型是一个道理）。表达式里看到
+ * `b.get()` 但上下文没给类型时，报一句人话让人补上。
+ */
+std::shared_ptr<MType> g_expectedObjGet;
+
+/**
+ * @brief 按节点编号取得语法节点池中的节点。
+ * @param id 待查找或操作的对象编号。
+ * @retval 节点、类型或失败占位表达式。
+ */
+const MNode &N(int id) { return g_nodes[static_cast<std::size_t>(id)]; }
+/**
+ * @brief 按类型编号取得类型池中的类型描述。
+ * @param id 待查找或操作的对象编号。
+ * @retval 对应的类型描述对象。
+ */
+std::shared_ptr<MType> T(int id) { return M_TypeAt(id); }
+/**
+ * @brief 构造表示语义处理失败的空表达式。
+ * @retval 生成的低层语法节点。
+ */
+ast::NodePtr Bad() { return ast::Node::i(0); }
+
+/**
+ * @brief 判断类型描述是否为元组类型。
+ * @param type 类型描述。
+ * @retval 类型描述为元组类型时为 true，否则为 false。
+ */
+bool IsTupleType(const std::shared_ptr<MType> &type)
+{
+    return type && type->kind == MType::Struct && type->name.rfind("__lepus_tuple_", 0u) == 0u;
+}
+
+/**
+ * @brief 递归登记元组及其嵌套元素的内部定义，供后续字段布局检查使用。
+ * @param type 类型描述。
+ */
+void EnsureTupleDefinition(const std::shared_ptr<MType> &type)
+{
+    if (!type) return;
+    if (!IsTupleType(type))
+    {
+        EnsureTupleDefinition(type->elem);
+        EnsureTupleDefinition(type->elem2);
+        for (const auto &element : type->paramTypes) EnsureTupleDefinition(element);
+        return;
+    }
+    auto known = g_tupleElements.find(type->name);
+    if (known == g_tupleElements.end())
+        known = g_tupleElements.emplace(type->name, type->paramTypes).first;
+    if (g_structs.count(type->name) != 0u) return;
+    const auto elements = known->second;
+    MStructDef definition;
+    for (std::size_t index = 0; index < elements.size(); ++index)
+        definition.fields.push_back(MField{ "__" + Memory::toString(index), elements[index] });
+    g_structs[type->name] = std::move(definition);
+    for (const auto &element : elements) EnsureTupleDefinition(element);
+}
+
+bool EnsureTupleLayout(const std::shared_ptr<MType> &type);
+
+/**
+ * @brief 需要可取引用存储的变量名，每次编译重新收集。
+ */
+Memory::Set<Memory::String> g_addressTakenNames;
+/** @brief 当前函数可精确收集的取址名字；空指针使用原全程序保守集合。 */
+Memory::Set<Memory::String> *g_functionAddressTakenNames = nullptr;
+
+/**
+ * @brief 所有者变量到引用存储槽的映射，清理时读取槽内当前值。
+ */
+Memory::Map<Memory::String, Memory::String> g_referenceStorage;
+/**
+ * @brief 待登记到函数体生命周期中的按值形参副本。
+ */
+Memory::Vector<std::pair<Memory::String, std::shared_ptr<MType>>> g_parameterReferenceOwners;
+/**
+ * @brief 每次调用独立分配的形参存储单元，退出时释放。
+ */
+Memory::Vector<Memory::String> g_pendingParameterStorage;
+/**
+ * @brief 独立聚合存储的名称，包含按值形参、闭包实体化副本与局部值；返回时只移交内容。
+ */
+Memory::Set<Memory::String> g_parameterValueStorage;
+
+/**
+ * @brief 判断值是否需要隐藏单元素槽来支持变量引用。
+ * @param type 被取引用的变量类型。
+ * @return 标量、字符串、大数、容器和函数值返回 true；聚合借用其自身存储。
+ */
+bool NeedsReferenceStorage(const std::shared_ptr<MType> &type)
+{
+    return type && (type->kind == MType::Int || type->kind == MType::Double || type->kind == MType::Bool || type->kind == MType::Char || IsStandardOpcode(type, "String") || type->kind == MType::Opcode || IsStandardOpcode(type, "BigInteger") || IsStandardOpcode(type, "BigDecimal") || IsContainer(type) || type->kind == MType::Func || type->kind == MType::Obj || IsStandardOpcode(type, "File") || IsStandardOpcode(type, "Process") || IsRuntimeArray(type));
+}
+
+/**
+ * @brief 判断当前函数中的值是否需要可取址存储，只精化无拥有协议的基础标量。
+ * @param name 当前声明或形参的源码名称。
+ * @param type 当前实例化后的实际类型。
+ * @return 当前函数确有取址用途或仍需保守处理时返回真。
+ */
+bool NeedsFunctionReferenceStorage(const Memory::String &name, const std::shared_ptr<MType> &type)
+{
+    if (g_functionAddressTakenNames && type
+        && (type->kind == MType::Int || type->kind == MType::Double
+            || type->kind == MType::Bool || type->kind == MType::Char))
+        return g_functionAddressTakenNames->count(name) != 0;
+    return g_addressTakenNames.count(name) != 0 && NeedsReferenceStorage(type);
+}
+
+/** @brief 当前函数中的显式 unsafe 块及其各自的宏展开来源。 */
+Memory::Vector<std::uint32_t> g_unsafeContexts;
+std::size_t g_unsafeFunctionBase = 0;
+std::uint32_t MacroControlContext(const MNode &node);
+/**
+ * @brief 查询表达式的语法来源是否处于显式 unsafe 块中。
+ * @param node 请求授权的表达式，保留宏定义或调用方来源。
+ * @return 当前函数内可到达该语法来源的 unsafe 块时返回真。
+ */
+bool UnsafeAllowed(const MNode &node)
+{
+    if (g_unsafeContexts.size() == g_unsafeFunctionBase) return false;
+    const auto begin = g_unsafeContexts.begin() + g_unsafeFunctionBase;
+    const auto end = g_unsafeContexts.end();
+    auto context = MacroControlContext(node);
+    if (std::find(begin, end, context) != end) return true;
+    int frameId = node.macroExpansion;
+    for (unsigned depth = 0; frameId >= 0 && context && depth < 256; ++depth)
+    {
+        const auto &frame = N(frameId);
+        if (frame.kind != MNode::MacroExpansionFrame) break;
+        if (frame.bindingContext == context)
+        {
+            context = MacroControlContext(frame);
+            if (std::find(begin, end, context) != end) return true;
+        }
+        frameId = frame.kids.empty() ? -1 : frame.kids.front();
+    }
+    return false;
+}
+/**
+ * @brief 保存并恢复不安全权限，函数边界独立重置，禁止闭包继承创建处权限。
+ */
+struct UnsafeScopeGuard {
+    std::size_t saved, functionBase;
+    /**
+     * @brief 进入普通块、显式不安全块或全新的函数边界。
+     * @param block 当前块，只有显式 unsafe 块授予权限。
+     * @param reset 是否先清除外层函数权限。
+     */
+    UnsafeScopeGuard(const MNode *block, bool reset = false) : saved(g_unsafeContexts.size()), functionBase(g_unsafeFunctionBase) {
+        if (reset) g_unsafeFunctionBase = saved;
+        if (block && block->unsafeScope) g_unsafeContexts.push_back(MacroControlContext(*block));
+    }
+    /** @brief 恢复进入作用域之前的权限。 */
+    ~UnsafeScopeGuard() { g_unsafeContexts.resize(saved); g_unsafeFunctionBase = functionBase; }
+};

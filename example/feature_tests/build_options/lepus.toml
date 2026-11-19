@@ -1,0 +1,9 @@
+[package]
+name = "build_options"
+version = "1.0.0"
+
+[lepus]
+main = "main.lep"
+
+[build]
+build_option = ["A"]

@@ -1,0 +1,4 @@
+void main() {
+    RawStorage<int64> storage;
+    storage.handle = 1u;
+}

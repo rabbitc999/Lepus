@@ -1,0 +1,70 @@
+/* std_math_clock_random.lep —— 第二档：Math 补齐、Clock、Random 扩展。
+ *
+ * 三条路线各不相同，改这块前先分清：
+ *   * Math 的 float64 取整 / 判定走**宿主胶水**（glue/std_math.hpp 绑 <cmath>）；
+ *   * Math 的 int64 版是**Lepus 重载转发到宿主胶水**（写在同一模块里，实参完全匹配优先于 int64→float64 放宽）；
+ *   * Clock 是宿主胶水（chrono 的 steady_clock）；
+ *   * Random 的 nextRange / nextBool 是 宿主胶水的薄封装。
+ *
+ * `choice` / `shuffle` 不在 `Random::` 下：Lepus 没有泛型方法，而 `std::random::Random` 这个
+ * 名字已经被同名的 struct 占着（再开同名模块会让 `Random::withSeed` 找不到）。
+ * 它们放在 `algorithms`，导入后写 `choiceValue(表, 种子)`。
+ */
+
+import std::random;
+
+import std::math;
+import std::algorithms;
+
+import std::clock;
+
+void main() {
+    /* --- Math：float64 取整 / 取余 / 特殊值判定（宿主 <cmath>） --- */
+    println("{} {} {} {}", floor(2.7), ceil(2.1),
+    round(2.5), trunc(-2.7));
+    println("{} {}", fmod(7.5, 2.0), fmod(-7.5, 2.0));
+
+    /* Lepus 里浮点除零是运行期错误，所以 NaN / Inf 从宿主函数拿：
+     * sqrt(-1) = NaN、ln(0) = -Inf。 */
+    float64 notNumber = sqrt(-1.0);
+    float64 infinite = ln(0.0);
+    println("{} {} {} {}", isNaN(notNumber), isNaN(1.0),
+    isInf(infinite), isInf(1.0));
+
+    /* --- Math：int64 版（Lepus 重载转发到宿主胶水）+ float64 版 abs 仍然可用 --- */
+    println("{} {} {} {}", abs(-5), min(3, 8),
+    max(3, 8), clamp(12, 0, 10));
+    println("{}", abs(-2.5));
+
+    /* --- Clock：单调时钟。读数本身不可复现，只断言"拿到了、且不倒退"。 --- */
+    int64 before = nowNanos();
+    int64 millis = nowMs();
+    int64 after = nowNanos();
+    println("{} {} {}", before > 0, millis > 0, after >= before);
+
+    /* --- Random：分布 --- */
+    Random rng = Random::withSeed((uint64)12345);
+    float64 ranged = rng.nextRange(10.0, 20.0);
+    int64 drawn = rng.nextInt(0, 10);
+    bool coin = rng.nextBool();
+    /* 固定种子 -> 固定序列（和 std_parse_random_path_memory 一个口径：钉住随机输出）。 */
+    println("{} {} {}", ranged, drawn, coin);
+    println("{} {}", ranged >= 10.0, ranged < 20.0);
+
+    /* --- 取一个 / 洗一副（种子自己给，结果可复现） --- */
+    List<int64> items;
+    items.push(1);
+    items.push(2);
+    items.push(3);
+    /* 种子 0：`0 % 3 == 0`，无论随机数怎么算都取到第 0 个。 */
+    println("{}", choiceValue(items, (uint64)0));
+
+    List<int64> mixed = shuffleValue(items, (uint64)4242);
+    println("{} {} {}", mixed.len(),
+    mixed[0] + mixed[1] + mixed[2],   /* 洗牌不改总和 */
+    items[0]);                        /* 原表不动 */
+
+    List<int64> again = shuffleValue(items, (uint64)4242);
+    println("{} {} {}", again[0] == mixed[0], again[1] == mixed[1],
+    again[2] == mixed[2]);
+}

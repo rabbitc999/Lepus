@@ -1,0 +1,5 @@
+void main() {
+    std::core::assert(shared::packageValue() + extra::extraValue() + tools::math::one() == 42);
+    std::core::println("lepus-ok");
+
+}

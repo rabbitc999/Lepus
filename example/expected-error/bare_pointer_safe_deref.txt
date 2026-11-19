@@ -1,0 +1,1 @@
+lepus: example/samples-error/bare_pointer_safe_deref.lep 第 3 行第 20 列：裸指针解引用需要显式 unsafe 块

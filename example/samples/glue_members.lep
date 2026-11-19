@@ -1,0 +1,13 @@
+/* glue_members.lep —— 普通语言声明中的成员宿主符号。
+ * abi_demo_declarations 提供 GlueDemoRect 及方法声明，abi_demo_records 登记 C 入口。
+ * area() 与 area(factor) 分别关联 glue_demo_rect_area 和 glue_demo_rect_area_scaled；
+ * perimeter() 使用 glue_demo_rect_perimeter。每个入口通过 C 帧读取参数和逻辑字段。
+ */
+void main()
+{
+    GlueDemoRect rect;
+    rect.width = 3;
+    rect.height = 5;
+    println("rect area={} scaled={} perimeter={}", rect.area(), rect.area(2),
+    rect.perimeter());
+}

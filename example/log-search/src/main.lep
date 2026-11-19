@@ -1,0 +1,12 @@
+module logSearchApp;
+
+import log_search;
+
+void main(List<String> arguments)
+{
+    let result = run(arguments);
+    if (result.isErr())
+    {
+        panic("log-search: " + result.error().toString());
+    }
+}

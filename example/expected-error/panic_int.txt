@@ -1,0 +1,1 @@
+lepus: example/samples-error/panic_int.lep 第 2 行第 5 列：panic 的参数必须是 std::core::String，现在给的是 int64

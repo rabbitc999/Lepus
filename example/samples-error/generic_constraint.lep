@@ -1,0 +1,15 @@
+interface Valued {
+    int64 value();
+};
+
+struct Plain {
+    int64 n;
+};
+
+struct MyBox<T: Valued> {
+    T value;
+};
+
+void main() {
+    MyBox<Plain> bad;
+}

@@ -1,0 +1,84 @@
+import std::io;
+
+struct Pair {
+    int64 first;
+    int64 second;
+}
+
+$macro accumulate(mut &out, ...values) -> stmt {
+$let i = 0;
+$for (value in values) {
+    $if (value == 0) {
+        $continue;
+    }
+    $set i = i + 1;
+    $while (i < 3) {
+        $set i = i + 1;
+        $if (i == 2) {
+            $continue;
+        }
+        out += i;
+    }
+    $loop {
+        out += value;
+        $break;
+        $compile_error("loop tail must be skipped");
+    }
+    $if (value == 4) {
+        $break;
+    }
+}
+$for (field in $fields<Pair>()) {
+    $if (field.name == "first") {
+        $continue;
+    }
+    out += 10;
+    $break;
+    $compile_error("metadata loop tail must be skipped");
+}
+out += i;
+}
+
+$macro zipped(...left: expr)[...right: expr] -> expr {
+int64 total = 0;
+$let offset = 1;
+$for ((a, b) in (left, right)) {
+    $regex (a is "0") {
+        $continue;
+    }
+    $let offset = b;
+    $set offset = offset + 1;
+    total += a + offset;
+    $break;
+}
+total + offset
+}
+
+$macro generatedFunction(name: ident) -> item {
+$loop {
+    int64 name() { return 7; }
+    $break;
+}
+}
+
+$macro generatedMethod(name: ident) -> member {
+$let ready = true;
+$while (ready) {
+    int64 name() { return 11; }
+    $set ready = false;
+}
+}
+
+$generatedFunction(seven);
+
+struct Generated {
+    $generatedMethod(result);
+}
+
+void main() {
+    int64 total = 0;
+    $accumulate(total, 0, 2, 4, 100);
+    assert($zipped(0, 4, 99)[90, 3, 99] == 9);
+    Generated generated;
+    println("{} {} {}", total, seven(), generated.result());
+}

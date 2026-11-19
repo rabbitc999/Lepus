@@ -1,0 +1,499 @@
+{
+  "name": "lepus-editor",
+  "displayName": "Lepus",
+  "description": "Lepus 语言支持：用编译器自带的 lepus lsp 提供诊断、悬停、补全、跳转定义、文档大纲、格式化、代码块与宏块折叠。支持在线模块依赖下载、共享缓存与离线校验。支持原生可执行文件发布构建。",
+  "version": "1.0.0",
+  "publisher": "rabbitc999",
+  "devDependencies": {
+    "vscode-oniguruma": "^2.0.1",
+    "vscode-textmate": "^9.3.2"
+  },
+  "author": {
+    "name": "小兔糖糖_OvO",
+    "email": "rabbitc999@outlook.com"
+  },
+  "license": "Apache-2.0",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Linters",
+    "Formatters"
+  ],
+  "keywords": [
+    "lepus",
+    "chl",
+    "parseengine"
+  ],
+  "main": "./extension.js",
+  "scripts": {
+    "test:extension": "node tools/test-extension-host.js",
+    "embed": "node tools/embed-compiler.js",
+    "check": "node tools/check-manifest.js",
+    "test": "node test/debugTerminal.js && node test/smoke.js && node test/dependencies.js && node test/macros.js && node test/lspCancellation.js && node test/semanticProviders.js && node test/editorIntegration.js && node test/macroHighlighting.js && node test/llvmConfiguration.js && node test/build.js",
+    "vscode:prepublish": "node tools/embed-compiler.js",
+    "package": "node tools/package.js"
+  },
+  "icon": "icon.png",
+  "activationEvents": [
+    "onLanguage:lepus",
+    "onDebugResolve:lepus",
+    "onCommand:lepus.installDependencies",
+    "onCommand:lepus.checkDependencies",
+    "onCommand:lepus.openLibraries",
+    "onCommand:lepus.previewMacroExpansion",
+    "onCommand:lepus.previewMacroExpansionOnce",
+    "onCommand:lepus.previewMacroExpansionAtCursor",
+    "onCommand:lepus.build",
+    "onCommand:lepus.buildExe",
+    "onCommand:lepus.configureTarget",
+    "onCommand:lepus.configureOutput",
+    "onCommand:lepus.openProjectConfig",
+    "onCommand:lepus.checkDebugEnvironment"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "lepus",
+        "aliases": [
+          "Lepus",
+          "lepus"
+        ],
+        "extensions": [
+          ".lep"
+        ],
+        "configuration": "./lepus-language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "lepus",
+        "scopeName": "source.lepus",
+        "path": "./syntaxes/lepus.tmLanguage.json"
+      }
+    ],
+    "debuggers": [
+      {
+        "type": "lepus",
+        "label": "Lepus",
+        "languages": [
+          "lepus"
+        ],
+        "configurationAttributes": {
+          "launch": {
+            "required": [],
+            "properties": {
+              "program": {
+                "type": "string",
+                "description": "要调试的 .lep 文件；与 executable 二选一。",
+                "default": "${file}"
+              },
+              "args": {
+                "type": "array",
+                "description": "传给被调试程序的命令行参数。",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              },
+              "debuggerPath": {
+                "type": "string",
+                "description": "GDB 原生调试器路径，缺省从 LEPUS_GDB 或 PATH 查找。"
+              },
+              "stopOnEntry": {
+                "type": "boolean",
+                "description": "进入 Lepus main 时停止。",
+                "default": false
+              },
+              "cwd": {
+                "type": "string",
+                "description": "工作目录；默认工程根或入口文件目录。"
+              },
+              "entry": {
+                "type": "string",
+                "enum": [
+                  "file",
+                  "project"
+                ],
+                "description": "选择当前文件或 lepus.toml 的 main。"
+              },
+              "executable": {
+                "type": "string",
+                "description": "直接启动已有带符号原生产物，不触发构建。"
+              },
+              "env": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "description": "覆盖环境变量，null 删除继承项。"
+              },
+              "console": {
+                "type": "string",
+                "enum": [
+                  "internalConsole",
+                  "integratedTerminal"
+                ],
+                "default": "internalConsole",
+                "description": "集成终端支持标准输入，要求当前 Lepus --debug 产物。"
+              },
+              "sourceFileMap": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "description": "目标源码绝对路径前缀到本地目录的映射；按最长目录边界匹配，支持断点反向映射。"
+              },
+              "debugMode": {
+                "enum": [
+                  "development",
+                  "optimized"
+                ],
+                "description": "源码构建模式：development 使用 O0，optimized 保留 DWARF 并使用 O3／LTO；已有产物以实际调试目录为准。",
+                "type": "string",
+                "default": "development"
+              }
+            }
+          },
+          "attach": {
+            "required": [
+              "processId",
+              "executable"
+            ],
+            "properties": {
+              "executable": {
+                "type": "string",
+                "description": "已有带符号原生产物；本机附加或核对 Linux 远程目标，不触发构建。"
+              },
+              "debuggerPath": {
+                "type": "string",
+                "description": "GDB 原生调试器路径，缺省从 LEPUS_GDB 或 PATH 查找。"
+              },
+              "cwd": {
+                "type": "string",
+                "description": "工作目录；默认工程根或入口文件目录。"
+              },
+              "env": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "description": "覆盖调试器环境；不改变已运行目标的环境。"
+              },
+              "sourceFileMap": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "description": "目标源码绝对路径前缀到本地目录的映射；按最长目录边界匹配，支持断点反向映射。"
+              },
+              "processId": {
+                "type": [
+                  "number",
+                  "string"
+                ],
+                "minimum": 1,
+                "pattern": "^[1-9][0-9]*$",
+                "description": "本机目标 PID，或 Linux gdbserver 实际控制的目标 PID；核对映像身份后才开放查看。"
+              },
+              "stopOnAttach": {
+                "type": "boolean",
+                "default": true,
+                "description": "附加并完成断点配置后保持全停；false 继续到后续停点。"
+              },
+              "remote": {
+                "description": "连接已有 Linux gdbserver；省略时附加本机进程。",
+                "required": [
+                  "host",
+                  "port"
+                ],
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "host": {
+                    "type": "string",
+                    "description": "已启动的 Linux gdbserver 的 TCP 主机地址。"
+                  },
+                  "port": {
+                    "maximum": 65535,
+                    "description": "gdbserver 的 TCP 监听端口。",
+                    "type": "integer",
+                    "minimum": 1
+                  }
+                }
+              }
+            }
+          }
+        },
+        "initialConfigurations": [
+          {
+            "type": "lepus",
+            "request": "launch",
+            "name": "Lepus：调试当前文件",
+            "program": "${file}",
+            "cwd": "${fileDirname}"
+          },
+          {
+            "type": "lepus",
+            "request": "launch",
+            "name": "Lepus：调试项目入口",
+            "entry": "project",
+            "console": "integratedTerminal"
+          },
+          {
+            "type": "lepus",
+            "request": "attach",
+            "name": "Lepus：附加到本机进程",
+            "processId": 12345,
+            "executable": "${workspaceFolder}/build/program",
+            "windows": {
+              "executable": "${workspaceFolder}/build/program.exe"
+            }
+          }
+        ],
+        "configurationSnippets": [
+          {
+            "label": "Lepus：调试当前文件",
+            "description": "使用带源码行和变量信息的构建产物进行 GDB 构建调试。",
+            "body": {
+              "type": "lepus",
+              "request": "launch",
+              "name": "Lepus：调试当前文件",
+              "program": "^\"\\${file}\"",
+              "cwd": "^\"\\${fileDirname}\""
+            }
+          },
+          {
+            "label": "Lepus：附加到本机进程",
+            "description": "核对现有进程及符号产物，默认断开后保留目标。",
+            "body": {
+              "type": "lepus",
+              "request": "attach",
+              "name": "Lepus：附加到本机进程",
+              "processId": 12345,
+              "executable": "${workspaceFolder}/build/program",
+              "windows": {
+                "executable": "${workspaceFolder}/build/program.exe"
+              }
+            }
+          }
+        ]
+      }
+    ],
+    "configurationDefaults": {
+      "[lepus]": {
+        "editor.tabSize": 4,
+        "editor.insertSpaces": true,
+        "editor.detectIndentation": false,
+        "editor.suggest.showWords": false,
+        "editor.semanticHighlighting.enabled": true
+      }
+    },
+    "commands": [
+      {
+        "command": "lepus.restartServer",
+        "title": "%lepus.restartServer.title%"
+      },
+      {
+        "command": "lepus.showServerLog",
+        "title": "%lepus.showServerLog.title%"
+      },
+      {
+        "command": "lepus.openDoc",
+        "title": "%lepus.openDoc.title%"
+      },
+      {
+        "command": "lepus.run",
+        "title": "%lepus.run.title%",
+        "icon": "$(play)"
+      },
+      {
+        "command": "lepus.installDependencies",
+        "title": "%lepus.installDependencies.title%"
+      },
+      {
+        "command": "lepus.checkDependencies",
+        "title": "%lepus.checkDependencies.title%"
+      },
+      {
+        "command": "lepus.openLibraries",
+        "title": "%lepus.openLibraries.title%"
+      },
+      {
+        "command": "lepus.previewTypeAlias",
+        "title": "%lepus.previewTypeAlias.title%"
+      },
+      {
+        "command": "lepus.previewMacroExpansion",
+        "title": "%lepus.previewMacroExpansion.title%"
+      },
+      {
+        "command": "lepus.previewMacroExpansionOnce",
+        "title": "%lepus.previewMacroExpansionOnce.title%"
+      },
+      {
+        "command": "lepus.previewMacroExpansionAtCursor",
+        "title": "%lepus.previewMacroExpansionAtCursor.title%"
+      },
+      {
+        "command": "lepus.build",
+        "title": "%lepus.build.title%",
+        "icon": "$(tools)"
+      },
+      {
+        "command": "lepus.buildExe",
+        "title": "%lepus.buildExe.title%"
+      },
+      {
+        "command": "lepus.configureTarget",
+        "title": "%lepus.configureTarget.title%"
+      },
+      {
+        "command": "lepus.configureOutput",
+        "title": "%lepus.configureOutput.title%"
+      },
+      {
+        "command": "lepus.openProjectConfig",
+        "title": "%lepus.openProjectConfig.title%"
+      },
+      {
+        "command": "lepus.checkDebugEnvironment",
+        "title": "%lepus.checkDebugEnvironment.title%"
+      }
+    ],
+    "configuration": {
+      "title": "Lepus",
+      "properties": {
+        "lepus.path": {
+          "type": "string",
+          "default": "",
+          "description": "%lepus.path.description%"
+        },
+        "lepus.traceServer": {
+          "type": "string",
+          "default": "off",
+          "enum": [
+            "off",
+            "messages"
+          ],
+          "description": "%lepus.traceServer.description%"
+        },
+        "lepus.inlayHints.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "%lepus.inlayHints.enabled.description%"
+        },
+        "lepus.build.outputDirectory": {
+          "type": "string",
+          "default": "",
+          "description": "%lepus.build.outputDirectory.description%"
+        },
+        "lepus.build.llvmPath": {
+          "type": "string",
+          "default": "",
+          "description": "%lepus.build.llvmPath.description%",
+          "minLength": 1,
+          "pattern": "\\S"
+        },
+        "lepus.build.checked": {
+          "type": "boolean",
+          "default": false,
+          "description": "%lepus.build.checked.description%"
+        },
+        "lepus.debuggerPath": {
+          "type": "string",
+          "default": "",
+          "description": "GDB 路径；留空时使用 LEPUS_GDB 或 PATH。"
+        }
+      }
+    },
+    "menus": {
+      "editor/title/run": [
+        {
+          "command": "lepus.run",
+          "when": "resourceLangId == lepus",
+          "group": "navigation@1"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "lepus.run",
+          "when": "resourceLangId == lepus",
+          "group": "navigation@1"
+        },
+        {
+          "command": "lepus.installDependencies",
+          "when": "resourceFilename == lepus.toml",
+          "group": "lepusDependencies"
+        },
+        {
+          "command": "lepus.checkDependencies",
+          "when": "resourceFilename == lepus.toml",
+          "group": "lepusDependencies"
+        },
+        {
+          "command": "lepus.openLibraries",
+          "when": "resourceFilename == lepus.toml",
+          "group": "lepusDependencies"
+        },
+        {
+          "command": "lepus.previewTypeAlias",
+          "when": "editorLangId == lepus && resourceScheme == file",
+          "group": "lepus@3"
+        },
+        {
+          "command": "lepus.previewMacroExpansion",
+          "when": "editorLangId == lepus && resourceScheme == file",
+          "group": "lepus@2"
+        },
+        {
+          "command": "lepus.buildExe",
+          "when": "resourceExtname == .lep && resourceScheme == file",
+          "group": "lepusBuild@1"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "lepus.installDependencies",
+          "when": "resourceFilename == lepus.toml",
+          "group": "lepusDependencies"
+        },
+        {
+          "command": "lepus.checkDependencies",
+          "when": "resourceFilename == lepus.toml",
+          "group": "lepusDependencies"
+        },
+        {
+          "command": "lepus.openLibraries",
+          "when": "resourceFilename == lepus.toml",
+          "group": "lepusDependencies"
+        },
+        {
+          "command": "lepus.buildExe",
+          "when": "resourceExtname == .lep && resourceScheme == file",
+          "group": "lepusBuild@1"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "lepus.build",
+          "when": "resourceLangId == lepus && resourceScheme == file",
+          "group": "navigation@2"
+        }
+      ]
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/rabbitc999/Lepus.git"
+  },
+  "lepusCompilerVersion": "1.0.0",
+  "lepusLLVMVariant": "external"
+}

@@ -1,0 +1,1 @@
+lepus: MyBox 的类型实参 program::Plain 未实现接口 Valued

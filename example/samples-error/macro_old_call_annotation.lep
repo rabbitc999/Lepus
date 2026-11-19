@@ -1,0 +1,2 @@
+$replace ADD(a, b) a + b
+void main() { let value = $!ADD(1, 2); }

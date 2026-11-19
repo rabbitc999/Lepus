@@ -1,0 +1,4 @@
+void main() {
+    int64** readonly;
+    unsafe { int64 mut** writable = cast<int64 mut**>(readonly); }
+}

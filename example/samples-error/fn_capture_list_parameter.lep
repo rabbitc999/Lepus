@@ -1,0 +1,6 @@
+void main()
+{
+    int64 value = 1;
+    let callback = fn [mut value](int64 value) { value };
+    assert(callback(2) == 2);
+}

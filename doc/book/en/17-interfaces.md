@@ -1,0 +1,310 @@
+# Chapter 17 Interfaces and concrete-type matching
+
+<!-- LANGUAGE NAVIGATION -->
+**English** · [简体中文](../17-接口与运行期多态.md)
+<!-- END LANGUAGE NAVIGATION -->
+
+Different layouts can offer the same operations. Interfaces collect the behavior a caller needs, allowing one processing function to work across implementations. Shapes and errors provide concrete examples.
+
+First dispatch through Shape references, then identify concrete Error types when handling genuinely differs. Direct dispatch shares behavior; concrete-type matching supports implementation-specific handling.
+
+## 17.1 Implement a common contract
+
+<!-- verify-book -->
+```lepus
+interface Shape
+{
+    int64 area();
+    String describe();
+};
+
+struct Circle: Shape
+{
+    int64 r;
+
+    int64 area()
+    {
+        return 3 * self.r * self.r;
+    }
+    String describe()
+    {
+        return "圆";
+    }
+};
+
+void main()
+{
+    Circle c;
+    c.r = 2;
+    println("{}，面积 {}", c.describe(), c.area());
+}
+```
+
+```text
+圆，面积 12
+```
+
+Shape declares area and describe. Circle supplies both methods and a radius field. The formula uses 3 as an educational approximation, not an accurate value of pi. main sets the radius to two and obtains the description and area 12 before the next section introduces an interface-typed value.
+
+## 17.2 Organize calls around behavior
+
+A report that reads r or side directly must know every shape layout and change when a shape is added. Shape instead requires area and description behavior, leaving fields to each implementation.
+
+Report accepts an interface reference and invokes those common methods. Circle and Square differ internally but share the calling contract. Borrowing existing objects exposes dispatch while retaining the concrete model's value, resource and lifetime rules.
+
+<!-- verify-book -->
+```lepus
+interface Shape
+{
+    int64 area();
+    String describe();
+};
+
+struct Circle: Shape
+{
+    int64 r;
+    int64 area()
+    {
+        return 3 * r * r;
+    }
+    String describe()
+    {
+        return "圆";
+    }
+};
+
+struct Square: Shape
+{
+    int64 side;
+    int64 area()
+    {
+        return side * side;
+    }
+    String describe()
+    {
+        return "正方形";
+    }
+};
+
+String report(Shape const& shape)
+{
+    return shape.describe() + "：" + format("{}", shape.area());
+}
+
+void main()
+{
+    Circle c;
+    c.r = 2;
+    Square s;
+    s.side = 3;
+    Shape const& shape1 = &c;
+    Shape const& shape2 = &s;
+    println("{}", report(shape1));
+    println("{}", report(shape2));
+}
+```
+
+```text
+圆：12
+正方形：9
+```
+
+Shape declares area and describe without prescribing fields such as r or side. Circle and Square implement these behaviors. Report needs only Shape const&, with no branch on the concrete shape and no ownership transfer of the original object.
+
+Main borrows two live objects through interface references. The circle uses integer three as an illustrative coefficient, giving twelve for radius two; the square gives nine for side three. Report dispatches to each implementation and joins its description with the formatted area. This demonstrates interface dispatch rather than precise geometry, and the references cannot outlive c or s.
+
+
+## 17.3 Recognize a concrete error
+
+IoError implements Error. Match can recognize that concrete value and bind it to e. A wildcard handles other implementations, and _(other) names the fallback value. An open interface generally needs a fallback because listed implementations do not exhaust future ones.
+
+<!-- verify-book -->
+```lepus
+import std::io;
+void describe(Error error)
+{
+    match (error)
+    {
+        IoError(e) => { println("io: {}", e.toString()); }
+        _ => { println("other: {}", error.toString()); }
+    }
+}
+void main()
+{
+    describe(Closed);
+    describe(MessageError::from("invalid score"));
+}
+```
+
+```text
+io: 文件已关闭
+other: invalid score
+```
+
+Describe accepts Error statically, but the enclosed concrete implementation can vary. IoError::Closed matches the std::io::IoError type pattern and binds e, producing the io-prefixed message.
+
+MessageError does not match that type, so the wildcard fallback uses the Error interface's toString to print invalid score. Keeping a fallback allows other implementations. When every branch would merely call the same interface method, concrete-type matching is usually unnecessary; the differing prefixes here deliberately expose the two paths.
+
+
+## 17.4 Generic interfaces and inheritance
+
+Interfaces can take type parameters and inherit other interfaces. Type arguments identify data used by their behavior, while inheritance combines required capabilities. It does not inherit class field layout or let casts invent missing implementations. The next chapter develops generic constraints.
+
+Compile-time tools can enumerate a type's implemented interfaces while retaining generic arguments, direct or inherited relationships and associated-type bindings. Chapter 22 uses that information to generate code and navigate back to declarations. First become comfortable with interface calls and concrete-type matching.
+
+## 17.5 Matching versus calling
+
+Call the interface directly when every implementation supplies the required behavior. Refine types when recovery, payload access or handling actually differs. Avoid duplicating identical toString calls for every known implementation. Chapter 14 handles interface payloads inside Result and propagation.
+
+### Call a method through an interface
+
+Assign a concrete value to an interface variable and call its published method.
+
+<!-- verify-book -->
+```lepus
+interface Score {
+    int64 points();
+}
+struct Quiz : Score {
+    int64 points() {
+        return 42;
+    }
+}
+void main() {
+    Quiz quiz;
+    Score view = quiz;
+    println("{}", view.points());
+}
+```
+
+```text
+42
+```
+
+### Summary
+
+Interfaces promise callable behavior rather than a particular field layout. Borrowed implementations still need live sources, and value payloads retain concrete copy and resource semantics. Refine types only when recovery or extra data requires it.
+
+Chapter 18 applies behavior requirements to generic constraints and links implementations to results through associated types. Chapter 14 places interface errors inside Result states.
+
+## 17.6 Refining Errors Inside Enum Payloads
+
+<!-- verify-book -->
+```lepus
+import std::io;
+Result<String, Error> readDemo()
+{
+    return ReadFailed("demo");
+}
+void main()
+{
+    let result = readDemo();
+    match (result)
+    {
+        Ok(text) => { println("{}", text); }
+        Fail::IoError(e) => { println("qualified: {}", e.toString()); }
+        Fail(_) => { println("other error"); }
+    }
+    match (result)
+    {
+        Ok(_) => { println("ok"); }
+        IoError(e) => { println("short: {}", e.toString()); }
+        Fail(_) => { println("other error"); }
+    }
+}
+```
+
+```text
+qualified: 读取失败：demo
+short: 读取失败：demo
+```
+
+<!-- verify-book -->
+```lepus
+import std::io;
+enum Response
+{
+    Pending,
+    Failed(int64 code, Error error)
+};
+void main()
+{
+    let response = Failed(503, Closed);
+    match (response)
+    {
+        Pending => { println("pending"); }
+        Failed(code, IoError e) => { println("{}: {}", code, e.toString()); }
+        Failed(code, _ other) => { println("{}: {}", code, other.toString()); }
+    }
+    Result<Error, Error> result = Ok(Closed);
+    match (result)
+    {
+        Ok(IoError e) => { println("ok: {}", e.toString()); }
+        Ok(_) => { println("other success"); }
+        Fail(IoError e) => { println("err: {}", e.toString()); }
+        Fail(_) => { println("other failure"); }
+    }
+}
+```
+
+```text
+503: 文件已关闭
+ok: 文件已关闭
+```
+
+<!-- verify-book -->
+```lepus
+import std::io;
+Result<String, IoError> leaf()
+{
+    return Closed;
+}
+Result<String, Error> readName()
+{
+    String name = leaf()?;
+    return Ok(name);
+}
+Option<IoError> optionalError()
+{
+    return Value(Closed);
+}
+Option<Error> widenedError()
+{
+    let error = optionalError()?;
+    return Value(error);
+}
+void main()
+{
+    match (readName())
+    {
+        Ok(name) => { println("{}", name); }
+        Fail(IoError e) => { println("result: {}", e.toString()); }
+        Fail(_) => { println("other error"); }
+    }
+    match (widenedError())
+    {
+        Value(IoError e) => { println("option: {}", e.toString()); }
+        Value(_) => { println("other value"); }
+        None => { println("absent"); }
+    }
+}
+```
+
+```text
+result: 文件已关闭
+option: 文件已关闭
+```
+
+The first example matches an IoError held through Error, using both explicit variant/type sugar and an unambiguous shorthand, with Fail(_) as fallback.
+
+The second retains the outer variant for multiple payloads, with code and typed error positions. Result<Error,Error> can hold an error object in Ok; payload type alone does not determine success.
+
+The third widens concrete errors through propagation. Option propagation tests Value versus None, independently of whether the stored object implements Error. Read the outer tag before the concrete payload type.
+
+### Interface requirements have compile-time descriptions
+
+Method names, parameters, results, receivers and default bodies can also be queried during compilation. Chapter 22 uses $methods and $interfaces to read these descriptions. Querying an interface describes its requirements; querying an implementation can additionally expose concrete associated-type bindings. A query neither executes a method nor constructs an interface object.
+
+Derived ordinary methods must satisfy the same requirements. Debug requires debug to return String; a method with the same name and a different result cannot substitute for it. Runtime interface dispatch follows the rules in this chapter, while field traversal and method generation happen during compilation.
+
+Next: [Chapter 18](18-generics.md).

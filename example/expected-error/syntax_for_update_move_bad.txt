@@ -1,0 +1,1 @@
+lepus: example/samples-error/syntax_for_update_move_bad.lep 第 8 行：[LEP1205] 借用来源已移动或销毁，不能继续访问（源对象已经销毁）：表达式

@@ -1,0 +1,39 @@
+import std::concurrency;
+
+
+import std::message;
+import std::thread;
+
+struct Parcel { int64 id; String name; List<int64> readings; };
+
+int64 isolatedCounter;
+
+void typedWorker() {
+    Shared<int64> sharedCounter = receiveThread<Shared<int64>>();
+    Parcel received = receiveThread<Parcel>();
+    int64 old = sharedCounter.swap(20);
+    isolatedCounter = 99;
+    sendThread<Parcel>(parent(), received);
+    sendThread<int64>(parent(), old);
+}
+
+void main() {
+    Shared<int64> sharedCounter = Shared<int64>::create(10);
+    isolatedCounter = 3;
+    Parcel original;
+    original.id = 7;
+    original.name = "before";
+    List<int64> readings;
+    readings.push(4);
+    original.readings = readings;
+    Thread task = create(typedWorker);
+    sendThread<Shared<int64>>(task, sharedCounter);
+    sendThread<Parcel>(task, original);
+    original.id = 8;
+    original.readings.push(6);
+    Parcel reply = receiveThread<Parcel>();
+    int64 previous = receiveThread<int64>();
+    wait(task);
+    println("{} {} {} {} {} {}", reply.id, reply.name, reply.readings.len(),
+    previous, sharedCounter.get(), isolatedCounter);
+}

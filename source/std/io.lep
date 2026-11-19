@@ -1,0 +1,388 @@
+module std::io;
+
+/* 从 core.lep 原样迁出：符号名不变，只换了模块归属（现在必须 `import std::io;` 才能用）。 */
+enum IoError : Error {
+    OpenFailed(String message), ReadFailed(String message),
+    WriteFailed(String message), SeekFailed(String message), Closed;
+
+    /** 返回具体错误原因，并保留载荷中的位置或宿主诊断。 */
+    String toString() {
+        match (self) {
+            IoError::OpenFailed(message) => { return "打开文件失败：" + message; }
+            IoError::ReadFailed(message) => { return "读取失败：" + message; }
+            IoError::WriteFailed(message) => { return "写入失败：" + message; }
+            IoError::SeekFailed(message) => { return "定位失败：" + message; }
+            IoError::Closed => { return "文件已关闭"; }
+        }
+    }
+};
+
+enum SeekOrigin { Begin, Current, End };
+
+interface Reader { Result<String, Error> read(); };
+interface Writer {
+    Result<int64, Error> write(String text);
+    Result<int64, Error> flush();
+};
+interface Seek { Result<int64, Error> seek(int64 offset, SeekOrigin origin); };
+interface ToString { String toString(); };
+interface Formattable { String toString(String style); };
+
+String __fileTryRead(File const& handle);
+String __fileTryReadLine(File const& handle);
+List<uint8> __fileTryReadBytes(File const& handle, int64 count);
+int64 __fileTryWriteBytes(File const& handle, List<uint8> bytes);
+unsafe int64 __fileTryReadInto(File const& handle, int64 bufferAddress, int64 count);
+unsafe int64 __fileTryWriteFrom(File const& handle, int64 bufferAddress, int64 count);
+int64 __fileTryWrite(File const& handle, String text);
+int64 __fileTryFlush(File const& handle);
+int64 __fileTrySeek(File const& handle, int64 offset, int64 origin);
+bool __fileSucceeded(File const& handle);
+String __fileLastError(File const& handle);
+int64 __fileTryClose(File const& handle);
+
+struct FileStream : Reader, Writer, Seek {
+    File handle;
+
+    static Result<FileStream, Error> open(String path, String mode) {
+        Result<File, Error> opened = fileOpen(path, mode);
+        Result<FileStream, Error> result;
+        if (opened.isErr()) {
+            return Result<FileStream, Error>::Fail(opened.error());
+        }
+        FileStream stream;
+        stream.handle = opened.take();
+        result = Result<FileStream, Error>::Ok(move stream);
+        return result;
+    }
+
+    Result<String, Error> read() {
+        String text = __fileTryRead(&self.handle);
+        if (__fileSucceeded(&self.handle)) {
+            return Result<String, Error>::Ok(text);
+        }
+        return Result<String, Error>::Fail(
+            IoError::ReadFailed(__fileLastError(&self.handle)));
+    }
+
+    /** @brief 读取一行文本，保留空格，去掉 LF/CRLF；EOF 返回 Ok(空串)。
+     * @return 行文本或 ReadFailed，不隐式关闭文件。 */
+    Result<String,Error> readLine() {
+        String text=__fileTryReadLine(&self.handle);
+        if(__fileSucceeded(&self.handle)) { return Result<String,Error>::Ok(text); }
+        return Result<String,Error>::Fail(IoError::ReadFailed(__fileLastError(&self.handle)));
+    }
+    /** @brief 从当前游标读取至多 count 个字节为文本；EOF 返回较短字符串。
+     * @param count 非负字节数；不按字符或词语切分。
+     * @return 文本或 ReadFailed；含零字节时返回错误，应改用 readBytes。 */
+    Result<String,Error> readString(int64 count) {
+        if (count<0) { return Result<String,Error>::Fail(IoError::ReadFailed("negative byte count")); }
+        List<uint8> bytes=self.readBytes(count)?;String text="";
+        for(uint8 byte in bytes) {
+            if(byte==(uint8)0) { return Result<String,Error>::Fail(IoError::ReadFailed("text contains a zero byte")); }
+            text=text+format("{}",(char)byte);
+        }
+        return Result<String,Error>::Ok(text);
+    }
+    /** @brief 从当前游标读到 EOF，保留文件换行字节；默认最多 16 MiB。
+     * @param maxBytes 非负字节预算；超过预算或含零字节返回错误。
+     * @return 剩余完整文本或 ReadFailed；预算失败时可能已消费一个额外字节。 */
+    Result<String,Error> readAllString(int64 maxBytes=16777216) {
+        if(maxBytes<0) { return Result<String,Error>::Fail(IoError::ReadFailed("negative byte limit")); }
+        String text="";int64 total=0;
+        loop {
+            int64 count=4096;
+            if(maxBytes-total<4096) { count=maxBytes-total+1; }
+            String part=self.readString(count)?;
+            if(len(part)==0) { break; }
+            if(len(part)>maxBytes-total) { return Result<String,Error>::Fail(IoError::ReadFailed("file exceeds byte limit")); }
+            text=text+part;total=total+len(part);
+        }
+        return Result<String,Error>::Ok(text);
+    }
+
+    Result<int64, Error> write(String text) {
+        int64 count = __fileTryWrite(&self.handle, text);
+        if (__fileSucceeded(&self.handle)) {
+            return Result<int64, Error>::Ok(count);
+        }
+        return Result<int64, Error>::Fail(
+            IoError::WriteFailed(__fileLastError(&self.handle)));
+    }
+
+    /**
+     * @brief 按 print 格式规则写入文本，不追加换行。
+     * @param text 已格式化的文本。
+     * @return 写入字节数或 WriteFailed，保留关闭和只读错误。
+     */
+    Result<int64, Error> print(String text) { return self.write(text); }
+    /**
+     * @brief 按 print 格式规则写入文本并追加 LF。
+     * @param text 已格式化的文本，省略时只写换行。
+     * @return 包括换行的写入字节数或 WriteFailed。
+     */
+    Result<int64, Error> println(String text = "") { return self.write(text + "\n"); }
+
+    /** 读取至多 count 个字节；EOF 返回较短列表。 */
+    Result<List<uint8>,Error> readBytes(int64 count) {
+        List<uint8> bytes=__fileTryReadBytes(&self.handle,count);
+        if (__fileSucceeded(&self.handle)) { return Result<List<uint8>,Error>::Ok(bytes); }
+        return Result<List<uint8>,Error>::Fail(IoError::ReadFailed(__fileLastError(&self.handle)));
+    }
+    /** 写入所有字节，保留零字节。 */
+    Result<int64,Error> writeBytes(List<uint8> bytes) {
+        int64 count=__fileTryWriteBytes(&self.handle,bytes);
+        if (__fileSucceeded(&self.handle)) { return Result<int64,Error>::Ok(count); }
+        return Result<int64,Error>::Fail(IoError::WriteFailed(__fileLastError(&self.handle)));
+    }
+
+    /** 将字节读入可复用缓冲区，未读取的尾部保留原内容。
+     * @param buffer 运行时字节数组的可变引用。
+     * @return 实际读取字节数，EOF 时可返回零。发生 I/O 错误时可能已读取部分数据。
+     */
+    Result<int64, Error> readInto(uint8[] mut& buffer) {
+        int64 capacity = len(buffer);
+        int64 start = 0;
+        if (capacity > 0) { start = (int64)address(&buffer[0]); }
+        int64 count;
+        unsafe { count = __fileTryReadInto(&self.handle, start, capacity); }
+        if (__fileSucceeded(&self.handle)) { return Result<int64, Error>::Ok(count); }
+        return Result<int64, Error>::Fail(IoError::ReadFailed(__fileLastError(&self.handle)));
+    }
+
+    /** 从可复用缓冲区写入指定长度的前缀。
+     * @param buffer 运行时字节数组的只读引用。
+     * @param count 要写入的字节数，必须在零至缓冲区长度之间。
+     * @return 成功时为写入字节数。发生 I/O 错误时可能已写入部分数据。
+     */
+    Result<int64, Error> writeFrom(uint8[] const& buffer, int64 count) {
+        if (count < 0 || count > len(buffer)) {
+            return Result<int64, Error>::Fail(IoError::WriteFailed("byte count exceeds buffer range"));
+        }
+        int64 start = 0;
+        if (count > 0) { start = (int64)address(&buffer[0]); }
+        int64 written;
+        unsafe { written = __fileTryWriteFrom(&self.handle, start, count); }
+        if (__fileSucceeded(&self.handle)) { return Result<int64, Error>::Ok(written); }
+        return Result<int64, Error>::Fail(IoError::WriteFailed(__fileLastError(&self.handle)));
+    }
+
+    Result<int64, Error> flush() {
+        int64 code = __fileTryFlush(&self.handle);
+        if (__fileSucceeded(&self.handle)) {
+            return Result<int64, Error>::Ok(code);
+        }
+        return Result<int64, Error>::Fail(
+            IoError::WriteFailed(__fileLastError(&self.handle)));
+    }
+
+    Result<int64, Error> seek(int64 offset, SeekOrigin origin) {
+        int64 originCode = 0;
+        match (origin) {
+            SeekOrigin::Begin => { originCode = 0; }
+            SeekOrigin::Current => { originCode = 1; }
+            SeekOrigin::End => { originCode = 2; }
+        }
+        int64 position = __fileTrySeek(&self.handle, offset, originCode);
+        if (__fileSucceeded(&self.handle)) {
+            return Result<int64, Error>::Ok(position);
+        }
+        return Result<int64, Error>::Fail(
+            IoError::SeekFailed(__fileLastError(&self.handle)));
+    }
+
+    int64 close() { return __fileTryClose(&self.handle); }
+};
+
+/* 文件包装函数由 std::io 模块公开，使用前导入 std::io。
+ * 底层 __file* 入口由原生运行时提供。 */
+Result<File, Error> fileOpen(String path, String mode) {
+    file opened = __fileTryOpen(path, mode);
+    if (__fileValid(opened)) {
+        return Result<File, Error>::Ok(move opened);
+    }
+    return Result<File, Error>::Fail(IoError::OpenFailed("fileOpen failed"));
+}
+
+String fileRead(file const& handle) { return __fileRead(handle); }
+/** @brief 读取文件句柄的一行文本，不含 LF/CRLF；保留既有 fileRead 语义。
+ * @param handle 已打开的文件。 @return 行文本，EOF 为空串，读取错误触发 panic。 */
+String fileReadLine(File const& handle) {
+    String text = __fileTryReadLine(handle);
+    if (!__fileSucceeded(handle)) { panic(__fileLastError(handle)); }
+    return text;
+}
+/** 从文件借用中读取至多 count 个字节的文本。 */
+String fileReadString(File const& handle, int64 count) {
+    if (count < 0) { panic("negative byte count"); }
+    List<uint8> bytes = __fileTryReadBytes(handle, count);
+    if (!__fileSucceeded(handle)) { panic(__fileLastError(handle)); }
+    String text = "";
+    for (uint8 byte in bytes) {
+        if (byte == (uint8)0) { panic("text contains a zero byte"); }
+        text = text + format("{}", (char)byte);
+    }
+    return text;
+}
+/** 从文件借用中读取剩余文本，并检查字节预算。 */
+String fileReadAllString(File const& handle, int64 maxBytes = 16777216) {
+    if (maxBytes < 0) { panic("negative byte limit"); }
+    String text = "";
+    loop {
+        int64 remaining = maxBytes - len(text);
+        int64 count = 4096;
+        if (remaining < 4096) { count = remaining + 1; }
+        String part = fileReadString(handle, count);
+        if (len(part) == 0) { break; }
+        if (len(part) > remaining) { panic("file exceeds byte limit"); }
+        text = text + part;
+    }
+    return text;
+}
+int64 fileWrite(file const& handle, String text) { return __fileWrite(handle, text); }
+/**
+ * @brief 将格式化文本写入文件，不追加换行。
+ * @param handle 已打开的文件句柄。
+ * @param text 已格式化文本，调用时支持格式串与变长实参。
+ * @return 写入字节数，失败沿用 fileWrite 的诊断。
+ */
+int64 filePrint(file const& handle, String text) { return __fileWrite(handle, text); }
+/**
+ * @brief 将格式化文本和 LF 换行写入文件。
+ * @param handle 已打开的文件句柄。
+ * @param text 已格式化文本，省略时只写换行。
+ * @return 包括换行的写入字节数。
+ */
+int64 filePrintln(file const& handle, String text = "") {
+    return __fileWrite(handle, text + "\n");
+}
+int64 fileEof(file const& handle) { return __fileEof(handle); }
+int64 fileClose(file const& handle) { return __fileClose(handle); }
+
+/** 文件信息，时间为 Unix 秒；目录的 size 为零。 */
+struct FileInfo { int64 size; bool isFile; bool isDirectory; int64 modifiedUnixSeconds; };
+/** 宿主回调的拥有型结果；字段顺序是胶水 ABI 的一部分。 */
+struct IoReply {
+    String error; List<uint8> bytes; List<String> paths; int64 count;
+    int64 size; bool isFile; bool isDirectory; int64 modifiedUnixSeconds;
+};
+void __listDirectory(String path, IoReply mut& reply);
+void __fileInfo(String path, IoReply mut& reply);
+void __createDirectories(String path, IoReply mut& reply);
+void __renamePath(String from, String to, IoReply mut& reply);
+/** 读完整文件，保留零字节；默认最多 16 MiB，调用者可以指定预算。 */
+Result<List<uint8>,Error> readAllBytes(String path, int64 maxBytes=16777216) {
+    if (maxBytes < 0) { return Result<List<uint8>,Error>::Fail(IoError::ReadFailed("negative byte limit")); }
+    Result<FileStream,Error> opened = FileStream::open(path,"rb");
+    if (opened.isErr()) { return Result<List<uint8>,Error>::Fail(IoError::ReadFailed("cannot open file for reading")); }
+    FileStream stream = opened.take();
+    List<uint8> bytes;
+    loop {
+        int64 count = 4096;
+        int64 remaining = maxBytes - len(bytes);
+        if (remaining < count) { count = remaining + 1; }
+        Result<List<uint8>,Error> part = stream.readBytes(count);
+        if (part.isErr()) { return Result<List<uint8>,Error>::Fail(IoError::ReadFailed("file read failed")); }
+        List<uint8> block = part.take();
+        if (len(block) > remaining) { return Result<List<uint8>,Error>::Fail(IoError::ReadFailed("file exceeds byte limit")); }
+        for (uint8 byte in block) { bytes.push(byte); }
+        if (len(block) < count) { break; }
+    }
+    return Result<List<uint8>,Error>::Ok(bytes);
+}
+/** 覆盖写完整文件，返回字节数量；不隐式创建父目录。 */
+Result<int64,Error> writeAllBytes(String path, List<uint8> bytes) {
+    Result<FileStream,Error> opened = FileStream::open(path,"wb");
+    if (opened.isErr()) { return Result<int64,Error>::Fail(IoError::WriteFailed("cannot open file for writing")); }
+    FileStream stream = opened.take();
+    Result<int64,Error> written = stream.writeBytes(bytes);
+    if (written.isErr()) { return Result<int64,Error>::Fail(IoError::WriteFailed("file write or close failed")); }
+    int64 count = written.take();
+    Result<int64,Error> flushed = stream.flush();
+    if (flushed.isErr()) { return Result<int64,Error>::Fail(IoError::WriteFailed("file write or close failed")); }
+    int64 closed = stream.close();
+    if (closed != 0) { return Result<int64,Error>::Fail(IoError::WriteFailed("file write or close failed")); }
+    return Result<int64,Error>::Ok(count);
+}
+/** 读取完整文本；String 不支持内嵌零字节，此类文件应使用 readAllBytes。 */
+Result<String,Error> readAllText(String path, int64 maxBytes=16777216) {
+    List<uint8> bytes=readAllBytes(path,maxBytes)?; String text="";
+    for (uint8 byte in bytes) {
+        if (byte==(uint8)0) { return Result<String,Error>::Fail(IoError::ReadFailed("text contains a zero byte")); }
+        text=text+format("{}",(char)byte);
+    }
+    return Result<String,Error>::Ok(text);
+}
+/** 覆盖写完整文本，不自动追加换行。 */
+Result<int64,Error> writeAllText(String path, String text) {
+    List<uint8> bytes=stringBytes(text);
+    return writeAllBytes(path,bytes);
+}
+/** 列出一层目录的完整路径，按字节字典序排序，不递归。 */
+Result<List<String>,Error> listDirectory(String path) {
+    IoReply reply; __listDirectory(path,&reply);
+    if (len(reply.error)>0) { return Result<List<String>,Error>::Fail(IoError::ReadFailed(reply.error)); }
+    return Result<List<String>,Error>::Ok(reply.paths);
+}
+/** 查询跟随符号链接后的文件信息；不存在时返回错误。 */
+Result<FileInfo,Error> fileInfo(String path) {
+    IoReply reply; __fileInfo(path,&reply);
+    if (len(reply.error)>0) { return Result<FileInfo,Error>::Fail(IoError::ReadFailed(reply.error)); }
+    FileInfo info; info.size=reply.size; info.isFile=reply.isFile; info.isDirectory=reply.isDirectory;
+    info.modifiedUnixSeconds=reply.modifiedUnixSeconds;
+    return Result<FileInfo,Error>::Ok(info);
+}
+/** 创建目录及缺失的父目录，已存在的目录视为成功。 */
+Result<int64,Error> createDirectories(String path) {
+    IoReply reply; __createDirectories(path,&reply);
+    if (len(reply.error)>0) { return Result<int64,Error>::Fail(IoError::WriteFailed(reply.error)); }
+    return Result<int64,Error>::Ok(0);
+}
+/** 按宿主文件系统规则重命名；目标覆盖规则由平台决定。 */
+Result<int64,Error> renamePath(String from, String to) {
+    IoReply reply; __renamePath(from,to,&reply);
+    if (len(reply.error)>0) { return Result<int64,Error>::Fail(IoError::WriteFailed(reply.error)); }
+    return Result<int64,Error>::Ok(0);
+}
+
+
+/** 从当前读位置复制到目标流，复用一个缓冲区，成功返回总字节数。两端保持打开。 */
+Result<int64,Error> copyTo(FileStream mut& source, FileStream mut& destination) {
+    uint8 block[] = new[65536];
+    int64 total = 0;
+    while (true) {
+        int64 count = source.readInto(&block)?;
+        if (count == 0) { break; }
+        int64 written = destination.writeFrom(&block, count)?;
+        if (written != count || total > 9223372036854775807 - written) {
+            return Result<int64,Error>::Fail(IoError::WriteFailed("incomplete stream copy"));
+        }
+        total = total + written;
+    }
+    return Result<int64,Error>::Ok(total);
+}
+
+void __walkDirectory(String path, IoReply mut& reply);
+void __createTempFile(String path, IoReply mut& reply);
+void __replaceFile(String from, String to, IoReply mut& reply);
+
+/** 递归列出目录后代，按 UTF-8 路径排序，不递归进入符号链接。 */
+Result<List<String>,Error> walkDirectory(String path) {
+    IoReply reply; __walkDirectory(path,&reply);
+    if (len(reply.error)>0) { return Result<List<String>,Error>::Fail(IoError::ReadFailed(reply.error)); }
+    return Result<List<String>,Error>::Ok(reply.paths);
+}
+
+/** 在目录内独占创建空临时文件，成功后调用者拥有路径。 */
+Result<String,Error> createTempFile(String path) {
+    IoReply reply; __createTempFile(path,&reply);
+    if (len(reply.error)>0) { return Result<String,Error>::Fail(IoError::WriteFailed(reply.error)); }
+    return Result<String,Error>::Ok(reply.paths[0]);
+}
+
+/** 以同一文件系统内的普通文件原子替换目标，成功后来源路径消失。 */
+Result<int64,Error> replaceFile(String from, String to) {
+    IoReply reply; __replaceFile(from,to,&reply);
+    if (len(reply.error)>0) { return Result<int64,Error>::Fail(IoError::WriteFailed(reply.error)); }
+    return Result<int64,Error>::Ok(0);
+}

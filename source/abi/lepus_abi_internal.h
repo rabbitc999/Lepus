@@ -1,0 +1,68 @@
+/**
+ * @file lepus_abi_internal.h
+ * @brief 直通 ABI 各胶水模块的内部登记表接口。
+ *
+ * 每个 C 胶水模块单独一个编译单元，各自导出一张按名称升序排列的入口表；
+ * `lepus_abi.c` 负责把各模块的表聚合成一张全局表供解析使用。
+ *
+ * @note 本头文件只在 source/abi 内部使用，不对宿主暴露。
+ */
+#ifndef LEPUS_ABI_INTERNAL_H
+#define LEPUS_ABI_INTERNAL_H
+
+#include "lepus_abi.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/**
+ * @brief 聚合各模块入口表并排序；可重复调用，只准备一次。
+ */
+void lepus_abi_prepare(void);
+
+/**
+ * @brief 向调用方缓冲写入有界诊断，不分配内存。
+ * @param error 可选的诊断缓冲。
+ * @param status 稳定状态码。
+ * @param message 失败文本，成功时为空。
+ * @return 输入状态码。
+ */
+int lepus_abi_status(LepusAbiError *error, int status, const char *message);
+
+/**
+ * @brief 取得第 `index` 个实参的值类别。
+ * @param frame 当前调用帧。
+ * @param index 实参下标。
+ * @return `LepusAbiSlotFloat` 或 `LepusAbiSlotInteger`；越界时返回整数。
+ */
+int lepus_abi_argument_kind(const LepusAbiFrame *frame, int64_t index);
+
+/**
+ * @brief 把双精度值复制成 64 位槽的位模式。
+ * @param value 双精度值。
+ * @return 对应的位模式。
+ */
+int64_t lepus_abi_slot_from_real(double value);
+
+/**
+ * @brief 取（必要时登记）某个类型名对应的宿主记录描述符。
+ * @param typeName 静态类型名，不得为空。
+ * @param clone 自动复制回调；为空时记录不可自动复制。
+ * @param destroy 销毁回调，仅首次登记时使用。
+ * @return 地址稳定的描述符；参数无效时返回空指针。
+ */
+const void *lepus_abi_record_type(const char *typeName, void (*destroy)(void *), LepusAbiClone clone);
+
+/**
+ * @brief 连接同一运行时的私有集合内核，不公开 C++ 上下文或值类型。
+ * @param frame 当前已校验数量和槽类型的 C 帧。
+ * @param operation 唯一集合入口清单中的操作下标。
+ */
+void lepus_abi_collection_apply(LepusAbiFrame *frame,size_t operation);
+
+#ifdef __cplusplus
+}  // extern "C"
+#endif
+
+#endif  // LEPUS_ABI_INTERNAL_H

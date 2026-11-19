@@ -1,0 +1,586 @@
+/**
+ * @file object_store.cpp
+ * @brief 运行时对象句柄、代次与资源清理。
+ */
+#include "runtime_internal.hpp"
+
+namespace runtime
+{
+using namespace runtimeDetail;
+namespace runtimeDetail
+{
+/**
+ * @brief 判断包装是否只有非拥有指针和描述元数据，不含需要复制或销毁的状态。
+ * @param object 待检查的运行时对象。
+ * @return 可以共享不可变包装快照时返回 true。
+ */
+static bool shareablePointerSnapshot(const RuntimeObject &object)
+{
+    return object.kind == ObjectKind::Obj && !object.objOwnsObject
+           && !object.objValue.ownsObject && !object.objValue.isStruct
+           && !object.objValue.isText && !object.objValue.isFloat
+           && object.objValue.fields.empty() && !object.objTextShape.empty()
+           && object.objTextShape.front() == 'R' && object.objTextCallbacks.empty()
+           && !object.iteratorStateBox && !object.closureCopy && !object.closureEnvironment
+           && object.items.empty() && object.elementViews.empty() && object.captureDestructors.empty()
+           && !object.nativeRecord && !object.rawStorage;
+}
+
+/** @brief 读取指针包装共享开关，默认保留独立句柄并共享不可变载荷。 */
+ObjectStore::ObjectStore()
+{
+    const auto *disabled = std::getenv("LEPUS_NO_INTERFACE_COPY_COW");
+    pointerSnapshots = !(disabled && *disabled);
+    const auto *disabledSlots = std::getenv("LEPUS_NO_OBJECT_INLINE_SLOTS");
+    inlineHandles = !(disabledSlots && *disabledSlots);
+}
+
+/**
+ * @brief 修改非拥有指针包装前创建私有载荷，保持其他句柄的快照不变。
+ * @param handle 已通过类别与存活检查的对象句柄。
+ * @return 当前可修改对象；句柄不存在时返回空。
+ */
+RuntimeObject *ObjectStore::detachPointerSnapshot(std::int64_t handle)
+{
+    auto *storage = handleStorage(handle);
+    if (storage == nullptr) return nullptr;
+    if (!storage->unique() && shareablePointerSnapshot(**storage))
+        *storage = Memory::makeShared<RuntimeObject>(**storage);
+    return storage->get();
+}
+
+/**
+ * 对象句柄的起点（2^62）：编码堆地址与数据区地址均低于此边界。
+ */
+
+/**
+ * @brief 种类名（诊断文案里用）。
+ * @param kind 待处理对象的类别。
+ * @retval 对应对象的指针。
+ */
+[[nodiscard]] const char *objectKindName(ObjectKind kind)
+{
+    switch (kind)
+    {
+    case ObjectKind::NativeRecord: return "native record";
+    case ObjectKind::Closure: return "lambda";
+    case ObjectKind::Obj: return "obj";
+    case ObjectKind::RawStorage: return "raw storage";
+    }
+    return "?";
+}
+
+bool nativeRefreshViews(NativeContext &ctx, RuntimeObject &object);
+bool nativeWriteView(NativeContext &ctx, const RuntimeObject::ElementView &view, const ObjectValue &value);
+
+void nativeReleaseViewContents(NativeContext &ctx, const RuntimeObject::ElementView &view);  ///< 还活着的对象
+/**
+ * @brief 新分配或重新赋值的存储开始生命周期。
+ * @param address 地址。
+ * @param bytes 字节数。
+ * @param fresh 是否为新分配块，需清除所有重叠的旧标记。
+ */
+void ObjectStore::beginStorage(std::size_t address, std::size_t bytes, bool fresh)
+
+{
+    beginDebugStorage(address, bytes, fresh);
+    if ((!bytes && !fresh) || movedStorage.empty()) return;
+    // 含于新生命周期的标记从本地址开始；重叠查询只需额外考虑最大跨度以内的前驱。
+    const auto first = fresh && largestMovedStorage < address ? address - largestMovedStorage : fresh ? 0u : address;
+    auto it = movedStorage.lower_bound({ first, std::numeric_limits<std::int64_t>::min() });
+    bool changed = false;
+    for (; it != movedStorage.end();)
+    {
+        const auto start = it->first.first;
+        if (start >= address && start - address >= bytes) break;
+        const bool overlap = start >= address ? start - address < bytes : address - start < it->second;
+        const bool contained = start >= address && start - address < bytes && it->second <= bytes - (start - address);
+        if (fresh ? overlap : contained)
+        {
+            if (!changed) { invalidateDebugSnapshots(); changed = true; }
+            it = movedStorage.erase(it);
+        }
+        else
+            ++it;
+    }
+}
+
+/**
+ * @brief 释放对象存储中仍持有的全部资源。
+ */
+ObjectStore::~ObjectStore()
+
+{
+    invalidateNativeRecordViews();
+    shuttingDown = true;
+    // 固定槽只接收 Obj，宿主记录的 dispose 顺序继续使用原有按句柄排序的表。
+    for (const auto &entry : objects)
+        if (entry.second->kind == ObjectKind::NativeRecord) releaseContents(*entry.second);
+    objects.clear();
+    for (auto &slot : handleSlots) slot.object.reset();
+}
+
+/**
+ * @brief 撤销调试快照并递增宿主记录代次，耗尽后不重新启用旧视图。
+ * @return 无；语言借用及调试观察分别维护各自代次。
+ */
+void ObjectStore::invalidateNativeRecordViews()
+{
+    invalidateDebugSnapshots();
+    if (nativeRecordRevision) ++nativeRecordRevision;
+}
+
+/**
+ * @brief 撤销对象及存储状态的旧只读观察，不使语言借用失效。
+ * @return 无；溢出为零后不再恢复观察代次。
+ */
+void ObjectStore::invalidateDebugSnapshots()
+{
+    if (debugSnapshotRevision) ++debugSnapshotRevision;
+}
+
+/**
+ * @brief 登记有界的非聚合调试移动标记，失败不影响程序结果。
+ * @param address 逻辑存储地址。
+ * @param bytes 存储宽度。
+ * @param type 实际类型编号。
+ * @return 无；预算耗尽或分配失败后关闭观察。
+ */
+void ObjectStore::markDebugStorage(std::size_t address, std::size_t bytes, std::int64_t type) noexcept
+{
+    if (!address || !bytes || !debugSnapshotRevision) return;
+    invalidateDebugSnapshots();
+    if (!debugSnapshotRevision) return;
+    try
+    {
+        const auto key = std::make_pair(address, type);
+        if (debugMovedStorage.size() >= 65536 && !debugMovedStorage.count(key)) { debugSnapshotRevision = 0; return; }
+        debugMovedStorage[key] = bytes;
+        largestDebugMovedStorage = std::max(largestDebugMovedStorage, bytes);
+    } catch (...) { debugSnapshotRevision = 0; }
+}
+
+/**
+ * @brief 合法初始化只撤销调试标记，语言移动和借用状态保持独立。
+ * @param address 被初始化的逻辑地址。
+ * @param bytes 初始化宽度。
+ * @param fresh 是否为新分配存储。
+ * @return 无；观察失败后关闭快照。
+ */
+void ObjectStore::beginDebugStorage(std::size_t address, std::size_t bytes, bool fresh) noexcept
+{
+    if ((!bytes && !fresh) || debugMovedStorage.empty()) return;
+    bool changed = false;
+    try
+    {
+        const auto first = fresh && largestDebugMovedStorage < address ? address - largestDebugMovedStorage : fresh ? 0u : address;
+        auto it = debugMovedStorage.lower_bound({ first, std::numeric_limits<std::int64_t>::min() });
+        for (; it != debugMovedStorage.end();)
+        {
+            const auto start = it->first.first;
+            if (start >= address && start - address >= bytes) break;
+            const bool overlap = start >= address ? start - address < bytes : address - start < it->second;
+            const bool contained = start >= address && start - address < bytes && it->second <= bytes - (start - address);
+            if (fresh ? overlap : contained)
+            {
+                if (!changed) { invalidateDebugSnapshots(); changed = true; }
+                it = debugMovedStorage.erase(it);
+            }
+            else ++it;
+        }
+    } catch (...) { debugSnapshotRevision = 0; }
+}
+
+/**
+ * @brief 收下一个对象，返回它的句柄。
+ * @param object 待访问的对象。
+ * @retval 收下一个对象，返回它的句柄。
+ */
+std::int64_t ObjectStore::add(std::shared_ptr<RuntimeObject> object)
+
+{
+    const std::int64_t handle = next++;
+    if (object->identity == 0) object->identity = handle;
+    auto &slot = handleSlots[static_cast<std::uint64_t>(handle) % handleSlots.size()];
+    if (inlineHandles && object->kind == ObjectKind::Obj && !slot.object)
+    {
+        slot.handle = handle;
+        slot.object = std::move(object);
+        ++inlineHandleCount;
+    }
+    else
+        objects[handle] = std::move(object);
+    return handle;
+}
+
+/**
+ * @brief 由紧凑借用快照构造通用对象，保留逻辑身份和元数据。
+ * @param source 当前接口快照。
+ * @return 可在常规对象表中存储的独立记录。
+ */
+static std::shared_ptr<RuntimeObject> materializeInterface(const ObjectStore::InterfaceSlot &source)
+{
+    auto object = Memory::makeShared<RuntimeObject>();
+    object->kind = ObjectKind::Obj;
+    object->identity = source.identity;
+    object->objValue.integer = source.address;
+    object->objTag = source.tag;
+    object->objTypeName = source.metadata->typeName;
+    object->objTextShape = source.metadata->textShape;
+    return object;
+}
+
+/**
+ * @brief 发布只含借用地址与类型的接口快照。
+ * @param address 具体接收者的逻辑地址。
+ * @param tag 具体类型号。
+ * @param metadata 该接口的诊断与格式化元数据。
+ * @param compact 是否允许使用紧凑槽。
+ * @param identity 原快照身份，零时由新句柄提供。
+ * @return 建立成功后的完整句柄。
+ */
+std::int64_t ObjectStore::addInterfaceReference(std::int64_t address, std::int64_t tag, const InterfaceMetadata &metadata,
+                                                bool compact, std::int64_t identity)
+{
+    if (compact && inlineHandles && inlineInterfaceCount < interfaceSlots.size())
+    {
+        // 句柄仍单调递增。绕过被长期借用占住的位置，短期参数副本就能继续使用固定槽。
+        auto handle = next;
+        while (interfaceSlots[static_cast<std::uint64_t>(handle) % interfaceSlots.size()].metadata) ++handle;
+        auto &slot = interfaceSlots[static_cast<std::uint64_t>(handle) % interfaceSlots.size()];
+        slot = { handle, identity ? identity : handle, address, tag, &metadata };
+        ++inlineInterfaceCount;
+        next = handle + 1;
+        return handle;
+    }
+    return add(materializeInterface({ next, identity ? identity : next, address, tag, &metadata }));
+}
+
+/**
+ * @brief 校验紧凑接口槽身份并直接返回两个分派字段。
+ * @param handle 对象表中的完整句柄。
+ * @param tag 接收实际类型号。
+ * @param address 接收逻辑地址。
+ * @return 命中活跃槽时为真。
+ */
+bool ObjectStore::interfaceReceiver(std::int64_t handle, std::int64_t &tag, std::int64_t &address) const
+{
+    const auto &slot = interfaceSlots[static_cast<std::uint64_t>(handle) % interfaceSlots.size()];
+    if (slot.handle != handle || !slot.metadata) return false;
+    tag = slot.tag;
+    address = slot.address;
+    return true;
+}
+
+/**
+ * @brief 根据名称或键查找匹配项。
+ *
+ * 按句柄找对象；已经释放 / 不认识返回 nullptr。
+ * @param handle 待操作的运行时句柄。
+ * @retval 匹配项的指针，未找到时为空指针。
+ */
+RuntimeObject *ObjectStore::find(std::int64_t handle)
+
+{
+    const auto *storage = handleStorage(handle);
+    return storage == nullptr ? nullptr : storage->get();
+}
+
+/**
+ * @brief 比较固定槽中的完整身份，读取前物化紧凑接口。
+ * @param handle 待查找的完整对象句柄。
+ * @return 活跃共享指针槽，或不存在时的空指针。
+ */
+std::shared_ptr<RuntimeObject> *ObjectStore::handleStorage(std::int64_t handle)
+{
+    auto &slot = handleSlots[static_cast<std::uint64_t>(handle) % handleSlots.size()];
+    if (slot.object && slot.handle == handle) return &slot.object;
+    auto &reference = interfaceSlots[static_cast<std::uint64_t>(handle) % interfaceSlots.size()];
+    if (reference.handle == handle && reference.metadata)
+    {
+        auto object = materializeInterface(reference);
+        std::shared_ptr<RuntimeObject> *storage;
+        if (!slot.object)
+        {
+            slot.handle = handle;
+            slot.object = std::move(object);
+            ++inlineHandleCount;
+            storage = &slot.object;
+        }
+        else
+            storage = &objects.emplace(handle, std::move(object)).first->second;
+        reference = {};
+        --inlineInterfaceCount;
+        return storage;
+    }
+    const auto found = objects.find(handle);
+    return found == objects.end() ? nullptr : &found->second;
+}
+
+/**
+ * @brief 复制对象值并维护其引用或所有权。
+ * @param value 待转换、保存或参与计算的值。
+ * @param error 接收失败原因的错误信息。
+ * @retval 满足检查条件或操作完成时为 true，检查失败或无法完成时为 false。
+ */
+bool ObjectStore::copyValue(ObjectValue *value, Memory::String *error)
+
+{
+    if (value == nullptr) return true;
+    for (ObjectValue &field : value->fields)
+        if (!copyValue(&field, error)) return false;
+    if (!value->ownsObject) return true;
+    const std::int64_t nestedCopy = copyHandle(value->integer, error);
+    if (nestedCopy == 0) return false;
+    value->integer = nestedCopy;
+    return true;
+}
+
+/**
+ * @brief 释放对象值持有的资源。
+ * @param value 待转换、保存或参与计算的值。
+ */
+void ObjectStore::releaseValue(const ObjectValue &value)
+
+{
+    for (const ObjectValue &field : value.fields) releaseValue(field);
+    if (value.ownsObject) release(value.integer);
+}
+
+/**
+ * @brief 释放通用对象拥有的槽值与宿主记录资源。
+ * @param object 待访问的对象。
+ */
+void ObjectStore::releaseContents(const RuntimeObject &object)
+
+{
+    invalidateNativeRecordViews();
+    if (object.interfaceDrop)
+    {
+        NativeCallContextImpl context(recordContext, recordContext.invoker);
+        NativeValue result;
+        context.invoke(object.interfaceDrop, { NativeValue::fromInt(object.objValue.integer) }, result);
+    }
+    if (object.kind == ObjectKind::NativeRecord && object.nativeType && object.nativeType->dispose)
+    {
+        NativeCallContextImpl host(recordContext);
+        object.nativeType->dispose(host, object.nativeRecord.get());
+    }
+    if (object.iteratorStateBox || object.closureCopy)
+    {
+        auto context = object.iteratorContext;
+        for (const auto &entry : object.elementViews)
+        {
+            const auto destructor = object.captureDestructors.find(entry.first);
+            if (destructor != object.captureDestructors.end() && context.invoker)
+            {
+                NativeValue result;
+                (*context.invoker)(destructor->second, { NativeValue::fromInt(entry.second.address) }, result);
+            }
+            nativeReleaseViewContents(context, entry.second);
+            context.heap->release(entry.second.address);
+        }
+    }
+    for (const ObjectValue &value : object.items) releaseValue(value);
+    if (object.kind == ObjectKind::Obj && object.objOwnsObject)
+    {
+        release(object.objValue.integer);
+    }
+}
+
+/**
+ * @brief 复制运行时对象并调用宿主记录的复制协议。
+ * @param object 待访问的对象。
+ * @param error 接收失败原因的错误信息。
+ * @retval 对应对象的指针。
+ */
+std::shared_ptr<RuntimeObject> ObjectStore::copyObject(const RuntimeObject &object, Memory::String *error)
+
+{
+    if (object.kind == ObjectKind::NativeRecord)
+    {
+        const auto *type = object.nativeType;
+        const auto original = object.nativeRecord;
+        const auto identity = object.identity;
+        if (!type || (!type->clone && !type->copy && !type->cloneC))
+        {
+            if (error) *error = Memory::String(type && type->name ? type->name : "宿主记录") + " 不能复制";
+            return nullptr;
+        }
+        Memory::String reason;
+        recordContext.error.clear();
+        recordContext.memoryFault.clear();
+        NativeCallContextImpl host(recordContext);
+        if (type->prepare && !type->prepare(host, original.get()))
+        {
+            if (error) *error = recordContext.memoryFault.empty() ? recordContext.error : recordContext.memoryFault;
+            return nullptr;
+        }
+        void *record = type->copy ? type->copy(host, original.get()) :
+            (type->clone ? type->clone(original.get(), reason) : type->cloneC(original.get()));
+        if (reason.empty()) reason = recordContext.memoryFault.empty() ? recordContext.error : recordContext.memoryFault;
+        if (!record || record == original.get())
+        {
+            if (error) *error = reason.empty() ? "宿主复制回调没有返回独立记录" : reason;
+            return nullptr;
+        }
+        std::shared_ptr<void> owned(record, type->destroy);
+        auto copy = Memory::makeShared<RuntimeObject>();
+        copy->kind = ObjectKind::NativeRecord;
+        copy->nativeType = type;
+        copy->nativeRecord = std::move(owned);
+        copy->identity = identity;
+        return copy;
+    }
+    if (object.kind == ObjectKind::RawStorage)
+    {
+        if (error != nullptr)
+        {
+            *error = Memory::String(objectKindName(object.kind)) + " 句柄不能复制；请把它当作资源句柄传递并显式 close/delete";
+        }
+        return nullptr;
+    }
+    auto copy = Memory::makeShared<RuntimeObject>(object);
+    if (object.interfaceCopy)
+    {
+        NativeCallContextImpl context(recordContext, recordContext.invoker);
+        NativeValue result;
+        if (!context.invoke(object.interfaceCopy, { NativeValue::fromInt(object.objValue.integer) }, result))
+        {
+            if (error) *error = recordContext.error;
+            return nullptr;
+        }
+        copy->objValue.integer = result.integer;
+    }
+    copy->elementViews.clear();
+    copy->refreshingViews = false;
+    for (ObjectValue &value : copy->items)
+    {
+        if (!copyValue(&value, error)) return nullptr;
+    }
+    if (copy->kind == ObjectKind::Obj && copy->objOwnsObject)
+    {
+        if (!copyValue(&copy->objValue, error)) return nullptr;
+    }
+    if (object.closureCopy)
+    {
+        for (const auto &entry : object.elementViews)
+        {
+            auto view = entry.second;
+            view.address = nativeAllocate(copy->iteratorContext, std::max<std::size_t>(8,
+                                                                                       copy->items[entry.first].isStruct ? copy->items[entry.first].fields.size() * 8 : 8));
+            if (!view.address || !nativeWriteView(copy->iteratorContext, view, copy->items[entry.first]))
+            {
+                if (error) *error = "闭包副本捕获存储分配失败";
+                return nullptr;
+            }
+            copy->elementViews[entry.first] = view;
+        }
+    }
+    return copy;
+}
+
+/**
+ * @brief 复制运行时句柄并维护其对象引用。
+ * @param handle 待操作的运行时句柄。
+ * @param error 接收失败原因的错误信息。
+ * @retval 复制运行时句柄并维护其对象引用。
+ */
+std::int64_t ObjectStore::copyHandle(std::int64_t handle, Memory::String *error)
+{
+    return copyHandle(handle, error, nullptr);
+}
+
+/**
+ * @brief 共用已验证的存储槽，刷新可能重入的视图后重新核对身份。
+ * @param handle 原对象的完整句柄。
+ * @param error 接收失效、刷新或复制失败的诊断。
+ * @param refreshContext 原生调用者上下文；为空时不额外刷新调用者视图。
+ * @return 独立的新句柄；失败返回零。
+ */
+std::int64_t ObjectStore::copyHandle(std::int64_t handle, Memory::String *error, NativeContext *refreshContext)
+{
+    if (handle < kObjectHandleBase)
+    {
+        if (error != nullptr) *error = "不是一个能复制的对象句柄：" + Memory::toString(handle);
+        return 0;
+    }
+    const auto &reference = interfaceSlots[static_cast<std::uint64_t>(handle) % interfaceSlots.size()];
+    if (reference.handle == handle && reference.metadata)
+        return addInterfaceReference(reference.address, reference.tag, *reference.metadata, pointerSnapshots, reference.identity);
+    auto *storage = handleStorage(handle);
+    RuntimeObject *object = storage == nullptr ? nullptr : storage->get();
+    if (object != nullptr && refreshContext != nullptr && !object->elementViews.empty())
+    {
+        if (!nativeRefreshViews(*refreshContext, *object))
+        {
+            if (error) *error = refreshContext->error;
+            return 0;
+        }
+        // 刷新可能释放旧值并进入用户清理，不能跨重入保存存储槽或对象指针。
+        storage = handleStorage(handle);
+        object = storage == nullptr ? nullptr : storage->get();
+    }
+    if (object == nullptr)
+    {
+        if (error != nullptr) *error = "这个对象已经释放过了（句柄 " + Memory::toString(handle) + "）";
+        return 0;
+    }
+    if ((object->iteratorStateBox || object->closureCopy) && !nativeRefreshViews(object->iteratorContext, *object))
+    {
+        if (error) *error = object->iteratorContext.error;
+        return 0;
+    }
+    if (pointerSnapshots && shareablePointerSnapshot(*object)) return add(*storage);
+    std::shared_ptr<RuntimeObject> copy = copyObject(*object, error);
+    if (!copy) return 0;
+    return add(std::move(copy));
+}
+
+/**
+ * @brief 释放指定地址对应的运行时资源。
+ *
+ * 释放一个对象；确实释放了返回 true。
+ * @param handle 待操作的运行时句柄。
+ * @retval 满足检查条件或操作完成时为 true，检查失败或无法完成时为 false。
+ */
+bool ObjectStore::release(std::int64_t handle)
+
+{
+    auto &reference = interfaceSlots[static_cast<std::uint64_t>(handle) % interfaceSlots.size()];
+    if (reference.handle == handle && reference.metadata)
+    {
+        reference = {};
+        --inlineInterfaceCount;
+        invalidateNativeRecordViews();
+        return true;
+    }
+    auto *storage = handleStorage(handle);
+    if (storage == nullptr) return false;
+    if ((*storage)->kind == ObjectKind::NativeRecord && (*storage)->nativeType && (*storage)->nativeType->releaseDecision)
+    {
+        const auto decision = (*storage)->nativeType->releaseDecision((*storage)->nativeRecord.get());
+        if (decision == NativeRecordRelease::Deferred) return true;
+        if (decision == NativeRecordRelease::Rejected) return false;
+    }
+    std::shared_ptr<RuntimeObject> object = std::move(*storage);
+    auto &slot = handleSlots[static_cast<std::uint64_t>(handle) % handleSlots.size()];
+    if (slot.handle == handle)
+    {
+        slot.handle = 0;
+        --inlineHandleCount;
+    }
+    else
+        objects.erase(handle);
+    releaseContents(*object);
+    return true;
+}
+
+/**
+ * @brief 还活着的对象个数（停机时 != 0 就是漏了）。
+ * @retval 还活着的对象个数（停机时 != 0 就是漏了）。
+ */
+[[nodiscard]] std::size_t ObjectStore::liveCount() const
+{ return objects.size() + inlineHandleCount + inlineInterfaceCount; }
+}  // namespace runtimeDetail
+}  // namespace runtime

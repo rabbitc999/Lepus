@@ -1,0 +1,73 @@
+"""在真实导出工程中编译公开 C 头和注册句柄私有头，检查重新定位的依赖。"""
+from compiler_path import compiler_path
+from pathlib import Path
+import argparse
+import os
+import subprocess
+from project_temp import tempfile
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def main():
+    """生成新工程，分别用 C11 和 C++17 检查实际导出的头文件。"""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--lepus', type=Path, default=compiler_path())
+    parser.add_argument('--cc', default='gcc')
+    parser.add_argument('--cxx', default='g++')
+    args = parser.parse_args()
+    with tempfile.TemporaryDirectory(prefix='c-api-export-') as folder:
+        work = Path(folder)
+        project = work / 'project'
+        environment = dict(os.environ, LEPUS_LANG='zh')
+
+        def run(*command, timeout=180):
+            result = subprocess.run([str(x) for x in command], cwd=work, env=environment,
+                                    capture_output=True, encoding='utf-8', errors='replace', timeout=timeout)
+            assert result.returncode == 0, (command, result.stdout, result.stderr)
+
+        # 生成整套编译器工程要遍历文法并写出数百个文件，本机实测约 236 秒；
+        # 其余编译检查仍是 180 秒，只有生成步骤放宽。
+        run(args.lepus.resolve(), 'gen', 'compiler', '--out-dir', project, timeout=900)
+        for compiler, standard, extension, headers in (
+            (args.cc, 'c11', 'c', ['abi/lepus_abi.h', 'abi/lepus_standard.h']),
+            (args.cxx, 'c++17', 'cpp', ['abi/lepus_abi_registry.hpp', 'abi/lepus_abi_runtime.hpp'])):
+            source = work / ('headers.' + extension)
+            source.write_text(''.join('#include "' + name + '"\n' for name in headers) + 'int main(void){return 0;}\n', encoding='utf-8')
+            run(compiler, '-std=' + standard, '-fsyntax-only', '-I' + str(project), '-I' + str(project / 'runtime'), source)
+        assert not (project / 'glue').exists()
+        assert not (project / 'abi/std_parse.cpp').exists()
+        assert not (project / 'abi/std_parse.hpp').exists()
+        assert not (project / 'abi/std_binary.cpp').exists()
+        assert not (project / 'abi/std_binary.hpp').exists()
+        assert not (project / 'abi/std_signal.cpp').exists()
+        assert not (project / 'abi/std_signal.hpp').exists()
+        assert not (project / 'abi/std_serialization.cpp').exists()
+        assert not (project / 'abi/std_serialization.hpp').exists()
+        assert (project / 'abi/abi_process.c').is_file()
+        assert not (project / 'abi/std_process.cpp').exists()
+        assert not (project / 'abi/std_process.hpp').exists()
+        assert not (project / 'abi/std_reference.cpp').exists()
+        assert not (project / 'abi/std_reference.hpp').exists()
+        assert not (project / 'abi/std_compress.cpp').exists()
+        assert not (project / 'abi/std_compress.hpp').exists()
+        run(args.cxx, '-std=c++17', '-fsyntax-only', '-I' + str(project / 'abi'), project / 'abi/abi_compress.cpp')
+        run(args.cc, '-std=c11', '-fsyntax-only', '-I' + str(project / 'abi'), project / 'abi/abi_process.c')
+        assert (project / 'abi/abi_serialization.c').is_file()
+        run(args.cc, '-std=c11', '-fsyntax-only', '-I' + str(project), project / 'abi/abi_serialization.c')
+        assert (project / 'licenses/llvm/LICENSE.TXT').read_bytes() == (ROOT / 'licenses/llvm/LICENSE.TXT').read_bytes()
+        assert (project / 'abi/abi_parse.c').is_file()
+        assert (project / 'compiler_entry.cpp').is_file()
+        assert (project / 'tools/abi_import.hpp').is_file()
+        cmake = (project / 'CMakeLists.txt').read_text(encoding='utf-8')
+        assert 'add_executable(lepus lepus_main.cpp compiler_entry.cpp)' in cmake
+        assert 'COMPILE_DEFINITIONS LEPUS_FRONT_END_NO_MAIN=1' in cmake
+        run(args.cxx, '-std=c++17', '-fsyntax-only', '-I' + str(project), '-I' + str(project / 'runtime'), project / 'compiler_entry.cpp')
+        embedded = (project / 'lepus_stdlib_embedded.cpp').read_text(encoding='utf-8')
+        assert '"ircode/native_protocol.hpp"' in embedded
+        assert '"ircode/runtime_internal.hpp"' in embedded
+    print('fresh compiler export: C11 public and C++17 private C API headers compile; old parse glue absent')
+
+
+if __name__ == '__main__':
+    main()

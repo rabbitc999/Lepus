@@ -1,0 +1,1 @@
+lepus: example/samples-error/use_after_free.lep 第 9 行：[LEP1205] 借用来源已移动或销毁，不能继续访问（源对象已经销毁）：表达式

@@ -1,0 +1,27 @@
+Lepus
+Copyright 2026 小兔糖糖_OvO
+
+Licensed under the Apache License, Version 2.0.
+Third-party components retain their own copyright notices and licenses.
+
+SQLite 3.54.0: public domain, https://www.sqlite.org/copyright.html
+miniz 3.1.2: MIT license; see licenses/miniz/LICENSE.
+Their source archives are downloaded and verified during toolchain builds;
+their source code is not distributed in this repository.
+
+The non-finite complex multiplication recovery in source/std/signal.lep is
+adapted from LLVM compiler-rt muldc3 (The LLVM Project), licensed under
+Apache License v2.0 with LLVM Exceptions; see licenses/llvm/LICENSE.TXT.
+
+raylib 5.5 and raygui 4.0 (zlib), and Expat 2.10.0 (MIT), may be linked
+statically into Lepus applications. See licenses/raylib/LICENSE,
+licenses/raygui/LICENSE and licenses/expat/LICENSE.
+libsodium (ISC) may be linked statically into Lepus applications;
+see licenses/libsodium/LICENSE. Optional libcurl (curl license) builds
+preserve their corresponding notices in their build outputs.
+
+yyjson 0.13.0: MIT license; see licenses/yyjson/LICENSE.
+
+tomlc17 R261003: MIT license; see licenses/tomlc17/LICENSE.
+The locked derived source preserves Lepus 1.0.0 nesting, Unicode and date behavior;
+exact compatibility replacements and both source hashes are in tools/dependencies.lock.json.

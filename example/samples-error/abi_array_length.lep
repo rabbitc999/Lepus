@@ -1,0 +1,3 @@
+#abi("C", "./unused.dll", "numbers")
+int32[] numbers(int32 count) [missing];
+void main() { }

@@ -1,0 +1,1 @@
+lepus: example/samples-error/let_no_init.lep 第 2 行第 5 列：let 变量必须给初值：value

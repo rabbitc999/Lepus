@@ -1,0 +1,53 @@
+import std::macro;
+
+struct DerivedLeaf {
+    int64 number;
+    String text;
+    $std::macro::Equal<DerivedLeaf>(leftEqual);
+    $std::macro::Hash<DerivedLeaf>(hash);
+    $std::macro::Clone<DerivedLeaf>(clone);
+}
+struct DerivedPair {
+    DerivedLeaf leaf;
+    bool active;
+    $std::macro::Equal<DerivedPair>(leftEqual);
+    $std::macro::Hash<DerivedPair>(hash);
+    $std::macro::Clone<DerivedPair>(clone);
+}
+enum DerivedChoice {
+    None, Value(DerivedLeaf leaf, String text);
+    $std::macro::Equal<DerivedChoice>(leftEqual);
+    $std::macro::Hash<DerivedChoice>(hash);
+    $std::macro::Clone<DerivedChoice>(clone);
+}
+struct DerivedFloat {
+    float64 value;
+    $std::macro::Equal<DerivedFloat>(leftEqual);
+    $std::macro::Hash<DerivedFloat>(hash);
+}
+struct DerivedBox<T> {
+    T value;
+    $std::macro::Equal<DerivedBox<T>>(leftEqual);
+    $std::macro::Hash<DerivedBox<T>>(hash);
+    $std::macro::Clone<DerivedBox<T>>(clone);
+}
+
+void main() {
+    DerivedPair left; left.leaf.number = -4; left.leaf.text = "leaf"; left.active = true;
+    DerivedPair right = left.clone();
+    assert(left == right && left.hash(left) == right.hash(right));
+    right.leaf.text = "changed"; assert(!(left == right) && left.leaf.text == "leaf");
+    Map<DerivedPair, int64> values; values.put(left, 7);
+    assert(values.has(left) != 0 && values.has(right) == 0);
+    DerivedChoice first = DerivedChoice::Value(left.leaf, "payload");
+    DerivedChoice second = first.clone();
+    assert(first == second && first.hash(first) == second.hash(second));
+    assert(!(first == DerivedChoice::None));
+    DerivedFloat positive; positive.value = 0.0;
+    DerivedFloat negative; negative.value = -0.0;
+    assert(positive == negative && positive.hash(positive) == negative.hash(negative));
+    DerivedBox<DerivedLeaf> box; box.value = left.leaf;
+    let boxCopy = box.clone();
+    assert(box == boxCopy && box.hash(box) == boxCopy.hash(boxCopy));
+    println("derive interfaces OK");
+}

@@ -1,0 +1,1 @@
+lepus: example/samples-error/borrow_move_alias_after_move_macro.lep 第 10 行：[LEP1205] 借用来源已移动或销毁，不能继续访问（源对象已经销毁）：id

@@ -1,0 +1,29 @@
+import std::reflect;
+
+@Reflect
+struct Address { String city; };
+@Reflect
+struct Person { String name; int64 age; Address address; List<String> tags; };
+
+void main()
+{
+    Person person;
+    person.name = "original";
+    person.age = 42;
+    person.address.city = "杭州";
+    person.tags.push("one");
+
+    let info = getStructInfo<Person>().unwrap();
+    assert(info.fields.len() == 4);
+    assert(info.fields[1].name == "age");
+    assert(info.fields[1].typeId == getTypeId<int64>());
+    Address copy = person.address;
+    copy.city = "北京";
+    assert(person.address.city == "杭州");
+    person.name = "updated";
+    assert(person.name == "updated");
+    List<String> tags = person.tags;
+    tags.push("two");
+    assert(person.tags.len() == 1);
+    println("reflection fields: metadata and direct access OK");
+}

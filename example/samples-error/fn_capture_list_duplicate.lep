@@ -1,0 +1,6 @@
+void main()
+{
+    int64 value = 1;
+    let callback = fn [copy value, mut value]() { value };
+    assert(callback() == 1);
+}

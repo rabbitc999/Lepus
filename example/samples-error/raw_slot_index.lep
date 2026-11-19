@@ -1,0 +1,4 @@
+void main() {
+    RawPtr<int64> pointer;
+    let index = &pointer.index;
+}

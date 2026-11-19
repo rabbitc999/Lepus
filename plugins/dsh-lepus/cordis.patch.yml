@@ -1,0 +1,10 @@
+# dsh-lepus bundle patch: one host-plane row.
+#
+# The row registers the embedded Lepus programming skill and four host tools
+# (lepus_write / lepus_run / lepus_man / lepus_new). Tools registered on the
+# host layer are inherited by every agent preset; the skill lands in the global
+# skills layer for the same reason. The plugin resolves the Lepus compiler from
+# the session working directory, so no compiler path is baked into this file.
+- insert:
+    - id: lepus
+      name: dsh-lepus

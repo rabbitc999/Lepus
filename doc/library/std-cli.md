@@ -1,0 +1,410 @@
+# std::cli — 命令行参数
+
+<!-- LANGUAGE NAVIGATION -->
+[English（中文原文）](std-cli.md) · **简体中文**
+<!-- END LANGUAGE NAVIGATION -->
+
+[返回库目录](README.md) · [全部符号](symbols.md)
+
+## 引入
+
+```lepus
+import std::cli;
+```
+
+## 公共约定与错误边界
+
+长短选项、短选项组合、附着值、位置参数与 -- 分隔。重复选项采用最后一次值，required 必须显式出现。--help/-h 自动识别但不退出或打印，由应用处理。
+
+## 参考代码
+
+完整程序：[example/samples/std_cli.lep](../../example/samples/std_cli.lep)。
+
+```powershell
+lepus run example/samples/std_cli.lep
+```
+
+<details>
+<summary>展开完整参考代码</summary>
+
+```lepus
+import std::cli;
+void main(){
+    CliParser parser;parser.program="demo";parser.description="sample tool";
+    CliOption count;count.name="count";count.shortName='n';count.takesValue=true;count.defaultValue="3";count.description="number of items";
+    CliOption verbose;verbose.name="verbose";verbose.shortName='v';
+    CliOption output;output.name="output";output.shortName='o';output.takesValue=true;output.required=true;
+    assert(parser.add(count) && parser.add(verbose) && parser.add(output) && !parser.add(count));
+    List<String> args;args.push("-vn12");args.push("--output=result.txt");args.push("input.txt");args.push("--");args.push("-literal");
+    CliArguments result=parser.parse(args).unwrap();
+    assert(result.getInt("count").unwrap()==12 && result.get("verbose").unwrap()=="true");
+    assert(result.get("output").unwrap()=="result.txt" && result.positional.len()==2 && result.positional[1]=="-literal");
+    List<String> defaults;defaults.push("-o");defaults.push("out");assert(parser.parse(defaults).unwrap().getInt("count").unwrap()==3);
+    List<String> bad;bad.push("--unknown");assert(!parser.parse(bad).isOk());
+    List<String> missing;missing.push("-n");assert(!parser.parse(missing).isOk());
+    List<String> help;help.push("--help");assert(parser.parse(help).unwrap().helpRequested);
+    List<String> required;assert(!parser.parse(required).isOk());
+    List<String> invalid;invalid.push("-oout");invalid.push("-nabc");assert(!parser.parse(invalid).unwrap().getInt("count").isOk());
+    assert(len(parser.help())>40);
+    println("CLI options, defaults and validation OK");
+}
+```
+
+</details>
+
+<details>
+<summary>示例输出</summary>
+
+```text
+CLI options, defaults and validation OK
+```
+
+</details>
+
+聚合入口的具体操作参见对应子模块；本页类型/方法的调用形式列在下方。
+
+## 类型、枚举、常量与字段
+
+公开字段按源码原样列出；句柄和游标字段用于包装器状态，通常通过方法操作。枚举的括号表示变体载荷。
+
+| 所属类型 | 声明 | 说明 |
+| --- | --- | --- |
+| 模块 | <a id="symbol-9"></a>`struct CliError : Error` | 参数错误保留原始参数及可供用户阅读的原因。 |
+| CliError | <a id="symbol-10"></a>`String argument` | 导致错误的命令行实参。 |
+| CliError | <a id="symbol-11"></a>`String message` | 供用户阅读的错误原因。 |
+| 模块 | <a id="symbol-12"></a>`struct CliOption` | 一个选项；shortName 为零时没有短名称，takesValue=false 表示布尔开关。 |
+| CliOption | <a id="symbol-13"></a>`String name` | 声明或选项的名称。 |
+| CliOption | <a id="symbol-14"></a>`char shortName` | 单字符短选项名称。 |
+| CliOption | <a id="symbol-15"></a>`bool takesValue` | 选项是否需要附加值。 |
+| CliOption | <a id="symbol-16"></a>`bool required` | 是否要求调用方显式提供该选项。 |
+| CliOption | <a id="symbol-17"></a>`String defaultValue` | 没有显式提供值时使用的默认值。 |
+| CliOption | <a id="symbol-18"></a>`String description` | 用于帮助或展示的说明文本。 |
+| 模块 | <a id="symbol-19"></a>`struct CliArguments` | 解析结果；选项使用长名称作为键，位置参数保持输入顺序。 |
+| CliArguments | <a id="symbol-20"></a>`Map<String,String> options` | 已解析的选项名称与值。 |
+| CliArguments | <a id="symbol-21"></a>`List<String> positional` | 按输入顺序保存的位置实参。 |
+| CliArguments | <a id="symbol-22"></a>`bool helpRequested` | 输入是否请求显示帮助。 |
+| 模块 | <a id="symbol-23"></a>`struct CliParser` | 命令行选项定义与解析器；不调用 exit、不打印帮助，由应用决定交互行为。 |
+| CliParser | <a id="symbol-24"></a>`String program` | 帮助文本中显示的程序名称。 |
+| CliParser | <a id="symbol-25"></a>`String description` | 用于帮助或展示的说明文本。 |
+| CliParser | <a id="symbol-26"></a>`List<CliOption> definitions` | 解析器登记的选项定义。 |
+
+## 函数索引
+
+| 名称 | 声明 |
+| --- | --- |
+| [CliError::toString](#api-0) | `String toString()` |
+| [CliArguments::get](#api-1) | `Option<String> get(String name)` |
+| [CliArguments::getInt](#api-2) | `Result<int64,Error> getInt(String name)` |
+| [cliError](#api-3) | `CliError cliError(String argument, String message)` |
+| [cliTail](#api-4) | `String cliTail(String text,int64 start)` |
+| [CliParser::add](#api-5) | `bool add(CliOption option)` |
+| [CliParser::help](#api-6) | `String help()` |
+| [CliParser::parse](#api-7) | `Result<CliArguments,Error> parse(List<String> arguments)` |
+
+<a id="api-0"></a>
+
+### CliError::toString（1）
+
+**声明**
+
+```lepus
+String toString();
+```
+
+**行为**
+
+由实现者将当前值转换为文本，Formattable 重载接收 style。
+
+返回保留错误上下文的诊断文本。
+
+**参数**
+
+无显式参数。实例方法使用当前接收者。
+
+**返回值**
+
+`String`。由实现者将当前值转换为文本，Formattable 重载接收 style。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+obj.toString();
+```
+
+**源码**：[source/std/cli.lep:8](../../source/std/cli.lep#L8)。
+
+**完整示例**：[example/samples/std_cli.lep](../../example/samples/std_cli.lep)。
+
+<a id="api-1"></a>
+
+### CliArguments::get（2）
+
+**声明**
+
+```lepus
+Option<String> get(String name);
+```
+
+**行为**
+
+读取共享槽当前值的副本。
+
+查询选项值；未定义的名称返回 None。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `name` | `String name` | 名称 | 无 |
+
+**返回值**
+
+`Option<String>`。读取共享槽当前值的副本。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+obj.get(name);
+```
+
+**源码**：[source/std/cli.lep:19](../../source/std/cli.lep#L19)。
+
+**完整示例**：[example/samples/std_cli.lep](../../example/samples/std_cli.lep)。
+
+<a id="api-2"></a>
+
+### CliArguments::getInt（3）
+
+**声明**
+
+```lepus
+Result<int64,Error> getInt(String name);
+```
+
+**行为**
+
+严格转换整数参数，失败返回带参数名的错误。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `name` | `String name` | 名称 | 无 |
+
+**返回值**
+
+`Result<int64,Error>`。严格转换整数参数，失败返回带参数名的错误。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+obj.getInt(name);
+```
+
+**源码**：[source/std/cli.lep:24](../../source/std/cli.lep#L24)。
+
+**完整示例**：[example/samples/std_cli.lep](../../example/samples/std_cli.lep)。
+
+<a id="api-3"></a>
+
+### cliError（4）
+
+**声明**
+
+```lepus
+CliError cliError(String argument, String message);
+```
+
+**行为**
+
+生成参数诊断。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `argument` | `String argument` | 原始命令行参数。 | 无 |
+| `message` | `String message` | 诊断文本或消息载荷 | 无 |
+
+**返回值**
+
+`CliError`。生成参数诊断。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+cliError(argument, message);
+```
+
+**源码**：[source/std/cli.lep:33](../../source/std/cli.lep#L33)。
+
+**完整示例**：[example/samples/std_cli.lep](../../example/samples/std_cli.lep)。
+
+<a id="api-4"></a>
+
+### cliTail（5）
+
+**声明**
+
+```lepus
+String cliTail(String text,int64 start);
+```
+
+**行为**
+
+从字节位置 start 复制命令行参数后缀。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `text` | `String text` | 输入文本，位置与长度通常按字节 | 无 |
+| `start` | `int64 start` | 起始值 | 无 |
+
+**返回值**
+
+`String`。从字节位置 start 复制命令行参数后缀。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+cliTail(text, start);
+```
+
+**源码**：[source/std/cli.lep:35](../../source/std/cli.lep#L35)。
+
+**完整示例**：[example/samples/std_cli.lep](../../example/samples/std_cli.lep)。
+
+<a id="api-5"></a>
+
+### CliParser::add（6）
+
+**声明**
+
+```lepus
+bool add(CliOption option);
+```
+
+**行为**
+
+计算逐项相加或追加元素，具体操作取决于所属类型。
+
+登记选项；拒绝重复名称、保留的 help/h、非法名称及带值开关的歧义。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `option` | `CliOption option` | 待登记的命令行选项。 | 无 |
+
+**返回值**
+
+`bool`。计算逐项相加或追加元素，具体操作取决于所属类型。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+obj.add(option);
+```
+
+**源码**：[source/std/cli.lep:46](../../source/std/cli.lep#L46)。
+
+**完整示例**：[example/samples/std_cli.lep](../../example/samples/std_cli.lep)。
+
+<a id="api-6"></a>
+
+### CliParser::help（7）
+
+**声明**
+
+```lepus
+String help();
+```
+
+**行为**
+
+自动生成使用说明和长短选项帮助。
+
+**参数**
+
+无显式参数。实例方法使用当前接收者。
+
+**返回值**
+
+`String`。自动生成使用说明和长短选项帮助。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+obj.help();
+```
+
+**源码**：[source/std/cli.lep:63](../../source/std/cli.lep#L63)。
+
+**完整示例**：[example/samples/std_cli.lep](../../example/samples/std_cli.lep)。
+
+<a id="api-7"></a>
+
+### CliParser::parse（8）
+
+**声明**
+
+```lepus
+Result<CliArguments,Error> parse(List<String> arguments);
+```
+
+**行为**
+
+解析长选项、短选项组合、附着值与 --；重复选项采用最后一次的值。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `arguments` | `List<String> arguments` | 回调参数值 | 无 |
+
+**返回值**
+
+`Result<CliArguments,Error>`。解析长选项、短选项组合、附着值与 --；重复选项采用最后一次的值。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+obj.parse(arguments);
+```
+
+**源码**：[source/std/cli.lep:77](../../source/std/cli.lep#L77)。
+
+**完整示例**：[example/samples/std_cli.lep](../../example/samples/std_cli.lep)。

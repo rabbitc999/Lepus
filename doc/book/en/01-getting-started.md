@@ -1,0 +1,78 @@
+# Chapter 1 Getting Started
+
+<!-- LANGUAGE NAVIGATION -->
+**English** · [简体中文](../01-第一个程序.md)
+<!-- END LANGUAGE NAVIGATION -->
+
+Our first program displays one message. It has no input and creates no files, so its result is easy to check.
+
+## 1.1 Save a source file
+
+Follow [installation](../../en/39-installation-packages.md), then create a UTF-8 text file named hello.lep.
+
+<!-- verify-book -->
+```lepus
+void main()
+{
+    println("Hello, Lepus!");
+}
+```
+
+```text
+Hello, Lepus!
+```
+
+The first line, `void main()`, declares the entry function. main is its name; empty parentheses mean this example takes no parameters. void means it does not return a value to a caller. Chapter 4 will introduce functions that calculate and return results.
+
+The opening brace starts the function body and the closing brace ends it. The statement between them is what this program executes.
+
+The third line calls println. The quoted text is its argument; the quotes mark the text and are not printed. println adds a newline. The final semicolon ends the statement, while the closing brace ends the body.
+
+## 1.2 Run it in a terminal
+
+Open a terminal in the directory containing hello.lep:
+
+```sh
+lepus run hello.lep
+```
+
+lepus names the compiler, run asks it to compile and execute, and hello.lep names the input file. The resulting output should match the example.
+
+If the command cannot be found, check PATH or use the compiler's full path. If the source cannot be found, check the terminal directory and saved filename. Neither problem is caused by the text passed to println.
+
+## 1.3 Make two small changes
+
+Replace the greeting with your name. Run again, then add another statement below the first:
+
+```lepus
+    println("This is my second line.");
+```
+
+The calls execute from top to bottom. Remove the second semicolon deliberately, read the first diagnostic, and restore it. Change one thing at a time so you can connect a result to its cause.
+
+## 1.4 Check without running
+
+```sh
+lepus check hello.lep
+```
+
+A successful check does not print the greeting: it checks the program without executing main. run executes after checking and compiling. This distinction matters once programs read input, open files, or use networks.
+
+For now, know that run compiles a native program and executes it. Chapter 27 explains export and compilation tools; you do not need LLVM knowledge to continue.
+
+### Observe output order
+
+The calls write two lines in order.
+
+<!-- verify-book -->
+```lepus
+void main() {
+    println("start");
+    println("ready");
+}
+```
+
+```text
+start
+ready
+```

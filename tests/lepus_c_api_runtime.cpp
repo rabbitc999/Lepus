@@ -1,0 +1,1420 @@
+/** @file lepus_c_api_runtime.cpp @brief C 服务的缓冲、记录、错误及借用调用器回归。 */
+#include "abi/lepus_abi_runtime.hpp"
+#include "abi/lepus_abi_internal.h"
+#include "abi/lepus_abi_registry.hpp"
+#include "ircode/runtime_internal.hpp"
+#include "c_api_failure_arena.hpp"
+#include "abi/std_collection.hpp"
+#include "abi/scalar_storage.hpp"
+#include "ircode/native_value_text.hpp"
+#include <cassert>
+#include <atomic>
+#include <cstdlib>
+#include <new>
+#include <cstdio>
+#include <cstring>
+#include <stdexcept>
+#include <string>
+#include <filesystem>
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
+
+static std::atomic<std::size_t> allocationEvents{0};
+/**
+ * @brief 记录本测试可执行文件的实际 C++ 堆分配，不改变系统分配器。
+ * @param size 请求字节数。
+ * @return 系统 malloc 分配的块。
+ * @throws std::bad_alloc 系统分配失败。
+ */
+void *operator new(std::size_t size)
+{
+    allocationEvents.fetch_add(1, std::memory_order_relaxed);
+    if (void *value = std::malloc(size ? size : 1)) return value;
+    throw std::bad_alloc();
+}
+/**
+ * @brief 数组分配复用同一系统分配及计数。
+ * @param size 请求字节数。
+ * @return 已分配的块。
+ */
+void *operator new[](std::size_t size) { return ::operator new(size); }
+/**
+ * @brief 释放测试中的系统分配。
+ * @param value 可为空的分配块。
+ */
+void operator delete(void *value) noexcept { std::free(value); }
+/**
+ * @brief 释放数组对应的系统分配。
+ * @param value 可为空的分配块。
+ */
+void operator delete[](void *value) noexcept { std::free(value); }
+/**
+ * @brief 处理带大小的释放形式。
+ * @param value 可为空的分配块。
+ * @param size 编译器提供的原大小，不用于系统 free。
+ */
+void operator delete(void *value, std::size_t size) noexcept { (void)size; std::free(value); }
+/**
+ * @brief 处理带大小的数组释放形式。
+ * @param value 可为空的分配块。
+ * @param size 编译器提供的原大小，不用于系统 free。
+ */
+void operator delete[](void *value, std::size_t size) noexcept { (void)size; std::free(value); }
+
+using namespace runtime;
+using namespace runtime::runtimeDetail;
+
+/** @brief 用可变状态和复制计数检查调用器按引用复用。 */
+struct Counter
+{
+    int *copies;
+    int value = 0;
+    /** @brief 关联复制计数。
+     * @param count 外部计数器。
+     */
+    explicit Counter(int *count) : copies(count) {}
+    /** @brief 记录捕获副本。
+     * @param other 原对象。
+     */
+    Counter(const Counter &other) : copies(other.copies), value(other.value) { ++*copies; }
+    /** @brief 转移捕获。
+     * @param other 原对象。
+     */
+    Counter(Counter &&other) = default;
+    /**
+     * @brief 推进捕获状态、返回浮点结果或抛出受控异常。
+     * @param function 测试的受检查调用身份。
+     * @param arguments 经过 C 服务解码的实参。
+     * @param result 返回槽。
+     * @return 已处理时为真。
+     */
+    bool operator()(std::int64_t function, const Memory::Vector<NativeValue> &arguments, NativeValue &result)
+    {
+        if (function == 1)
+        {
+            result = NativeValue::fromInt(++value);
+            return true;
+        }
+        if (function == 2)
+        {
+            assert(arguments.size() == 1 && arguments[0].isFloat());
+            result = NativeValue::fromFloat(arguments[0].asFloat() + 0.5);
+            return true;
+        }
+        if (function == 3) throw std::runtime_error("callback service failure");
+        if (function == 4) throw 17;
+        return false;
+    }
+};
+
+static int destroyed = 0;
+/**
+ * @brief 销毁宿主整数记录并记录次数。
+ * @param value 拥有的宿主对象。
+ */
+void destroyInteger(void *value)
+{
+    ++destroyed;
+    delete static_cast<int *>(value);
+}
+/**
+ * @brief 创建独立记录副本。
+ * @param value 借用的原记录。
+ * @return 独立副本。
+ */
+void *cloneInteger(const void *value) { return new int(*static_cast<const int *>(value)); }
+/**
+ * @brief 模拟不提供副本的 C 回调。
+ * @param value 不读取的源记录。
+ * @return 空指针。
+ */
+void *failedClone(const void *value) { (void)value; return nullptr; }
+/**
+ * @brief 模拟错误返回源指针的 C 回调，验证运行时不误销毁源。
+ * @param value 源记录。
+ * @return 原指针。
+ */
+void *aliasedClone(const void *value) { return const_cast<void *>(value); }
+/**
+ * @brief 用另一身份的销毁函数检查类型冲突。
+ * @param value 未转移所有权的对象。
+ */
+void conflictingDestroy(void *value) { delete static_cast<int *>(value); }
+
+/** @brief C 文本协议的独立测试记录，文本可含零字节。 */
+struct TextRecord { std::string bytes; };
+static int textDestroyed = 0;
+static int textFormatCalls = 0;
+/** @brief 销毁 C 文本记录并记录销毁次数。
+ * @param value 拥有的文本记录。
+ */
+void destroyTextRecord(void *value) { ++textDestroyed; delete static_cast<TextRecord *>(value); }
+/** @brief 复制 C 文本记录，失败返回空且不越过 C 边界抛出异常。
+ * @param value 只读文本记录。
+ * @return 独立副本，失败为空。
+ */
+void *cloneTextRecord(const void *value)
+try { return new TextRecord(*static_cast<const TextRecord *>(value)); } catch (...) { return nullptr; }
+/** @brief 查询或完整写入测试文本，不写越界或终止字节。
+ * @param value 只读文本记录。
+ * @param data 输出，查询时为空。
+ * @param capacity 输出字节容量。
+ * @param required 接收完整长度。
+ * @return 查询或写入成功为一，短缓冲为零。
+ */
+int formatTextRecord(const void *value, char *data, std::size_t capacity, std::size_t *required)
+{
+    ++textFormatCalls;
+    const auto &text = static_cast<const TextRecord *>(value)->bytes;
+    *required = text.size();
+    if (!data && !capacity) return 1;
+    if (!data || capacity < text.size()) return 0;
+    if (!text.empty()) std::memcpy(data, text.data(), text.size());
+    return 1;
+}
+/** @brief 模拟 C 文本查询失败。
+ * @param value 不读取的记录。
+ * @param data 不写入的输出。
+ * @param capacity 不使用的容量。
+ * @param required 清零的长度。
+ * @return 固定失败值。
+ */
+int failTextRecord(const void *value, char *data, std::size_t capacity, std::size_t *required)
+{ (void)value; (void)data; (void)capacity; *required = 0; return 0; }
+/** @brief 模拟无法表示的 C 文本长度。
+ * @param value 不读取的记录。
+ * @param data 不写入的输出。
+ * @param capacity 不使用的容量。
+ * @param required 接收不可表示的长度。
+ * @return 查询成功，由调用方拒绝超大长度。
+ */
+int oversizedTextRecord(const void *value, char *data, std::size_t capacity, std::size_t *required)
+{ (void)value; (void)data; (void)capacity; *required = SIZE_MAX; return 1; }
+/** @brief 模拟第二次调用报告长度增长，但不向短缓冲写入。
+ * @param value 不读取的记录。
+ * @param data 用于区分查询与写入。
+ * @param capacity 不使用的容量。
+ * @param required 查询为一，写入为二。
+ * @return 固定成功值，由调用方检查长度变化。
+ */
+int growingTextRecord(const void *value, char *data, std::size_t capacity, std::size_t *required)
+{ (void)value; (void)capacity; *required = data ? 2 : 1; return 1; }
+
+/**
+ * @brief 查询本测试进程的系统句柄或文件描述符数量，核对打开失败后的真实清理。
+ * @return Windows 句柄数或 Linux 描述符数；其他宿主返回零。
+ */
+std::size_t systemHandleCount()
+{
+#if defined(_WIN32)
+    DWORD count = 0;
+    assert(GetProcessHandleCount(GetCurrentProcess(), &count));
+    return count;
+#elif defined(__linux__)
+    std::size_t count = 0;
+    for (const auto &entry : std::filesystem::directory_iterator("/proc/self/fd")) { (void)entry; ++count; }
+    return count;
+#else
+    return 0;
+#endif
+}
+
+/**
+ * @brief 验证完整 C 服务路径，所有新建资源均显式释放。
+ * @param argc 参数数量，须提供一个位于项目 tmp 下的测试文件路径。
+ * @param argv 程序及测试文件路径。
+ * @return 全部断言通过时为零。
+ */
+int main(int argc, char **argv)
+{
+    assert(argc == 2);
+    FailingArena arena(8 * 1024 * 1024);
+    {
+        Memory::AllocationScope allocation(&arena);
+        DataArea data;
+        data.binary.assign({ 0, 't', 'e', 'x', 't', 0 });
+        Heap heap;
+        heap.reset(64);
+        ObjectStore objects;
+        NativeContext context;
+        context.heap = &heap;
+        context.data = &data;
+        context.objects = &objects;
+        int copies = 0;
+        NativeInvoker invoker{ Counter(&copies) };
+        context.invoker = &invoker;
+        objects.recordContext = context;
+        LepusAbiRuntime runtime{ &context };
+        LepusAbiFrame frame{ &runtime, nullptr, nullptr, 0, 0, 0 };
+        const auto reset = [&] { context.error.clear(); context.memoryFault.clear(); runtime.status = 0; runtime.diagnostic.clear(); runtime.fallback = nullptr; };
+        const unsigned char *view = nullptr;
+        std::size_t length = 0;
+        assert(lepus_abi_bytes(&frame, 1, &view, &length) && std::string(reinterpret_cast<const char *>(view), length) == "text");
+        {
+            const auto before=heap.liveBlocks();
+            const auto tracked=lepus_abi_tracked_temporary(&frame,16);assert(tracked&&!runtime.status);
+            assert(objects.materializedHeap.size()==1&&objects.materializedHeap.back()==static_cast<size_t>(tracked));
+            int64_t words[]={0,INT64_MAX};
+            assert(lepus_abi_write(&frame,tracked,words,sizeof(words)));
+            int64_t loaded[2]{};assert(lepus_abi_read(&frame,tracked,loaded,sizeof(loaded))&&loaded[1]==INT64_MAX);
+            assert(lepus_abi_temporary_release(&frame,tracked)&&objects.materializedHeap.empty()&&heap.liveBlocks()==before);
+            const auto raw=lepus_abi_temporary(&frame,16);assert(raw&&objects.materializedHeap.empty());
+            assert(lepus_abi_temporary_release(&frame,raw)&&heap.liveBlocks()==before);
+            int failures=0;
+            for(int point=0;point<32;++point){
+                objects.materializedHeap.shrink_to_fit();
+                const auto live=heap.liveBlocks();arena.remaining=point;
+                const auto address=lepus_abi_tracked_temporary(&frame,16);
+                arena.remaining=-1;
+                if(address){assert(!runtime.status&&objects.materializedHeap.size()==1);assert(lepus_abi_temporary_release(&frame,address));break;}
+                assert(runtime.status&&heap.liveBlocks()==live&&objects.materializedHeap.empty()&&point!=31);++failures;reset();
+            }
+            assert(failures>=1);
+            assert(!lepus_abi_tracked_temporary(&frame,SIZE_MAX)&&runtime.status&&objects.materializedHeap.empty());reset();
+            const auto final=lepus_abi_tracked_temporary(&frame,0);assert(final&&!runtime.status);
+            assert(objects.materializedHeap.size()==1);
+            for(const auto address:objects.materializedHeap)assert(heap.release(address));
+            objects.materializedHeap.clear();assert(heap.liveBlocks()==before);
+            std::printf("C tracked temporary: raw slots, early release, cleanup queue and %d atomic failure points passed\n",failures);
+        }
+        {
+            int64_t slots[]={0,0,7,INT64_MIN,-91};
+            unsigned char kinds[]={0,0,0,LepusAbiSlotFloat,0};
+            LepusAbiFrame packed{&runtime,slots,kinds,5,0,0};
+            const auto pack=lepus_abi_resolve("__std_vec_pack",nullptr);
+            const auto len=lepus_abi_resolve("__std_vec_len",nullptr);
+            const auto at=lepus_abi_resolve("__std_vec_at",nullptr);
+            assert(pack&&len&&at);pack(&packed);assert(packed.result&&!runtime.status);
+            const auto list=packed.result;
+            int64_t readBits[3]{};unsigned char readKinds[3]{};size_t count=0;
+            assert(lepus_abi_list_numbers(&frame,list,readBits,readKinds,3,&count)&&count==3);
+            assert(readBits[0]==7&&readBits[1]==INT64_MIN&&readBits[2]==-91&&readKinds[1]==LepusAbiSlotFloat);
+            int64_t argument=list;unsigned char integer=0;
+            LepusAbiFrame lengthFrame{&runtime,&argument,&integer,1,0,0};len(&lengthFrame);assert(lengthFrame.result==3&&!runtime.status);
+            const auto before=allocationEvents.load(std::memory_order_relaxed);
+            for(int repeat=0;repeat<100;++repeat){len(&lengthFrame);assert(lengthFrame.result==3&&!runtime.status);}
+            const auto allocations=allocationEvents.load(std::memory_order_relaxed)-before;
+            assert(!allocations);
+            int64_t access[]={list,1,0,0};unsigned char accessKinds[4]{};
+            LepusAbiFrame readFrame{&runtime,access,accessKinds,4,0,0};at(&readFrame);
+            assert(readFrame.resultIsFloat&&readFrame.result==INT64_MIN&&!runtime.status);
+            int64_t sumArguments[]={10,list};unsigned char sumKinds[2]{};
+            LepusAbiFrame summed{&runtime,sumArguments,sumKinds,2,0,0};
+            const auto sum=lepus_abi_resolve("demo_cpp_variadic_sum",nullptr);assert(sum);sum(&summed);
+            assert(!runtime.status&&!summed.resultIsFloat&&summed.result==-74);
+            access[1]=3;at(&readFrame);assert(runtime.status);reset();
+            lengthFrame.count=0;lengthFrame.slots=nullptr;lengthFrame.kinds=nullptr;len(&lengthFrame);assert(runtime.status);reset();
+            assert(lepus_abi_record_release(&frame,list));
+            lengthFrame.count=1;lengthFrame.slots=&argument;lengthFrame.kinds=&integer;
+            len(&lengthFrame);assert(runtime.status);reset();
+            std::puts("C collection frames: variadic packing, float bits, bounds, stale handles and zero warmed allocations passed");
+        }
+        const auto transcode = lepus_abi_resolve("std::serialization::__transcode", nullptr);
+        assert(transcode && !lepus_abi_resolve("std::serialization::__pack", nullptr) &&
+               !lepus_abi_resolve("std::serialization::__unpack", nullptr));
+        for (const auto &text : {std::string("{\"value\":null}"), std::string("[]"), std::string("{"),
+                                 std::string("{\"value\":\"中文\"}"), std::string(4096, ' ') + "{}"})
+        {
+            int64_t arguments[] = {lepus_abi_string(&frame, text.data(), text.size()), 1};
+            unsigned char kinds[] = {LepusAbiSlotInteger, LepusAbiSlotInteger};
+            LepusAbiFrame converted{&runtime, arguments, kinds, 2, 0, 0};
+            transcode(&converted);
+            assert(!runtime.status && !converted.resultIsFloat && converted.result);
+            assert(lepus_abi_bytes(&frame, converted.result, &view, &length) && length);
+            const std::string output(reinterpret_cast<const char *>(view), length);
+            if (text == "{\"value\":null}") assert(output == "0TOML 不支持 null");
+            else if (text == "[]" || text == "{") assert(output == "0TOML 序列化要求对象根节点");
+            else assert(output[0] == '1');
+            assert(lepus_abi_string_release(&frame, converted.result));
+            converted.result = 0;
+            arena.remaining = 0;
+            transcode(&converted);
+            arena.remaining = -1;
+            assert(runtime.status && !converted.result);
+            reset();
+            converted.count = 1;
+            transcode(&converted);
+            assert(runtime.status);
+            reset();
+            converted.count = 2;
+            kinds[0] = LepusAbiSlotFloat;
+            transcode(&converted);
+            assert(runtime.status);
+            reset();
+            kinds[0] = LepusAbiSlotInteger;
+            assert(lepus_abi_string_release(&frame, arguments[0]));
+            transcode(&converted);
+            assert(runtime.status);
+            reset();
+        }
+        std::puts("C format conversion: independent buffers, null rejection, long input and invalid frames passed");
+        const auto parseError = lepus_abi_resolve("std::parse::__parseFloat64Error", nullptr);
+        const auto parseValue = lepus_abi_resolve("std::parse::__parseFloat64Value", nullptr);
+        assert(parseError && parseValue);
+        for (const auto &text : { std::string(), std::string("3.5"), std::string("1e309x"), std::string("nan"), std::string(300, '0') + ".5" })
+        {
+            std::int64_t handle = lepus_abi_string(&frame, text.data(), text.size());
+            unsigned char kind = LepusAbiSlotInteger;
+            LepusAbiFrame parsed{ &runtime, &handle, &kind, 1, 0, 0 };
+            parseError(&parsed);
+            const auto expected = text.empty() ? 1 : text == "1e309x" || text == "nan" ? 2 : 0;
+            assert(runtime.status == 0 && parsed.result == expected && !parsed.resultIsFloat);
+            if (expected == 0)
+            {
+                parseValue(&parsed);
+                double number = 0.0;
+                std::memcpy(&number, &parsed.result, sizeof(number));
+                assert(runtime.status == 0 && parsed.resultIsFloat && number == (text == "3.5" ? 3.5 : 0.5));
+            }
+            assert(lepus_abi_string_release(&frame, handle));
+            parseError(&parsed);
+            assert(runtime.status != 0);
+            reset();
+            kind = LepusAbiSlotFloat;
+            parseError(&parsed);
+            assert(runtime.status != 0);
+            reset();
+        }
+        std::puts("C float parser: empty, buffered, overflow priority, stale handles and slot kinds passed");
+        for (const auto &text : { std::string(), std::string("中文"), std::string(300, 'x') })
+        {
+            const auto handle = lepus_abi_string(&frame, text.data(), text.size());
+            assert(handle && runtime.status == 0);
+            assert(lepus_abi_bytes(&frame, handle, &view, &length) && length == text.size());
+            if (length) assert(std::memcmp(view, text.data(), length) == 0);
+            assert(lepus_abi_string_release(&frame, handle));
+            assert(!lepus_abi_bytes(&frame, handle, &view, &length) && runtime.status != 0);
+            reset();
+        }
+        assert(!lepus_abi_string(&frame, "a\0b", 3) && runtime.status != 0);
+        reset();
+        assert(!lepus_abi_string(&frame, nullptr, 1) && runtime.status != 0);
+        reset();
+        assert(!lepus_abi_bytes(&frame, -1, &view, &length) && runtime.status != 0);
+        reset();
+        char byte = 0;
+        assert(!lepus_abi_read(&frame, 0, &byte, 1) && runtime.status != 0);
+        reset();
+        const auto temporary = lepus_abi_temporary(&frame, 16);
+        assert(temporary);
+        const std::int64_t original[2] = { 7, 11 };
+        std::int64_t restored[2]{};
+        assert(lepus_abi_write(&frame, temporary, original, sizeof(original)));
+        assert(lepus_abi_read(&frame, temporary, restored, sizeof(restored)) && restored[0] == 7 && restored[1] == 11);
+        assert(!lepus_abi_read(&frame, temporary + 8, restored, sizeof(restored)) && runtime.status != 0);
+        reset();
+        assert(lepus_abi_temporary_release(&frame, temporary));
+        assert(!lepus_abi_temporary_release(&frame, temporary) && runtime.status != 0);
+        reset();
+        std::int64_t result = 0;
+        int floating = 0;
+        const auto initialCopies = copies;
+        assert(lepus_abi_invoke(&frame, 1, nullptr, nullptr, 0, &result, &floating) && result == 1 && !floating);
+        assert(lepus_abi_invoke(&frame, 1, nullptr, nullptr, 0, &result, &floating) && result == 2 && copies == initialCopies);
+        NativeRegistry legacy;
+        LepusAbiRegistry borrowed{ {}, &legacy };
+        assert(legacy.add("through_context", 0, [](NativeCallContext &host, const auto &arguments) {
+            NativeValue returned;
+            assert(host.invoke(1, arguments, returned));
+            return returned;
+        }));
+        char diagnostic[128];
+        LepusAbiError error{ diagnostic, sizeof(diagnostic), 0, 0 };
+        assert(lepus_abi_registry_call(&borrowed, "through_context", &frame, &error) == LepusAbiOk && frame.result == 3);
+        assert(copies == initialCopies);
+        std::int64_t bits = lepus_abi_slot_from_real(1.25);
+        unsigned char kind = LepusAbiSlotFloat;
+        assert(lepus_abi_invoke(&frame, 2, &bits, &kind, 1, &result, &floating) && floating);
+        double real = 0;
+        std::memcpy(&real, &result, sizeof(real));
+        assert(real == 1.75);
+        assert(!lepus_abi_invoke(&frame, 1, nullptr, nullptr, 1, &result, &floating) && runtime.status != 0);
+        reset();
+        assert(!lepus_abi_invoke(&frame, 1, &bits, &kind, -1, &result, &floating) && runtime.status != 0);
+        reset();
+        kind = 2;
+        assert(!lepus_abi_invoke(&frame, 1, &bits, &kind, 1, &result, &floating) && runtime.status != 0);
+        reset();
+        assert(!lepus_abi_invoke(&frame, 0, nullptr, nullptr, 0, &result, &floating) && runtime.status != 0);
+        reset();
+        assert(!lepus_abi_invoke(&frame, 3, nullptr, nullptr, 0, &result, &floating) && runtime.diagnostic == "callback service failure");
+        reset();
+        assert(!lepus_abi_invoke(&frame, 4, nullptr, nullptr, 0, &result, &floating) && runtime.status != 0);
+        reset();
+        frame.slots = &bits;
+        frame.kinds = &kind;
+        frame.count = 1;
+        kind = LepusAbiSlotFloat;
+        assert(lepus_abi_integer(&frame, 0) == 0 && runtime.status != 0);
+        reset();
+        kind = LepusAbiSlotInteger;
+        assert(lepus_abi_real(&frame, 0) == 0 && runtime.status != 0);
+        reset();
+        frame.slots = nullptr;
+        frame.kinds = nullptr;
+        frame.count = 0;
+        assert(!lepus_abi_read(&frame, 0, &byte, 1));
+        lepus_abi_fail(&frame, "module detail");
+        assert(runtime.diagnostic == "module detail");
+        lepus_abi_fail(&frame, "later detail");
+        assert(runtime.diagnostic == "module detail");
+        reset();
+        context.error = "prior runtime failure";
+        lepus_abi_fail(&frame, "module detail");
+        assert(runtime.diagnostic == "prior runtime failure");
+        reset();
+        context.memoryFault = "prior memory failure";
+        lepus_abi_fail(&frame, "module detail");
+        assert(runtime.diagnostic == "prior memory failure");
+        reset();
+        const auto record = lepus_abi_record_make(&frame, "c-api-test::Integer", new int(42), destroyInteger);
+        assert(record && *static_cast<int *>(lepus_abi_record_borrow(&frame, record, "c-api-test::Integer")) == 42);
+        const auto allocationsBeforeBorrow = allocationEvents.load(std::memory_order_relaxed);
+        for (int index = 0; index < 100; ++index)
+            assert(*static_cast<int *>(lepus_abi_record_borrow(&frame, record, "c-api-test::Integer")) == 42);
+        const auto borrowAllocations = allocationEvents.load(std::memory_order_relaxed) - allocationsBeforeBorrow;
+        const char *expectedEnvironment = std::getenv("LEPUS_TEST_HOST_ALLOCATIONS");
+        const auto expectedAllocations = expectedEnvironment ? std::strtoull(expectedEnvironment, nullptr, 10) : 0;
+        std::printf("C host shells: %zu allocations for 100 warmed record borrows\n", borrowAllocations);
+        std::fflush(stdout);
+        assert(borrowAllocations == expectedAllocations);
+        int cloneAttempts = 0;
+        for (int point = 0; point < 32; ++point)
+        {
+            const auto before = destroyed;
+            arena.remaining = point;
+            const auto attempted = lepus_abi_record_clone(&frame, record, "c-api-test::Integer", cloneInteger);
+            arena.remaining = -1;
+            ++cloneAttempts;
+            if (attempted)
+            {
+                assert(lepus_abi_record_release(&frame, attempted) && destroyed == before + 1);
+                break;
+            }
+            assert(runtime.status != 0 && destroyed == before + 1);
+            reset();
+            assert(*static_cast<int *>(lepus_abi_record_borrow(&frame, record, "c-api-test::Integer")) == 42);
+            assert(point != 31);
+        }
+        int creationFailures = 0;
+        for (int point = 0; point < 32; ++point)
+        {
+            int *raw = new int(9);
+            const auto before = destroyed;
+            arena.remaining = point;
+            const auto attempted = lepus_abi_record_make(&frame, "c-api-test::Integer", raw, destroyInteger);
+            arena.remaining = -1;
+            if (attempted)
+            {
+                assert(lepus_abi_record_release(&frame, attempted) && destroyed == before + 1);
+                break;
+            }
+            ++creationFailures;
+            assert(runtime.status != 0 && destroyed == before);
+            delete raw;
+            reset();
+            assert(point != 31);
+        }
+        assert(cloneAttempts > 2 && creationFailures > 1);
+        std::printf("record ownership: %d clone attempts and %d creation failure points passed\n", cloneAttempts, creationFailures);
+        const auto copy = lepus_abi_record_clone(&frame, record, "c-api-test::Integer", cloneInteger);
+        assert(copy && copy != record);
+        *static_cast<int *>(lepus_abi_record_borrow(&frame, copy, "c-api-test::Integer")) = 7;
+        assert(*static_cast<int *>(lepus_abi_record_borrow(&frame, record, "c-api-test::Integer")) == 42);
+        int *conflicting = new int(9);
+        assert(!lepus_abi_record_make(&frame, "c-api-test::Integer", conflicting, conflictingDestroy) && runtime.status != 0);
+        delete conflicting;
+        reset();
+        assert(!lepus_abi_record_borrow(&frame, record, "different::Type") && runtime.status != 0);
+        reset();
+        assert(lepus_abi_record_release(&frame, copy) && lepus_abi_record_release(&frame, record) && destroyed == cloneAttempts + 3);
+        assert(!lepus_abi_record_release(&frame, record) && runtime.status != 0);
+        reset();
+        assert(!lepus_abi_record_probe(&frame, record, "c-api-test::Integer") && !runtime.status);
+        assert(!lepus_abi_record_probe(&frame, 0, "c-api-test::Integer") && !runtime.status);
+        assert(!lepus_abi_record_probe(&frame, record, "unknown::Type") && !runtime.status);
+        assert(!lepus_abi_record_probe(nullptr, record, "c-api-test::Integer"));
+        const auto automatic = lepus_abi_record_make_clonable(&frame, "c-api-test::AutomaticInteger",
+            new int(42), destroyInteger, cloneInteger);
+        assert(automatic && !runtime.status);
+        assert(lepus_abi_record_probe(&frame, automatic, "c-api-test::AutomaticInteger"));
+        assert(!lepus_abi_record_probe(&frame, automatic, "c-api-test::Integer") && !runtime.status);
+        lepus_abi_fail(&frame, "probe retains existing error");
+        const auto probeStatus = runtime.status;
+        const auto probeError = runtime.diagnostic;
+        assert(!lepus_abi_record_probe(&frame, 0, "unknown::Type"));
+        assert(runtime.status == probeStatus && runtime.diagnostic == probeError);
+        reset();
+        NativeCallContextImpl automaticHost(context, &invoker);
+        int automaticFailures = 0;
+        for (int point = 0; point < 32; ++point)
+        {
+            const auto before = destroyed;
+            arena.remaining = point;
+            std::int64_t attempted = 0;
+            try { attempted = automaticHost.cloneNativeRecord(automatic); }
+            catch (const std::bad_alloc &) {}
+            arena.remaining = -1;
+            if (attempted)
+            {
+                auto *value = static_cast<int *>(lepus_abi_record_borrow(&frame, attempted,
+                    "c-api-test::AutomaticInteger"));
+                assert(value && *value == 42);
+                *value = 91;
+                assert(*static_cast<int *>(lepus_abi_record_borrow(&frame, automatic,
+                    "c-api-test::AutomaticInteger")) == 42);
+                assert(lepus_abi_record_release(&frame, attempted) && destroyed == before + 1);
+                break;
+            }
+            ++automaticFailures;
+            assert(destroyed == before + 1);
+            reset();
+            assert(point != 31);
+        }
+        assert(automaticFailures > 0);
+        {
+            TransferPacket packet;
+            Memory::Set<std::int64_t> active;
+            assert(captureTransferObject(context, automatic, packet, active));
+            assert(packet.objects.size() == 1);
+            *static_cast<int *>(packet.objects.at(automatic).nativeRecord.get()) = 63;
+            Memory::Vector<std::int64_t> created;
+            std::int64_t restored = 0;
+            assert(restoreTransferObject(context, packet, automatic, active, created, &restored));
+            assert(created.size() == 1 && restored != automatic);
+            auto *value = static_cast<int *>(lepus_abi_record_borrow(&frame, restored,
+                "c-api-test::AutomaticInteger"));
+            assert(value && *value == 63);
+            *value = 78;
+            assert(*static_cast<int *>(packet.objects.at(automatic).nativeRecord.get()) == 63);
+            assert(*static_cast<int *>(lepus_abi_record_borrow(&frame, automatic,
+                "c-api-test::AutomaticInteger")) == 42);
+            assert(lepus_abi_record_release(&frame, restored));
+        }
+        int *conflictingPolicy = new int(7);
+        assert(!lepus_abi_record_make(&frame, "c-api-test::AutomaticInteger", conflictingPolicy, destroyInteger));
+        delete conflictingPolicy;
+        reset();
+        assert(lepus_abi_record_release(&frame, automatic));
+        for (auto cloner : {failedClone, aliasedClone})
+        {
+            const char *name = cloner == failedClone ? "c-api-test::FailedClone" : "c-api-test::AliasedClone";
+            const auto original = lepus_abi_record_make_clonable(&frame, name, new int(17), destroyInteger, cloner);
+            assert(original);
+            const auto before = destroyed;
+            assert(!automaticHost.cloneNativeRecord(original) && destroyed == before);
+            reset();
+            TransferPacket packet;
+            Memory::Set<std::int64_t> active;
+            assert(!captureTransferObject(context, original, packet, active) && destroyed == before);
+            reset();
+            assert(*static_cast<int *>(lepus_abi_record_borrow(&frame, original, name)) == 17);
+            assert(lepus_abi_record_release(&frame, original) && destroyed == before + 1);
+        }
+        std::printf("automatic C record copy: %d allocation failure points cleaned\n", automaticFailures);
+        const char binaryText[] = {'A', 0, char(255)};
+        const auto rawString = lepus_abi_string_bytes(&frame, binaryText, sizeof(binaryText));
+        assert(rawString && !runtime.status);
+        assert(lepus_abi_bytes(&frame, rawString, &view, &length) && length == sizeof(binaryText));
+        assert(std::memcmp(view, binaryText, length) == 0);
+        assert(lepus_abi_string_release(&frame, rawString));
+        assert(!lepus_abi_string_bytes(&frame, nullptr, 1) && runtime.status);
+        reset();
+        const unsigned char sourceBytes[] = {0, 255, 65};
+        const auto byteList = lepus_abi_list_from_bytes(&frame, sourceBytes, sizeof(sourceBytes));
+        assert(byteList && !runtime.status);
+        assert(lepus_abi_list_bytes(&frame, byteList, nullptr, 0, &length) && length == 3);
+        unsigned char outputBytes[] = {17, 17, 17};
+        assert(!lepus_abi_list_bytes(&frame, byteList, outputBytes, 2, &length) && length == 3 && runtime.status);
+        assert(outputBytes[0] == 17 && outputBytes[1] == 17 && outputBytes[2] == 17);
+        reset();
+        assert(lepus_abi_list_bytes(&frame, byteList, outputBytes, sizeof(outputBytes), &length));
+        assert(length == 3 && std::memcmp(outputBytes, sourceBytes, length) == 0);
+        assert(!lepus_abi_list_bytes(&frame, byteList, outputBytes, sizeof(outputBytes), nullptr) && runtime.status);
+        reset();
+        assert(lepus_abi_record_release(&frame, byteList));
+        assert(!lepus_abi_list_bytes(&frame, byteList, outputBytes, sizeof(outputBytes), &length) && runtime.status);
+        reset();
+        const auto emptyList = lepus_abi_list_from_bytes(&frame, nullptr, 0);
+        assert(emptyList && lepus_abi_list_bytes(&frame, emptyList, nullptr, 0, &length) && length == 0);
+        assert(lepus_abi_record_release(&frame, emptyList));
+        assert(!lepus_abi_list_from_bytes(&frame, nullptr, 1) && runtime.status);
+        reset();
+        assert(!lepus_abi_list_from_bytes(&frame, sourceBytes, SIZE_MAX) && runtime.status);
+        reset();
+        NativeCallContextImpl byteHost(context, &invoker);
+        for (const auto &invalid : {NativeValue::fromInt(-1), NativeValue::fromInt(256), NativeValue::fromFloat(1.0), NativeValue::fromText(Memory::String("bad"))})
+        {
+            const auto invalidList = collection_glue::makeList(byteHost);
+            assert(invalidList && collection_glue::listPush(byteHost, invalidList, invalid));
+            outputBytes[0] = 17;
+            assert(!lepus_abi_list_bytes(&frame, invalidList, outputBytes, sizeof(outputBytes), &length) && runtime.status && outputBytes[0] == 17);
+            reset();
+            assert(lepus_abi_record_release(&frame, invalidList));
+        }
+        const auto numericList = collection_glue::listStorageScalarOperation(byteHost, 9, 0, 0, 0, 0, 0, 0).bits;
+        assert(numericList);
+        collection_glue::listStorageScalarOperation(byteHost, 7, numericList, 255, 0, 0, 0, 0);
+        assert(lepus_abi_list_bytes(&frame, numericList, outputBytes, sizeof(outputBytes), &length) && length == 1 && outputBytes[0] == 255);
+        assert(lepus_abi_record_release(&frame, numericList));
+        int byteCreationFailures = 0;
+        for (int point = 0; point < 32; ++point)
+        {
+            arena.remaining = point;
+            const auto attempted = lepus_abi_list_from_bytes(&frame, sourceBytes, sizeof(sourceBytes));
+            arena.remaining = -1;
+            if (attempted) { assert(lepus_abi_record_release(&frame, attempted)); break; }
+            assert(runtime.status);
+            ++byteCreationFailures;
+            reset();
+            assert(point != 31);
+        }
+        assert(byteCreationFailures >= 3);
+        std::printf("C binary services: raw NUL bytes, atomic bounded output, numeric views and %d creation failure points passed\n", byteCreationFailures);
+        for (const char *format : {"json", "toml"})
+        {
+            const std::string prefix = std::string("std::") + format + "::__";
+            const auto call = [&](const char *operation, std::initializer_list<int64_t> arguments) {
+                auto entry = lepus_abi_resolve((prefix + operation).c_str(), nullptr);
+                assert(entry);
+                const unsigned char kinds[] = {LepusAbiSlotInteger, LepusAbiSlotInteger, LepusAbiSlotInteger};
+                assert(arguments.size() <= sizeof(kinds));
+                LepusAbiFrame invocation{&runtime, arguments.begin(), kinds, int64_t(arguments.size()), 0, 0};
+                entry(&invocation);
+                return invocation.result;
+            };
+            const std::string text = std::string(format) == "json" ? "{\"value\":[1,2,3]}" : "value = [1,2,3]\n";
+            const auto input = lepus_abi_string(&frame, text.data(), text.size());
+            const auto document = call("parse", {input});
+            assert(document && !runtime.status && call("valid", {document}));
+            assert(lepus_abi_string_release(&frame, input));
+            NativeCallContextImpl host(context, &invoker);
+            const auto copied = host.cloneNativeRecord(document);
+            assert(copied && copied != document);
+            TransferPacket packet;
+            Memory::Set<std::int64_t> active;
+            assert(captureTransferObject(context, document, packet, active));
+            assert(call("close", {document}) == 1 && call("close", {document}) == 0);
+            assert(!call("valid", {document}) && call("valid", {copied}));
+            Memory::Vector<std::int64_t> created;
+            int64_t restored = 0;
+            assert(restoreTransferObject(context, packet, document, active, created, &restored));
+            const auto dumped = call("dump", {restored, 0});
+            assert(dumped && !runtime.status);
+            assert(lepus_abi_bytes(&frame, dumped, &view, &length) && length);
+            assert(lepus_abi_string_release(&frame, dumped));
+            assert(lepus_abi_record_release(&frame, copied));
+            assert(lepus_abi_record_release(&frame, restored));
+            assert(!call("dump", {document, 0}) && runtime.status);
+            reset();
+            assert(lepus_abi_record_release(&frame, document));
+            int failures = 0;
+            for (int point = 0; point < 32; ++point)
+            {
+                arena.remaining = point;
+                const auto attempted = call("valueNew", {});
+                arena.remaining = -1;
+                if (attempted) { assert(lepus_abi_record_release(&frame, attempted)); break; }
+                assert(runtime.status && point != 31);
+                ++failures;
+                reset();
+            }
+            assert(failures >= 2);
+            std::printf("%s C records: independent copy, transfer, close and %d failure points passed\n", format, failures);
+        }
+        {
+            const auto call = [&](const char *name, std::initializer_list<int64_t> arguments) {
+                auto function = lepus_abi_resolve(name, nullptr);
+                assert(function);
+                const unsigned char kinds[] = {LepusAbiSlotInteger, LepusAbiSlotInteger, LepusAbiSlotInteger};
+                assert(arguments.size() <= sizeof(kinds));
+                LepusAbiFrame invocation{&runtime, arguments.begin(), kinds, int64_t(arguments.size()), 0, 0};
+                function(&invocation);
+                return invocation.result;
+            };
+            const auto empty = call("std::regex::__regexNew", {});
+            assert(empty && !call("std::regex::__regexValid", {empty}) && !runtime.status);
+            assert(lepus_abi_record_release(&frame, empty));
+            assert(!call("std::regex::__regexValid", {empty}) && !runtime.status);
+            assert(!call("std::regex::__regexValid", {0}) && !runtime.status);
+            const auto text = lepus_abi_string(&frame, "a+", 2);
+            const auto original = call("std::regex::__regexCompileHandle", {text});
+            assert(original && call("std::regex::__regexValid", {original}) && !runtime.status);
+            assert(lepus_abi_string_release(&frame, text));
+            TransferPacket packet;
+            Memory::Set<std::int64_t> active;
+            assert(captureTransferObject(context, original, packet, active));
+            NativeCallContextImpl host(context, &invoker);
+            const auto copy = host.cloneNativeRecord(original);
+            assert(copy && lepus_abi_record_release(&frame, original));
+            Memory::Vector<std::int64_t> created;
+            int64_t restored = 0;
+            assert(restoreTransferObject(context, packet, original, active, created, &restored));
+            const auto input = lepus_abi_string(&frame, "aaa", 3);
+            assert(call("std::regex::__regexFullMatch", {copy, input}) && !runtime.status);
+            assert(call("std::regex::__regexFullMatch", {restored, input}) && !runtime.status);
+            assert(lepus_abi_string_release(&frame, input));
+            assert(lepus_abi_record_release(&frame, copy) && lepus_abi_record_release(&frame, restored));
+            int failures = 0;
+            for (int point = 0; point < 32; ++point)
+            {
+                arena.remaining = point;
+                const auto attempted = call("std::regex::__regexNew", {});
+                arena.remaining = -1;
+                if (attempted) { assert(lepus_abi_record_release(&frame, attempted)); break; }
+                assert(runtime.status && point != 31);
+                ++failures;
+                reset();
+            }
+            assert(failures >= 2);
+            std::printf("regex C records: non-failing probe, shared immutable copies, transfer and %d failure points passed\n", failures);
+        }
+        {
+            const auto list = lepus_abi_list_from_bytes(&frame, nullptr, 0);
+            assert(list);
+            char text[] = {'A', 0, char(255)};
+            assert(lepus_abi_list_append_text(&frame, list, text, sizeof(text)));
+            text[0] = 'X';
+            assert(lepus_abi_list_append_text(&frame, list, nullptr, 0));
+            const std::string borrowedText = "中文";
+            const auto ownedInput = lepus_abi_string(&frame, borrowedText.data(), borrowedText.size());
+            assert(ownedInput && lepus_abi_bytes(&frame, ownedInput, &view, &length));
+            assert(lepus_abi_list_append_text(&frame, list, reinterpret_cast<const char *>(view), length));
+            assert(lepus_abi_string_release(&frame, ownedInput));
+            NativeCallContextImpl host(context, &invoker);
+            Memory::Vector<NativeValue> values;
+            assert(collection_glue::readList(host, list, values) && values.size() == 3);
+            assert(values[0].isText() && values[0].text.size() == 3 && values[0].text[0] == 'A' && values[0].text[1] == 0);
+            assert(values[1].isText() && values[1].text.empty());
+            assert(values[2].isText() && values[2].text == borrowedText.c_str());
+            const auto lease = collection_glue::listStorageScalarOperation(host, 13, list, 0, 0, 0, 0, 0).bits;
+            assert(lease && !lepus_abi_list_append_text(&frame, list, "forbidden", 9) && runtime.status);
+            reset();
+            assert(lepus_abi_record_release(&frame, lease));
+            assert(!lepus_abi_list_append_text(&frame, list, nullptr, 1) && runtime.status);
+            reset();
+            assert(!lepus_abi_list_append_text(&frame, list, "x", SIZE_MAX) && runtime.status);
+            reset();
+            assert(collection_glue::readList(host, list, values) && values.size() == 3);
+            assert(lepus_abi_record_release(&frame, list));
+            assert(!lepus_abi_list_append_text(&frame, list, "x", 1) && runtime.status);
+            reset();
+            int failures = 0;
+            const std::string payload(128, 'x');
+            for (int point = 0; point < 32; ++point)
+            {
+                const auto destination = lepus_abi_list_from_bytes(&frame, nullptr, 0);
+                assert(destination);
+                arena.remaining = point;
+                const bool appended = lepus_abi_list_append_text(&frame, destination, payload.data(), payload.size());
+                arena.remaining = -1;
+                if (!appended) { assert(runtime.status); ++failures; reset(); }
+                assert(collection_glue::readList(host, destination, values));
+                assert(values.size() == (appended ? 1u : 0u));
+                if (appended) assert(values[0].isText() && values[0].text == payload.c_str());
+                assert(lepus_abi_record_release(&frame, destination));
+                if (appended) break;
+                assert(point != 31);
+            }
+            assert(failures >= 2);
+            std::printf("C text append: raw bytes, independent storage, lease rejection and %d atomic failure points passed\n", failures);
+        }
+        {
+            const auto call = [&](const char *name, std::initializer_list<int64_t> arguments) {
+                auto function = lepus_abi_resolve(name, nullptr);
+                assert(function);
+                const unsigned char kinds[] = { LepusAbiSlotInteger, LepusAbiSlotInteger, LepusAbiSlotInteger };
+                assert(arguments.size() <= sizeof(kinds));
+                LepusAbiFrame invocation{ &runtime, arguments.begin(), kinds, int64_t(arguments.size()), 0, 0 };
+                function(&invocation);
+                return invocation.result;
+            };
+            const auto original = call("std::linear_algebra::__std_scalarNew", {});
+            assert(original && !runtime.status);
+            auto *storage = static_cast<scalar_buffer::Storage *>(
+                lepus_abi_record_probe(&frame, original, "std::linear_algebra::ScalarStorage"));
+            assert(storage && sizeof(scalar_buffer::Slot) < sizeof(NativeValue));
+            call("std::linear_algebra::__std_scalarPush__int64", { original, INT64_MIN });
+            assert(!runtime.status && call("std::linear_algebra::__std_scalarAt__int64", { original, 0 }) == INT64_MIN);
+            NativeCallContextImpl host(context, &invoker);
+            const auto copy = host.cloneNativeRecord(original);
+            assert(copy && !runtime.status);
+            TransferPacket packet;
+            Memory::Set<std::int64_t> active;
+            assert(captureTransferObject(context, original, packet, active));
+            const auto capacity = storage->values.capacity();
+            const auto data = storage->values.data();
+            call("std::linear_algebra::__std_scalarClear", { original });
+            assert(!runtime.status && storage->values.empty() && storage->values.capacity() == capacity && storage->values.data() == data);
+            assert(call("std::linear_algebra::__std_scalarAt__int64", { copy, 0 }) == INT64_MIN);
+            assert(lepus_abi_record_release(&frame, original));
+            Memory::Vector<std::int64_t> created;
+            int64_t restored = 0;
+            assert(restoreTransferObject(context, packet, original, active, created, &restored));
+            assert(call("std::linear_algebra::__std_scalarAt__int64", { restored, 0 }) == INT64_MIN);
+            call("std::linear_algebra::__std_scalarSet__int64", { copy, -1, 4 });
+            assert(runtime.status);
+            reset();
+            assert(call("std::linear_algebra::__std_scalarAt__int64", { copy, 0 }) == INT64_MIN);
+            assert(lepus_abi_record_release(&frame, copy) && lepus_abi_record_release(&frame, restored));
+            call("std::linear_algebra::__std_scalarDrop", { original });
+            call("std::linear_algebra::__std_scalarDrop", { 0 });
+            assert(!runtime.status);
+            int failures = 0;
+            for (int point = 0; point < 32; ++point)
+            {
+                arena.remaining = point;
+                const auto attempted = call("std::linear_algebra::__std_scalarCopy", { 0 });
+                arena.remaining = -1;
+                if (attempted)
+                {
+                    assert(lepus_abi_record_release(&frame, attempted));
+                    break;
+                }
+                assert(runtime.status && point != 31);
+                ++failures;
+                reset();
+            }
+            assert(failures >= 2);
+            const auto empty = call("std::linear_algebra::__std_scalarNew", {});
+            auto *emptyStorage = static_cast<scalar_buffer::Storage *>(
+                lepus_abi_record_probe(&frame, empty, "std::linear_algebra::ScalarStorage"));
+            assert(emptyStorage && emptyStorage->values.capacity() == 0);
+            arena.remaining = 0;
+            call("std::linear_algebra::__std_scalarPush__int64", { empty, 42 });
+            arena.remaining = -1;
+            assert(runtime.status && emptyStorage->values.empty() && emptyStorage->values.capacity() == 0);
+            reset();
+            assert(lepus_abi_record_release(&frame, empty));
+            std::printf("C scalar buffers: %zu-byte slots, retained capacity, independent clones, transfer and %d adoption failures passed\n",
+                        sizeof(scalar_buffer::Slot), failures);
+        }
+        {
+            const auto call = [&](const char *name, std::initializer_list<int64_t> arguments) {
+                auto function = lepus_abi_resolve(name, nullptr);
+                assert(function);
+                const unsigned char kinds[] = {LepusAbiSlotInteger, LepusAbiSlotInteger, LepusAbiSlotInteger};
+                assert(arguments.size() <= sizeof(kinds));
+                LepusAbiFrame invocation{&runtime, arguments.begin(), kinds, int64_t(arguments.size()), 0, 0};
+                function(&invocation);
+                return invocation.result;
+            };
+            const auto put = [&](int64_t address, int64_t value) {
+                unsigned char bytes[8];
+                for (unsigned i = 0; i < 8; ++i) bytes[i] = unsigned(uint64_t(value) >> (8 * i));
+                assert(lepus_abi_write(&frame, address, bytes, sizeof(bytes)));
+            };
+            const auto take = [&](int64_t address) {
+                unsigned char bytes[8];
+                assert(lepus_abi_read(&frame, address, bytes, sizeof(bytes)));
+                uint64_t value = 0;
+                for (unsigned i = 0; i < 8; ++i) value |= uint64_t(bytes[i]) << (8 * i);
+                return int64_t(value);
+            };
+            const auto input = lepus_abi_temporary(&frame, 24);
+            const auto output = lepus_abi_temporary(&frame, 72);
+            const auto values = call("std::linear_algebra::__std_scalarNew", {});
+            assert(input && output && values);
+            for (auto value : {1, 0, 0, 1}) call("std::linear_algebra::__std_scalarPush__int64", {values, value});
+            put(input, 2); put(input + 8, 2); put(input + 16, values);
+            int failures = 0;
+            bool partialResult = false;
+            for (int point = 0; point < 64; ++point)
+            {
+                for (int slot = 0; slot < 9; ++slot) put(output + slot * 8, 0);
+                arena.remaining = point;
+                call("std::linear_algebra::__luDecomposeInto", {input, output});
+                arena.remaining = -1;
+                const bool failed = runtime.status != 0;
+                int owned = 0;
+                reset();
+                for (int slot : {2, 5, 8})
+                {
+                    const auto handle = take(output + slot * 8);
+                    if (handle) { ++owned; assert(lepus_abi_record_release(&frame, handle)); }
+                }
+                if (!failed) { assert(owned == 3); break; }
+                assert(point != 63);
+                partialResult = partialResult || owned != 0;
+                ++failures;
+            }
+            assert(failures >= 3 && partialResult);
+            put(input, 3);
+            call("std::linear_algebra::__svdInto", {input, output});
+            assert(runtime.status && context.error.find("矩阵存储长度与维度不匹配") != Memory::String::npos);
+            reset();
+            assert(lepus_abi_record_release(&frame, values));
+            assert(lepus_abi_temporary_release(&frame, input) && lepus_abi_temporary_release(&frame, output));
+            std::printf("C matrix results: %d allocation failures including partial ownership and malformed shape rejection passed\n", failures);
+        }
+        {
+            NativeServices services;
+            services.emplace("native.rev.v1", &objects.nativeRecordRevision);
+            context.hostServices = &services;
+            int64_t source[] = {0, 1, 65, 255, -128, 127, -32768, 32767, -2147483647 - 1,
+                                2147483647, INT64_MIN, INT64_MAX, -1,
+                                0, int64_t(UINT64_C(0x8000000000000000)), int64_t(UINT64_C(0x7ff0000000000000)),
+                                int64_t(UINT64_C(0xfff0000000000000)), int64_t(UINT64_C(0x7ff8000000001234)), 1};
+            unsigned char sourceKinds[sizeof(source) / sizeof(source[0])] = {};
+            for (std::size_t i = 13; i < sizeof(sourceKinds); ++i) sourceKinds[i] = LepusAbiSlotFloat;
+            const auto handle = lepus_abi_list_from_numbers(&frame, source, sourceKinds, sizeof(sourceKinds));
+            assert(handle && !runtime.status);
+            std::size_t required = 0;
+            assert(lepus_abi_list_numbers(&frame, handle, nullptr, nullptr, 0, &required) && required == sizeof(sourceKinds));
+            int64_t copied[sizeof(sourceKinds)] = {};
+            unsigned char copiedKinds[sizeof(sourceKinds)] = {};
+            assert(lepus_abi_list_numbers(&frame, handle, copied, copiedKinds, sizeof(copiedKinds), &required));
+            assert(std::memcmp(source, copied, sizeof(source)) == 0 &&
+                   std::memcmp(sourceKinds, copiedKinds, sizeof(sourceKinds)) == 0);
+            NativeCallContextImpl host(context, &invoker);
+            collection_glue::NumericListView numeric;
+            collection_glue::numericListView(host, handle, &numeric);
+            const auto *disabled = std::getenv("LEPUS_NO_NUMERIC_LIST_STORAGE");
+            assert((numeric.header != nullptr) == !(disabled && *disabled));
+            copied[0] = 918; copiedKinds[0] = 17;
+            assert(!lepus_abi_list_numbers(&frame, handle, copied, copiedKinds, 1, &required) &&
+                   required == sizeof(sourceKinds) && copied[0] == 918 && copiedKinds[0] == 17);
+            reset();
+            source[0] = 99;
+            assert(lepus_abi_list_numbers(&frame, handle, copied, copiedKinds, sizeof(copiedKinds), &required) && copied[0] == 0);
+            const auto clone = host.cloneNativeRecord(handle);
+            assert(clone && lepus_abi_record_release(&frame, handle));
+            assert(lepus_abi_list_numbers(&frame, clone, copied, copiedKinds, sizeof(copiedKinds), &required) && copied[0] == 0);
+            assert(lepus_abi_record_release(&frame, clone));
+            assert(!lepus_abi_list_numbers(&frame, handle, copied, copiedKinds, sizeof(copiedKinds), &required));
+            reset();
+            const unsigned char invalidKind[] = {2};
+            assert(!lepus_abi_list_from_numbers(&frame, source, invalidKind, 1));
+            reset();
+            assert(!lepus_abi_list_from_numbers(&frame, nullptr, nullptr, 1));
+            reset();
+            assert(!lepus_abi_list_from_numbers(&frame, source, nullptr, SIZE_MAX));
+            reset();
+            const auto empty = lepus_abi_list_from_numbers(&frame, nullptr, nullptr, 0);
+            assert(empty && lepus_abi_list_numbers(&frame, empty, nullptr, nullptr, 0, &required) && !required);
+            assert(lepus_abi_record_release(&frame, empty));
+            const int64_t integers[] = {0, 65, 255};
+            const auto integerList = lepus_abi_list_from_numbers(&frame, integers, nullptr, 3);
+            unsigned char bytes[3] = {};
+            assert(integerList && lepus_abi_list_bytes(&frame, integerList, bytes, sizeof(bytes), &required) &&
+                   required == 3 && bytes[0] == 0 && bytes[1] == 65 && bytes[2] == 255);
+            assert(lepus_abi_record_release(&frame, integerList));
+            const auto textList = lepus_abi_list_from_bytes(&frame, nullptr, 0);
+            assert(textList && lepus_abi_list_append_text(&frame, textList, "owned", 5));
+            copied[0] = 918; copiedKinds[0] = 17;
+            assert(!lepus_abi_list_numbers(&frame, textList, copied, copiedKinds, sizeof(copiedKinds), &required) &&
+                   copied[0] == 918 && copiedKinds[0] == 17);
+            reset();
+            assert(lepus_abi_record_release(&frame, textList));
+            int failures = 0;
+            for (int point = 0; point < 64; ++point)
+            {
+                arena.remaining = point;
+                const auto attempted = lepus_abi_list_from_numbers(&frame, source, sourceKinds, sizeof(sourceKinds));
+                arena.remaining = -1;
+                if (attempted) { assert(lepus_abi_record_release(&frame, attempted)); break; }
+                assert(runtime.status && point != 63);
+                ++failures;
+                reset();
+            }
+            assert(failures >= 3);
+            std::printf("C numeric lists: scalar extrema, IEEE bit patterns, compact/fallback layout, atomic outputs, copies and %d failure points passed\n", failures);
+            context.hostServices = nullptr;
+        }
+        {
+            NativeCallContextImpl host(context, &invoker);
+            const unsigned char initial[] = {1, 2};
+            const int64_t extra[] = {3, 4, 5};
+            const auto list = lepus_abi_list_from_bytes(&frame, initial, 2);
+            assert(list && lepus_abi_list_append_numbers(&frame, list, extra, nullptr, 3));
+            assert(collection_glue::listStorageScalarOperation(host, 1, list, 0, 0, 0, 0, 0).bits == 8);
+            unsigned char copied[5] = {};
+            std::size_t count = 0;
+            assert(lepus_abi_list_bytes(&frame, list, copied, 5, &count) && count == 5 && copied[0] == 1 && copied[4] == 5);
+            const unsigned char invalidKinds[] = {0, 2, 0};
+            assert(!lepus_abi_list_append_numbers(&frame, list, extra, invalidKinds, 3));
+            reset();
+            const auto lease = collection_glue::listStorageScalarOperation(host, 13, list, 0, 0, 0, 0, 0).bits;
+            assert(lease && !lepus_abi_list_append_numbers(&frame, list, extra, nullptr, 3));
+            reset();
+            assert(lepus_abi_record_release(&frame, lease));
+            assert(!lepus_abi_list_append_numbers(&frame, list, extra, nullptr, SIZE_MAX));
+            reset();
+            assert(lepus_abi_list_bytes(&frame, list, copied, 5, &count) && count == 5 && copied[4] == 5);
+            const int64_t more[] = {6, 7, 8, 9};
+            arena.remaining = 0;
+            assert(!lepus_abi_list_append_numbers(&frame, list, more, nullptr, 4));
+            arena.remaining = -1;
+            reset();
+            assert(lepus_abi_list_bytes(&frame, list, copied, 5, &count) && count == 5 && copied[4] == 5);
+            assert(lepus_abi_record_release(&frame, list));
+            assert(!lepus_abi_list_append_numbers(&frame, list, extra, nullptr, 3));
+            reset();
+            std::puts("C numeric append: existing identity, repeated growth, lease rejection and atomic failures passed");
+        }
+        {
+            const auto call = [&](const char *name, std::initializer_list<int64_t> arguments) {
+                auto function = lepus_abi_resolve(name, nullptr);
+                assert(function);
+                const unsigned char kinds[] = {LepusAbiSlotInteger, LepusAbiSlotInteger, LepusAbiSlotInteger};
+                assert(arguments.size() <= sizeof(kinds));
+                LepusAbiFrame invocation{&runtime, arguments.begin(), kinds, int64_t(arguments.size()), 0, 0};
+                function(&invocation);
+                return invocation.result;
+            };
+            const auto image = call("std::image::__std_imageMake", {1, 1});
+            assert(image && !runtime.status);
+            call("std::image::__std_imageSetByte", {image, 0, 17});
+            NativeCallContextImpl host(context, &invoker);
+            const auto copy = host.cloneNativeRecord(image);
+            assert(copy);
+            TransferPacket packet;
+            Memory::Set<std::int64_t> active;
+            assert(captureTransferObject(context, image, packet, active));
+            call("std::image::__std_imageSetByte", {image, 0, 29});
+            assert(call("std::image::__std_imageByte", {copy, 0}) == 17);
+            assert(lepus_abi_record_release(&frame, image));
+            Memory::Vector<std::int64_t> created;
+            int64_t restored = 0;
+            assert(restoreTransferObject(context, packet, image, active, created, &restored));
+            assert(call("std::image::__std_imageByte", {restored, 0}) == 17 &&
+                   call("std::image::__std_imageWidth", {restored}) == 1 &&
+                   call("std::image::__std_imageHeight", {restored}) == 1);
+            assert(lepus_abi_record_release(&frame, copy) && lepus_abi_record_release(&frame, restored));
+            int failures = 0;
+            for (int point = 0; point < 32; ++point)
+            {
+                arena.remaining = point;
+                const auto attempted = call("std::image::__std_imageMake", {1, 1});
+                arena.remaining = -1;
+                if (attempted) { assert(lepus_abi_record_release(&frame, attempted)); break; }
+                assert(runtime.status && point != 31);
+                ++failures;
+                reset();
+            }
+            assert(failures >= 3);
+            std::printf("C image records: independent copies, transfer and %d creation failure points passed\n", failures);
+        }
+        {
+            const auto call = [&](const char *name, std::initializer_list<int64_t> arguments) {
+                auto function = lepus_abi_resolve(name, nullptr);
+                assert(function);
+                const unsigned char kinds[] = {LepusAbiSlotInteger, LepusAbiSlotInteger, LepusAbiSlotInteger};
+                assert(arguments.size() <= sizeof(kinds));
+                LepusAbiFrame invocation{&runtime, arguments.begin(), kinds, int64_t(arguments.size()), 0, 0};
+                function(&invocation);
+                return invocation.result;
+            };
+            const auto loopback = lepus_abi_string(&frame, "127.0.0.1", 9);
+            const auto listener = call("std::net::__std_netListen", {loopback, 0, 8});
+            assert(listener && call("std::net::__std_netIsOpen", {listener}) && !runtime.status);
+            const auto port = call("std::net::__std_netLocalPort", {listener});
+            const auto client = call("std::net::__std_netConnect", {loopback, port, 2000});
+            const auto peer = call("std::net::__std_netAccept", {listener, 2000});
+            assert(client && peer && !runtime.status);
+            NativeCallContextImpl host(context, &invoker);
+            assert(!host.cloneNativeRecord(client));
+            reset();
+            const char payload[] = {'A', 0, char(255), 'Z'};
+            const auto text = lepus_abi_string_bytes(&frame, payload, sizeof(payload));
+            assert(text && call("std::net::__std_netSend", {client, text}) == sizeof(payload));
+            std::string combined;
+            while (combined.size() < sizeof(payload))
+            {
+                const auto received = call("std::net::__std_netReceive", {peer, int64_t(sizeof(payload) - combined.size())});
+                assert(received && !runtime.status && lepus_abi_bytes(&frame, received, &view, &length) && length);
+                combined.append(reinterpret_cast<const char *>(view), length);
+                assert(lepus_abi_string_release(&frame, received));
+            }
+            assert(combined.size() == sizeof(payload) && std::memcmp(combined.data(), payload, sizeof(payload)) == 0);
+            assert(lepus_abi_string_release(&frame, text));
+            assert(lepus_abi_record_release(&frame, peer) && lepus_abi_record_release(&frame, client) &&
+                   lepus_abi_record_release(&frame, listener));
+            int failures = 0;
+            for (int point = 0; point < 32; ++point)
+            {
+                const auto before = systemHandleCount();
+                arena.remaining = point;
+                const auto attempted = call("std::net::__std_netListen", {loopback, 0, 8});
+                arena.remaining = -1;
+                if (attempted) assert(lepus_abi_record_release(&frame, attempted));
+                assert(systemHandleCount() == before);
+                if (attempted) break;
+                assert(runtime.status && point != 31);
+                ++failures;
+                reset();
+            }
+            assert(failures >= 2);
+            const auto hostname = lepus_abi_string(&frame, "example.com", 11);
+            int asyncFailures = 0;
+            for (int point = 0; point < 32; ++point)
+            {
+                arena.remaining = point;
+                const auto attempted = call("std::net::__std_netConnectAsync", {hostname, 80, 2000});
+                arena.remaining = -1;
+                if (attempted) { assert(lepus_abi_record_release(&frame, attempted)); break; }
+                assert(runtime.status && point != 31);
+                ++asyncFailures;
+                reset();
+            }
+            assert(asyncFailures > failures);
+            assert(lepus_abi_string_release(&frame, loopback) && lepus_abi_string_release(&frame, hostname));
+            std::printf("C TCP: raw NUL/255 payload, exclusive records, %d socket adoption and %d async failure points cleaned\n",
+                        failures, asyncFailures);
+        }
+        {
+            int32_t resultIsFloat = 0;
+            const auto call = [&](const char *name, std::initializer_list<int64_t> arguments) {
+                auto function = lepus_abi_resolve(name, nullptr);
+                assert(function);
+                const unsigned char kinds[] = {LepusAbiSlotInteger, LepusAbiSlotInteger, LepusAbiSlotInteger,
+                                               LepusAbiSlotInteger, LepusAbiSlotInteger};
+                assert(arguments.size() <= sizeof(kinds));
+                LepusAbiFrame invocation{&runtime, arguments.begin(), kinds, int64_t(arguments.size()), 0, 0};
+                function(&invocation);
+                resultIsFloat = invocation.resultIsFloat;
+                return invocation.result;
+            };
+            const std::string path = std::string(argv[1]) + ".sqlite";
+            const auto pathText = lepus_abi_string(&frame, path.data(), path.size());
+            const auto connection = call("std::sql::__sqlOpenSqlite", {pathText});
+            assert(connection >= 0 && !runtime.status);
+            const auto owner = call("std::sql::__sqlOwn", {connection, 1});
+            assert(owner && call("std::sql::__sqlOwnerState", {owner, 3}) && !runtime.status);
+            NativeCallContextImpl host(context, &invoker);
+            assert(!host.cloneNativeRecord(owner));
+            reset();
+            const char query[] = "SELECT ? AS number, ? AS text, ? AS real, ? AS absent";
+            const char parameters[] = "[-9223372036854775808,\"A\\u0000B\",1.25,null]";
+            const auto sql = lepus_abi_string(&frame, query, sizeof(query) - 1);
+            const auto params = lepus_abi_string(&frame, parameters, sizeof(parameters) - 1);
+            assert(sql && params);
+            const auto result = call("std::sql::__sqlExecBound", {connection, sql, params});
+            assert(result >= 0 && !runtime.status && call("std::sql::__sqlRowCount", {result}) == 1 &&
+                   call("std::sql::__sqlColCount", {result}) == 4);
+            assert(call("std::sql::__sqlCellInt", {result, 0, 0}) == INT64_MIN && !resultIsFloat);
+            const auto bits = call("std::sql::__sqlCellReal", {result, 0, 2});
+            double real = 0;
+            std::memcpy(&real, &bits, sizeof(real));
+            assert(resultIsFloat && real == 1.25);
+            const auto text = call("std::sql::__sqlCellText", {result, 0, 1});
+            assert(text && lepus_abi_bytes(&frame, text, &view, &length) && length == 3 &&
+                   view[0] == 'A' && view[1] == 0 && view[2] == 'B');
+            assert(call("std::sql::__sqlCellKind", {result, 0, 3}) == 0);
+            assert(lepus_abi_string_release(&frame, text) && lepus_abi_string_release(&frame, sql) &&
+                   lepus_abi_string_release(&frame, params));
+            assert(call("std::sql::__sqlFree", {result}) == 0 && !runtime.status);
+            assert(lepus_abi_record_release(&frame, owner));
+            int failures = 0;
+            for (int point = 0; point < 32; ++point)
+            {
+                const auto before = systemHandleCount();
+                const auto raw = call("std::sql::__sqlOpenSqlite", {pathText});
+                assert(raw >= 0 && !runtime.status);
+                arena.remaining = point;
+                const auto adopted = call("std::sql::__sqlOwn", {raw, 1});
+                arena.remaining = -1;
+                if (adopted) assert(lepus_abi_record_release(&frame, adopted));
+                assert(systemHandleCount() == before);
+                if (adopted) break;
+                assert(runtime.status && point != 31);
+                ++failures;
+                reset();
+            }
+            assert(failures >= 2);
+            assert(lepus_abi_string_release(&frame, pathText));
+            assert(std::filesystem::remove(std::filesystem::u8path(path)));
+            std::printf("C SQLite: bound int64/real/NUL text/null, exclusive owner and %d adoption failure points cleaned\n", failures);
+        }
+        {
+            const auto call = [&](const char *name,std::initializer_list<int64_t> values) {
+                std::vector<int64_t> slots(values);std::vector<unsigned char> kinds(slots.size(),LepusAbiSlotInteger);
+                LepusAbiFrame operation{&runtime,slots.data(),kinds.data(),static_cast<int64_t>(slots.size()),0,0};
+                const auto entry=lepus_abi_resolve(name,nullptr);assert(entry);entry(&operation);return operation.result;
+            };
+            const auto textOf = [&](int64_t record) {
+                const auto text=call("__std_cas_text",{record,0});assert(text&&!runtime.status);
+                assert(lepus_abi_bytes(&frame,text,&view,&length));
+                std::string result(reinterpret_cast<const char*>(view),length);
+                assert(lepus_abi_string_release(&frame,text));return result;
+            };
+            const auto input=lepus_abi_string(&frame,"x^2+1",5);assert(input);
+            const auto original=call("__std_cas_parse",{input});assert(original&&!runtime.status);
+            const auto expected=textOf(original);
+            const auto copy=call("std::cas::__std_cas_copy",{original});assert(copy&&!runtime.status);
+            const auto child=call("__std_cas_child",{original,0});assert(child&&!runtime.status);
+            const auto childText=textOf(child);
+            TransferPacket packet;Memory::Set<int64_t> active;
+            assert(captureTransferObject(context,original,packet,active));
+            assert(lepus_abi_record_release(&frame,original));
+            assert(textOf(copy)==expected&&textOf(child)==childText);
+            call("__std_cas_drop",{copy});assert(!runtime.status);
+            int64_t restored=0;Memory::Vector<int64_t> created;
+            assert(restoreTransferObject(context,packet,original,active,created,&restored));
+            assert(textOf(restored)==expected&&textOf(child)==childText);
+            value_text::Shape shape;shape.kind='O';const auto encoded=value_text::encode(shape);
+            const auto layout=lepus_abi_string(&frame,encoded.data(),encoded.size());assert(layout);
+            const auto display=nativeInt(valueToString(context,{Slot::fromInt(restored),Slot::fromInt(layout)}));
+            assert(display&&!runtime.status&&lepus_abi_bytes(&frame,display,&view,&length));
+            assert(std::string(reinterpret_cast<const char*>(view),length)==expected);
+            assert(lepus_abi_string_release(&frame,display)&&lepus_abi_string_release(&frame,layout));
+            call("__std_cas_child",{restored,-1});assert(runtime.status);reset();
+            int64_t bad=0;unsigned char floating=LepusAbiSlotFloat;
+            LepusAbiFrame malformed{&runtime,&bad,&floating,1,0,0};
+            lepus_abi_resolve("__std_cas_parse",nullptr)(&malformed);assert(runtime.status&&!malformed.result);reset();
+            malformed.count=0;malformed.slots=nullptr;malformed.kinds=nullptr;
+            lepus_abi_resolve("__std_cas_parse",nullptr)(&malformed);assert(runtime.status&&!malformed.result);reset();
+            assert(lepus_abi_record_release(&frame,restored)&&lepus_abi_record_release(&frame,child));
+            assert(lepus_abi_string_release(&frame,input));
+            std::puts("C CAS: immutable roots, retained children, copies, transfer, default text and invalid calls passed");
+        }
+        {
+            const auto call = [&](const char *name,std::initializer_list<int64_t> values) {
+                std::vector<int64_t> slots(values);
+                std::vector<unsigned char> kinds(slots.size(),LepusAbiSlotInteger);
+                LepusAbiFrame operation{&runtime,slots.data(),kinds.data(),static_cast<int64_t>(slots.size()),0,0};
+                const auto entry=lepus_abi_resolve(name,nullptr);assert(entry);entry(&operation);return operation.result;
+            };
+            for(const auto *prefix:{"bint","bfloat"}) {
+                const std::string name=std::string("__std_")+prefix;
+                const auto input=lepus_abi_string(&frame,"123456789012345678901234567890",30);assert(input);
+                const auto original=call((name+"_from_str").c_str(),{input});assert(original&&!runtime.status);
+                const auto copy=call((name+"_copy").c_str(),{original});assert(copy&&!runtime.status);
+                TransferPacket packet;Memory::Set<int64_t> active;
+                assert(captureTransferObject(context,original,packet,active));
+                assert(lepus_abi_record_release(&frame,original));
+                int64_t restored=0;Memory::Vector<int64_t> created;
+                assert(restoreTransferObject(context,packet,original,active,created,&restored));
+                for(auto value:{copy,restored}) {
+                    const auto text=call((name+"_str").c_str(),{value});assert(text&&!runtime.status);
+                    assert(lepus_abi_bytes(&frame,text,&view,&length)&&std::string(reinterpret_cast<const char*>(view),length)==(std::string(prefix)=="bint"?"123456789012345678901234567890":"1.2345678901234567890123456789e+29"));
+                    assert(lepus_abi_string_release(&frame,text));
+                    call((name+"_drop").c_str(),{value});assert(!runtime.status);
+                }
+                int failures=0;
+                for(int point=0;point<64;++point) {
+                    arena.remaining=point;
+                    const auto value=call((name+"_from_str").c_str(),{input});
+                    arena.remaining=-1;
+                    if(value) {assert(lepus_abi_record_release(&frame,value));assert(!runtime.status);break;}
+                    assert(runtime.status&&point!=63);++failures;reset();
+                }
+                assert(failures>=2);
+                assert(lepus_abi_string_release(&frame,input));
+                int64_t wrong=0;unsigned char floating=LepusAbiSlotFloat;
+                LepusAbiFrame malformed{&runtime,&wrong,&floating,1,0,0};
+                lepus_abi_resolve((name+"_from_uint").c_str(),nullptr)(&malformed);
+                assert(runtime.status&&!malformed.result);reset();
+                for (auto *entry : {"_from_int","_from_flt","_from_str"}) {
+                    malformed.count=0;malformed.slots=nullptr;malformed.kinds=nullptr;
+                    lepus_abi_resolve((name+entry).c_str(),nullptr)(&malformed);
+                    assert(runtime.status&&!malformed.result);reset();
+                }
+                std::printf("C %s: independent copy, transfer, wrong slots and %d allocation failure points passed\n",prefix,failures);
+            }
+        }
+        {
+            value_text::Shape shape;
+            shape.kind = 'O';
+            const auto encoded = value_text::encode(shape);
+            const auto layout = lepus_abi_string(&frame, encoded.data(), encoded.size());
+            assert(layout);
+            const auto render = [&](int64_t handle) {
+                const auto output = nativeInt(valueToString(context, {Slot::fromInt(handle), Slot::fromInt(layout)}));
+                if (!context.error.empty()) { assert(!output); return std::string(); }
+                assert(output && lepus_abi_bytes(&frame, output, &view, &length));
+                std::string text(reinterpret_cast<const char *>(view), length);
+                assert(lepus_abi_string_release(&frame, output));
+                return text;
+            };
+            std::string text(4096, 'x');
+            text += "中文";
+            text.push_back(0); text.push_back(char(255));
+            const auto original = lepus_abi_record_make_textual(&frame, "c-api-test::Text", new TextRecord{text},
+                destroyTextRecord, cloneTextRecord, formatTextRecord);
+            assert(original && render(original) == text && textFormatCalls == 2);
+            NativeCallContextImpl host(context, &invoker);
+            const auto copy = host.cloneNativeRecord(original);
+            assert(copy && render(copy) == text);
+            TransferPacket packet;
+            Memory::Set<std::int64_t> active;
+            assert(captureTransferObject(context, original, packet, active));
+            assert(lepus_abi_record_release(&frame, original));
+            Memory::Vector<std::int64_t> created;
+            int64_t restored = 0;
+            assert(restoreTransferObject(context, packet, original, active, created, &restored));
+            assert(render(restored) == text);
+            assert(lepus_abi_record_release(&frame, copy) && lepus_abi_record_release(&frame, restored));
+            TextRecord rejected{"caller-owned"};
+            const auto before = textDestroyed;
+            assert(!lepus_abi_record_make_clonable(&frame, "c-api-test::Text", &rejected, destroyTextRecord, cloneTextRecord));
+            reset();
+            assert(!lepus_abi_record_make_textual(&frame, "c-api-test::Text", &rejected,
+                destroyTextRecord, cloneTextRecord, failTextRecord) && textDestroyed == before);
+            reset();
+            assert(!lepus_abi_record_make_textual(&frame, "c-api-test::NoFormatter", &rejected,
+                destroyTextRecord, cloneTextRecord, nullptr) && textDestroyed == before);
+            reset();
+            const auto empty = lepus_abi_record_make_textual(&frame, "c-api-test::Text", new TextRecord{},
+                destroyTextRecord, cloneTextRecord, formatTextRecord);
+            assert(empty && render(empty).empty() && !runtime.status);
+            assert(lepus_abi_record_release(&frame, empty));
+            for (auto formatter : {failTextRecord, oversizedTextRecord, growingTextRecord})
+            {
+                const auto name = formatter == failTextRecord ? "c-api-test::FailedText" :
+                    formatter == oversizedTextRecord ? "c-api-test::OversizedText" : "c-api-test::GrowingText";
+                const auto record = lepus_abi_record_make_textual(&frame, name, new TextRecord{},
+                    destroyTextRecord, nullptr, formatter);
+                assert(record && render(record).empty() && !context.error.empty());
+                reset();
+                assert(lepus_abi_record_release(&frame, record));
+            }
+            assert(lepus_abi_string_release(&frame, layout));
+            std::puts("C record text: raw/empty/long output, independent copies, transfer, immutable policies and invalid callbacks passed");
+        }
+        {
+            const std::string path = argv[1];
+            const auto pathText = lepus_abi_string(&frame, path.data(), path.size());
+            const auto modeText = lepus_abi_string(&frame, "wb", 2);
+            assert(pathText && modeText);
+            const auto open = lepus_abi_resolve("__std_file_try_open", nullptr);
+            assert(open);
+            const int64_t arguments[] = {pathText, modeText};
+            const unsigned char kinds[] = {LepusAbiSlotInteger, LepusAbiSlotInteger};
+            LepusAbiFrame invocation{&runtime, arguments, kinds, 2, 0, 0};
+            open(&invocation);
+            assert(invocation.result && !runtime.status);
+            NativeCallContextImpl host(context, &invoker);
+            assert(!host.cloneNativeRecord(invocation.result));
+            reset();
+            assert(lepus_abi_record_release(&frame, invocation.result));
+            int failures = 0;
+            for (int point = 0; point < 32; ++point)
+            {
+                const auto before = systemHandleCount();
+                invocation.result = 0;
+                arena.remaining = point;
+                open(&invocation);
+                arena.remaining = -1;
+                const auto handle = invocation.result;
+                if (handle) assert(lepus_abi_record_release(&frame, handle));
+                assert(systemHandleCount() == before);
+                if (handle) break;
+                assert(runtime.status && point != 31);
+                ++failures;
+                reset();
+            }
+            assert(failures >= 2);
+            assert(lepus_abi_string_release(&frame, pathText) && lepus_abi_string_release(&frame, modeText));
+            assert(std::filesystem::remove(std::filesystem::u8path(path)));
+            std::printf("C files: non-copyable resource and %d adoption failures leave system handle count unchanged\n", failures);
+        }
+    }
+    assert(arena.stats().liveBlocks == 0);
+    std::puts("C services: buffered strings, memory ranges, borrowed invoker, errors and records passed");
+}

@@ -1,0 +1,18 @@
+void increment(int64 mut& value) { *value += 1; }
+
+void main() {
+    let slots = RawStorage<int64>::allocate(2);
+    int64 index = 0;
+    unsafe {
+        initAt(slots.pointer(0), 40);
+        initAt(slots.pointer(1), 9);
+        withBorrowAt(slots.pointer(index), increment);
+        int64 mut& value = borrowAt(slots.pointer(0));
+        *value += 1;
+        assert(takeAt(slots.pointer(1)) == 9);
+        assert(*value == 42);
+        assert(takeAt(slots.pointer(0)) == 42);
+    }
+    slots.close();
+    println("raw slot borrow OK");
+}

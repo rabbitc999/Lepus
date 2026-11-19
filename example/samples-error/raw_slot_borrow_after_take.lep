@@ -1,0 +1,10 @@
+void main() {
+    let storage = RawStorage<int64>::allocate(1);
+    unsafe {
+        let pointer = storage.pointer(0);
+        initAt(pointer, 4);
+        int64 mut& value = borrowAt(pointer);
+        takeAt(storage.pointer(0));
+        println("{}", *value);
+    }
+}

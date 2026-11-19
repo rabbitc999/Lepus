@@ -1,0 +1,1 @@
+lepus: example/samples-error/reference_null.lep 第 1 行第 79 列：null 只能使用 == 或 != 与裸指针比较

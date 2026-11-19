@@ -1,0 +1,9 @@
+$macro invalid(input: expr) -> stmt {
+$let value = 0;
+$set value = input;
+}
+
+void main() {
+    int64 runtime = 2;
+    $invalid(runtime);
+}

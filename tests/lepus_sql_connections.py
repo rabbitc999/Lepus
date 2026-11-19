@@ -1,0 +1,30 @@
+"""用明确标注的客户端 ABI 夹具验证 MySQL/MariaDB 新入口、端口和转义。"""
+import argparse
+import os
+from pathlib import Path
+from project_temp import tempfile
+from lepus_glue_edges import ROOT, LEPUS, EXE, run
+
+def main():
+    """验证连接入口的原生行为；不代表真实数据库服务验收。"""
+    global LEPUS
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--lepus',type=Path,default=LEPUS)
+    LEPUS=parser.parse_args().lepus.resolve()
+    work = Path(tempfile.mkdtemp(prefix='sql-connections-'))
+    work.mkdir(parents=True, exist_ok=True)
+    library = work / ('fixture.dll' if os.name == 'nt' else 'fixture.so')
+    run('gcc', '-shared', '-fPIC', ROOT / 'tests/fixtures/lepus_sql_mysql.c', '-o', library)
+    os.environ['MYSQL_LIBRARY'] = str(library)
+    source = work / 'connections.lep'
+    source.write_text('import std::sql;\nvoid main(){\n    Database a=Database::mysql("mysql-default","user","password","database");\n    Database b=Database::mysql("mysql-explicit","user","password","database",(int32)3307);\n    Database c=Database::maria("maria-default","user","password","database");\n    Database d=Database::maria("maria-explicit","user","password","database",(int32)3308);\n    std::core::assert(a.isOpen() && b.isOpen() && c.isOpen() && d.isOpen());\n    std::core::assert(a.backendName()=="mysql" && b.backendName()=="mysql");\n    std::core::assert(c.backendName()=="mariadb" && d.backendName()=="mariadb");\n    std::core::assert(a.quote("中文\'\\\\😀")=="\'中文\'\'\\\\\\\\😀\'");\n    std::core::assert(c.quote("中文\'\\\\😀")==a.quote("中文\'\\\\😀"));\n    std::core::assert(std::sql::quote("",false)=="\'\'");\n    a.close();b.close();c.close();d.close();\n    std::core::println("mysql/maria connection ABI ok");return;\n}\n', encoding='utf-8')
+    result = run(LEPUS, 'run', source, '--out', work / 'vm')
+    assert result.stdout == 'mysql/maria connection ABI ok\n' and (not result.stderr), result
+    binary = work / ('connections' + EXE)
+    old = work / 'old.lep'
+    old.write_text('import std::sql;\nvoid main(){Database db=Database::connect("h","u","p","d");return;}', encoding='utf-8')
+    result = run(LEPUS, 'check', old, succeeds=False)
+    assert 'connect' in result.stdout + result.stderr
+    print('MySQL/MariaDB client ABI fixtures, quoting, ports and obsolete constructor rejection passed')
+if __name__ == '__main__':
+    main()

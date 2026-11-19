@@ -1,0 +1,204 @@
+# 13 Example projects
+
+<!-- LANGUAGE NAVIGATION -->
+**English** · [简体中文](../13-projects.md)
+<!-- END LANGUAGE NAVIGATION -->
+
+Examples list source locations, run commands, validation scripts and prerequisites.
+
+Every command is run **from the repository root** (on Windows the compiler is `Lepus.exe`; below it
+is written `lepus`).
+
+---
+
+## 1. At a glance
+
+| Example | Location | What it demonstrates | Requires |
+| --- | --- | --- | --- |
+| [Turtle graphics](#31-turtle-graphics-turtle_winapi) | [`doc/examples/turtle_winapi/`](../examples/turtle_winapi/) | `abi` blocks + shared library + GDI canvas | Windows + MinGW |
+| [Calculator (two ASTs)](#51-calculator-two-asts) | [`example/calculator/`](../../example/calculator/) | Recursive-descent parsing, recursive ownership under value semantics | none |
+| [Annotations and reflection](#53-annotations-and-reflection) | [`example/reflection/`](../../example/reflection/) | Compile-time annotations, runtime metadata queries | reflection build macros |
+| [Standard library companions](#54-standard-library-companions) | [`doc/examples/library/`](../examples/library/) | Three runnable programs: io / sqlite / reflect | some need reflection |
+| [C ABI companions](#55-c-abi-companions) | [`doc/examples/abi_buffers/`](../examples/abi_buffers/), [`abi_dynamic/`](../examples/abi_dynamic/) | Static buffers vs. dynamic library bindings | a C compiler |
+| [Synchronous callbacks](../../example/native-callbacks/README.md) | [`example/native-callbacks/`](../../example/native-callbacks/) | C calling Lepus function values under native compilation: named functions, closures, references, reentry | a C compiler |
+| [Editor language servers](#62-editor-language-servers-and-the-vs-code-extension) | [`source/lsp/`](../../source/lsp), [`vscode/`](../../vscode/) | Macro pairing checks, semantic highlighting, real diagnostics | none / VS Code |
+
+---
+
+## 2. Example organization
+
+Application examples demonstrate complete programs. Capability examples demonstrate individual language or standard-library features. Each section lists commands, validation scripts and dependencies.
+
+---
+
+## 3. Desktop graphics and games
+
+Desktop examples require an interactive desktop; see each example for headless verification.
+
+### 3.1 Turtle graphics (turtle_winapi)
+
+**How to run it**:
+
+```powershell
+python tests/lepus_desktop.py --turtle-only
+Set-Location .\build\lepus-turtle-winapi
+.\demo.exe            # 绘制 Koch 雪花；关窗退出
+.\demo.exe close      # 绘制并保存后直接关闭（自动验收用）
+```
+
+The program writes `turtle.bmp` into the current directory.
+
+**Boundaries**: needs Windows and a usable interactive desktop; the DLL must sit next to the exe.
+A mismatch between the Lepus declaration, the C function signature or the calling convention is a
+C ABI boundary error — background in [Host integration](08-host-integration.md).
+
+---
+
+## 4. Database examples
+
+### 4.1 Reflection-based student manager
+
+**What it demonstrates**: `@Reflect` plus SQL model annotations derive the create-table
+statement, query columns, JSON keys and sort-field validation; every user value is bound
+as an SQL parameter; the field list is declared exactly once, in the model.
+
+**How to run it** (from `example/reflection-students`):
+
+```sh
+lepus main.lep students.db add '{"id":1,"name":"Zhang Wei","age":18,"className":"Class 3","score":92}'
+lepus main.lep students.db list score desc
+lepus main.lep students.db schema
+```
+
+**How it is verified**: exercise `add` / `update` / `get` / `delete` / `list` / `search` /
+`schema`, plus malformed JSON, out-of-range age and score, unknown sort fields and a
+missing id.
+
+**Boundaries**: requires a reflection-enabled toolchain; changing model fields affects
+existing databases (an old database missing the column is rejected with a "missing field"
+diagnostic).
+
+### 4.2 Other database examples
+
+See the [SQL examples](../../example/sql-lepus/README.md) and [reflection / dynamic SQL guide](33-reflection-serialization-sql.md).
+
+## 5. Language and library capability examples
+
+### 5.1 Calculator (two ASTs)
+
+**What it demonstrates**: the same expression interpreter — lexing, recursive-descent parsing,
+instruction generation, stack-machine execution and per-line error reporting — written twice with
+**two AST representations**: a flat `List<Node>` with a child-index table, and a nested one whose
+enum payload holds `List<Expr>`. The nested version exists to verify copying and cleanup of
+recursively owned locals under value semantics.
+
+**How to run it**:
+
+Of the 12 default input lines, 7 succeed and 5 report application errors (including division by
+zero, a syntax error, an undefined variable, and `min(x, y, z)` with too many arguments).
+
+### 5.2 Module compilation
+
+**How to run it**:
+
+**How it is verified**: `python tests/lepus_module_compilation.py`.
+The relevant options (`--separate-modules`, `--module-cache`) are in
+[Cross-platform deployment](06-deployment.md).
+
+### 5.3 Annotations and reflection
+
+**What it demonstrates**: compile-time user annotations (with defaults, positional and named
+arguments) applied to interfaces, structs, enums, fields, static fields, constructors and methods;
+then querying metadata at runtime and calling by name.
+
+**How to run it**: the root toolchain already includes both front-end and runtime reflection by default:
+
+```sh
+lepus --reflection example/reflection/annotations.lep --out build/annotation-example
+```
+
+**Boundaries**: annotations are type-checked and reflected declarations produce runtime metadata for typed queries. The `std::reflect::` API is in the [library reference](../library/README.md).
+
+### 5.4 Standard library companions
+
+**What it demonstrates**: library usage that needs a little project layout.
+[`doc/examples/library/`](../examples/library/) holds three: `io.lep` (file create / write / flush /
+seek), `sqlite.lep` (in-memory SQLite and Unicode strings), `source/std/reflect.lep` (type and struct-field queries).
+
+**How to run them**:
+
+```sh
+lepus run doc/examples/library/io.lep -- build/library-example.txt
+lepus run doc/examples/library/sqlite.lep
+```
+
+**How it is verified**: `python tests/lepus_library_reference.py` — it checks declarations and links
+and executes 23 complete programs.
+
+### 5.5 C ABI companions
+
+**What it demonstrates**: two binding styles. [`abi_buffers/`](../examples/abi_buffers/) passes
+static buffers; [`abi_dynamic/`](../examples/abi_dynamic/) goes through a shared library plus glue.
+Both are small `native.c` + `demo.lep` pairs, handy as the minimal skeleton to copy when writing your
+own bindings.
+
+**How it is verified**: `python tests/lepus_abi_values.py`.
+Type mapping and `abi` block syntax are in [Host integration and C ABI](08-host-integration.md).
+
+---
+
+## 6. Toolchain companions
+
+### 6.1 Embedded Linux hosting
+
+Run `lepus build` on the target machine: the output is a statically linked native executable, so the
+binary itself is the deliverable (add the shared library when the program uses `#abi`). Cross
+compilation, resource budgets and execution boundaries are in the [deployment guide](06-deployment.md).
+
+### 6.2 Editor language servers and the VS Code extension
+
+**What it demonstrates**: two complementary routes. The toolchain's built-in `lepus lsp` (embedded
+in the compiler, running the real front end, giving real error codes and precise positions) covers
+the complete front end; the small C++17 program in [`source/lsp/`](../../source/lsp) **needs no compiler** and
+offline-checks the pairing, arguments, calls and nesting of `$macro` / `$replace` / `$for`, plus
+semantic highlighting.
+
+**How to run them**:
+
+```sh
+lepus lsp                      # 工具链自带
+make -C lsp                    # 独立的宏编辑器语言服务器
+```
+
+The VS Code extension lives in [`vscode/`](../../vscode/); syntax highlighting, completion, go-to
+and breakpoint debugging are described in its [README](../../vscode/README.md).
+
+**How it is verified**: `python tests/lepus_lsp_api.py`, `python tests/lepus_lsp_symbols.py`,
+`python tests/lepus_native_lsp_parity.py`.
+
+---
+
+## 7. Regression entry points
+
+| Command | Covers |
+| --- | --- |
+| `sh check.sh` | Every sample in `example/samples/` against its expected output |
+| `python tests/lepus_desktop.py [--turtle-only]` | Turtle graphics through WinAPI |
+| `python tests/lepus_recursive_ownership.py` | Calculator, both AST representations |
+| `python tests/lepus_annotations.py` | Annotations and reflection |
+| `python tests/lepus_library_reference.py` | Standard library companions |
+| `python tests/lepus_abi_values.py` | C ABI companions |
+
+Checks requiring a graphical environment or database are dedicated regressions: desktop graphics need Windows and MinGW, while external database examples need their corresponding service and client library.
+
+---
+
+## 8. Next
+
+| You want to | Go to |
+| --- | --- |
+| Deploy a program of your own | [Delivery security](05-delivery-security.md) → [Cross-platform deployment](06-deployment.md) |
+| Connect Lepus to a C/C++ host | [Host integration and C ABI](08-host-integration.md) |
+| Learn the language from scratch | [《Lepus 程序设计语言》](../book/en/README.md) (Chinese) |
+| Look up a library function | [Library reference](../library/README.md) |
+| Look up commands and project config | [Toolchain](09-toolchain.md) |

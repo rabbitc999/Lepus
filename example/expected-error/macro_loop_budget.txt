@@ -1,0 +1,1 @@
+lepus: example/samples-error/macro_loop_budget.lep 第 8 行第 5 列：宏循环超过展开预算（模板第 2 行）

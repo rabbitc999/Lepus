@@ -1,0 +1,153 @@
+# 08 Host integration and C ABI
+
+<!-- LANGUAGE NAVIGATION -->
+**English** · [简体中文](../08-host-integration.md)
+<!-- END LANGUAGE NAVIGATION -->
+
+Ordinary Lepus execution lowers the checked AST directly to LLVM IR and uses LLVM O3 to produce native code. So
+talking to C has exactly two directions — **Lepus calling a C shared library**, and **a C host calling
+a native library built from Lepus**. Both go through the platform C ABI: no virtual machine, no
+bytecode interpreter. Generated code marshals these calls. A host kernel can also use the C registry interface below.
+
+## C host registry
+
+The public headers are `source/abi/lepus_abi.h` and, for standard-library host-entry registration, `lepus_standard.h`. C11 clients can include them independently. The implementation may use C++, while the boundary contains C structures, fixed-width slots, byte buffers and opaque handles. See the [C host example](../../example/host-c-api/main.c) and its [build instructions](../../example/host-c-api/README.md).
+
+Create an owned table with `lepus_abi_registry_create`, then supply a `LepusAbiModuleDescriptor`. A module uses its own compiler to generate `lepus_abi_local_info`; the host checks versions, architecture/platform, calling convention, layouts and required capabilities. Windows x86 public entries explicitly use the C calling convention. ARM32 descriptors distinguish ordinary and hard-float ABIs.
+
+`lepus_abi_registry_register` commits a complete module atomically. Names are copied and entry code must remain alive. Duplicate names, symbol collisions and allocation failure leave no partial entries and do not copy existing callback state. Owned C registries use the host heap rather than a temporary language arena. Sealing applies to the same runtime table through both C and private implementation paths. Queries may then run concurrently; entry-owned shared state follows that entry's thread contract.
+
+`lepus_abi_registry_call` checks arguments and results, restores input fields and clears partial output on failure. `lepus_abi_registry_resolve` returns only direct C entries. Slots hold integers or double bit patterns; checked `lepus_abi_argument_integer`/`lepus_abi_argument_real` accessors reject a wrong kind, and an entry should return after a failed read. Pure scalar entries allow a null runtime. Language memory, records and function values require a runtime-provided context, never a fabricated opaque handle. External `#abi` calls retain their actual C prototypes rather than automatically receiving this frame.
+
+`lepus_abi_read`/`lepus_abi_write` check logical ranges and liveness; raw bytes do not acquire typed ownership. Release an owned String with `lepus_abi_string_release` if it is not transferred to the language caller. Byte views recognize both length headers and capacity descriptors and expire before allocation, growth, release or reentry; copy bytes that must be retained. Pair temporary raw blocks with `temporary_release` when releasing early.
+
+`LEPUS_ABI_CAP_BINARY` identifies raw-string and byte-list services. `lepus_abi_string_bytes` copies an explicit byte length and preserves zero bytes and non-UTF-8 data; `lepus_abi_string` still rejects embedded zero bytes. Both constructors share storage and release rules.
+
+Query a byte-list length with `lepus_abi_list_bytes` using a null output and zero capacity, then copy into a caller-owned buffer. Elements must be integers in `0..255`; invalid elements or a short buffer leave the output untouched. `lepus_abi_list_from_bytes` creates an independent owned `List<uint8>` and publishes its handle only after construction. Pair it with `lepus_abi_record_release` unless ownership has been returned to the language. Declare `LEPUS_ABI_CAP_BINARY` among the module's required capabilities when using these services.
+
+
+A successful record creation transfers its pointer; a zero result leaves it with the caller. Failed clone registration destroys the new copy and preserves the source. Type names are copied, destruction protocols cannot change under the same name, and destruction callbacks must not throw or outlive their code. `lepus_abi_invoke` calls checked language function values with their captures and borrows the invoker without copying its state; handles are not machine function pointers.
+
+`LepusAbiError` carries a status and bounded caller-owned buffer. Service exceptions cannot escape the C boundary. Existing runtime errors and memory faults keep priority; the first explicit module diagnostic may refine a generic service failure. Built-in entry catalogs publish complete immutable data concurrently and reject invalid or oversized input as a whole. Run `python tests/lepus_c_api_contract.py` and `python tests/lepus_c_api_registry.py` to reproduce checks.
+
+## Calling a C shared library from Lepus
+
+One `#abi` directive per function:
+
+```lepus
+#abi("C", "./host.dll", "hostApply")
+int64 hostApply(int64 fn(int64) function, int64 value);
+```
+
+The third argument is the symbol the library actually exports; the declaration uses the local Lepus
+name, and the two may differ.
+
+- **Paths** resolve from the directory of the **source file holding the declaration**, including
+  declarations in imported modules; separators are normalized.
+- **The product must sit next to the library**: the Windows loader searches the executable directory
+  and `PATH` at process start. On Linux use `host.so` and drop the extension from the product.
+- **Type mapping**: scalars by value; `T mut&` / `T const&` map to `T *` / `const T *`; `String` maps to
+  `const char *`; structs by value with C layout, `packed` for `#pragma pack`; arrays as `T[]` with a
+  separate length; `Option<T &>` is the only channel for a null pointer.
+- **Function values cross the boundary**: `int64 fn(int64)` arrives in C as `int64_t (*)(int64_t)` and
+  C may call it directly; the captured environment travels with the value. See the
+  [synchronous callback example](../../example/native-callbacks/README.md).
+
+C only sees a signature, so the declaration must match the real C function item by item: return type,
+argument widths, calling convention and struct field order.
+
+## Calling Lepus from a C host
+
+Build a shared library with `--shared --export` and use the generated header:
+
+```sh
+lepus build app.lep --out build/app --shared --export add
+```
+
+`build/app.h` contains the C declarations:
+
+```c
+void lepus_init(void);
+void lepus_finish(void);
+int64_t f_add(int64_t p0, int64_t p1);
+```
+
+The contract is short but the order matters:
+
+1. `lepus_init()` allocates the runtime memory, loads the data area and runs global initializers;
+2. call `f_name(...)`;
+3. `lepus_finish()` runs global cleanup, flushes output and releases the runtime memory.
+
+After `lepus_finish()` every previously obtained handle is invalid. Exported functions only take and
+return C scalars; pass structs by value and use the reference form (`T *`) when the callee should mutate
+in place. Without `--export` the header only exposes `lepus_init` and `lepus_finish`.
+
+The `--shared` product is a shared library whose loading and lifetime belong to the host. A plain
+`lepus build app.lep` is a self-contained executable — the form you ship to end users; see
+[build artifacts](../15-artifacts.md).
+
+## Synchronous callbacks
+
+Function-value parameters in `#abi` declarations use synchronous C adapter trampolines. The C library
+receives a machine callback matching its actual prototype, while the adapter retains the Lepus capture
+environment and error channel. C API modules invoke runtime function values through `lepus_abi_invoke`,
+with explicit slot kinds and a checked return kind. A runtime handle is **not** a general machine
+function pointer and must not be cast to bypass this adapter.
+
+Use callbacks only on the same thread during the contracted synchronous call. Do not retain them as
+asynchronous entries. If a callback panics, the checked trampoline records failure. After the C function
+returns, the adapter releases its return buffer under the declared contract before propagating the
+original runtime error. Partial output does not become a successful result.
+
+Strings, lists, maps and other resource-owning values do not transfer ownership through this mechanism.
+Design the interface explicitly with scalars, references or a buffer you manage yourself.
+
+## Debugging and boundaries
+
+- Reflection is compiled in by default; `--no-reflection` switches it off, after which `@Reflect`
+  reports that the feature is disabled.
+- Use `--debug` to keep native symbols and source lines and to lower the optimization level, then
+  attach GDB — see [native debugging](43-native-debugging.md).
+- `--memory-size` sets the runtime heap budget; process boundaries and threads are in
+  [capabilities](17-capabilities.md).
+- There is no runtime sandbox here: C code reached through `#abi` runs with the host's privileges, so the
+  interface design is the security boundary.
+
+See [toolchain](09-toolchain.md), [LLVM build compilation](38-build.md) and the
+[callback example](../../example/native-callbacks/README.md).
+
+`lepus_abi_record_make_clonable` registers a C clone callback for container deep copies and thread snapshots. The callback must return an independent record without handles owned by the source runtime, return null on failure, and never throw. Records with the same type name must retain identical destroy and automatic-clone callbacks. Require `LEPUS_ABI_CAP_RECORD_CLONE` when using this service. Records created by `lepus_abi_record_make` remain unavailable for automatic copying.
+
+`lepus_abi_record_probe` borrows a live record with a matching type. Zero, unknown, stale, and mismatched handles return null without replacing an existing error. It requires a valid frame and uses the usual record borrow lifetime. Declare `LEPUS_ABI_CAP_RECORD_PROBE` when using this optional query. Use `lepus_abi_record_borrow` for a strict borrow that reports invalid records.
+
+`lepus_abi_list_append_text` copies borrowed bytes directly into an independent `List<String>` element, preserving zero bytes without a generic native-value wrapper. Callers must provide a matching list type. The runtime checks the handle, active iterator borrows, and input length, and appends only after constructing the element. Require `LEPUS_ABI_CAP_LIST_TEXT`; ownership of the input buffer stays with the caller.
+
+`lepus_abi_list_numbers` copies into two host arrays: `int64_t bits[]` holds integers or IEEE-754 double bit patterns, and `unsigned char kinds[]` holds `LepusAbiSlotInteger` or `LepusAbiSlotFloat`. Pass two null pointers and zero capacity to query the element count. Copying requires sufficient, non-overlapping arrays. All elements are checked before either output is written; text, owned values, and aggregates are rejected. Reading preserves compact numeric storage when there are no active element views.
+
+`lepus_abi_list_from_numbers` copies independent host arrays into an owned list; a null `kinds` pointer means all integers. Use integer slots for bool, single-byte char, and every integer width; extend float32 to double first. The services do not convert to the language's target element type, so hosts must prepare and interpret values according to the declared type. Construction follows bounded geometric growth and publishes a handle only after completion. Return ownership to the language or release it with `lepus_abi_record_release`. Require `LEPUS_ABI_CAP_LIST_NUMBERS`; both services use the existing collection storage and registry.
+
+`lepus_abi_list_append_numbers` appends independent host numeric arrays in one batch, retaining list identity, existing elements, and storage layout. Inputs must not point into runtime borrowed views or the destination buffer. Active iterator leases, element views, nonnumeric elements, and invalid kinds are rejected. The service validates and reserves capacity before writing values; growth repeatedly doubles the existing capacity. Failure preserves the original elements and length. Require the same `LEPUS_ABI_CAP_LIST_NUMBERS` capability.
+
+`lepus_abi_record_make_textual` adds default text to a C record and can also provide an independent-copy callback. `LepusAbiFormat` first receives a null buffer and zero capacity to query the byte count, then writes into caller-provided bounded storage. Output excludes an extra terminator and may be empty or contain zero bytes. The callback must not throw, mutate the record, or invoke language code; its output must remain stable between the two calls. The runtime rejects unrepresentable lengths, callback failure, and a length that grows during writing, and propagates the error through the native call.
+
+Require `LEPUS_ABI_CAP_RECORD_TEXT`. A type's destruction, copy, and text callbacks are immutable after registration; an existing ordinary record type cannot be upgraded to another text policy. The caller still destroys the object if creation fails. Successful records use the existing release and snapshot protocols. C hosts exchange only object pointers, byte buffers, and function pointers.
+
+`lepus_abi_input_token` requires `LEPUS_ABI_CAP_INPUT_TOKEN`. It consumes the existing runtime input cursor and returns an owned String. EOF returns zero without setting an error; the optional position supports missing-item diagnostics. Release a successful result; allocation failure may occur after consumption. Numeric kernels use this service rather than creating a separate stdin stream or C++ host context.
+
+CAS transformations use C frames and C-owned records. Copies retain independent references to immutable roots, and children remain valid after releasing their parent. Parsing and operations retain the shared recursive lock and process-level numeric allocation scope. Public callbacks exchange byte buffers without exposing C++ AST nodes or smart pointers.
+
+The 63 collection entries share one operation manifest and borrow parameter bits and kinds from C frames without constructing universal native argument lists. Lists, maps, sets and iterator leases retain the same private runtime storage and checks. Private type access, callbacks, owned-value copying and cleanup are not part of the public host ABI.
+
+Aggregate marshalling can use `lepus_abi_tracked_temporary` with `LEPUS_ABI_CAP_TRACKED_TEMPORARY` to enroll a raw block in the existing temporary cleanup queue. Registration failure releases the new allocation. Early `lepus_abi_temporary_release` removes the entry, preventing stale cleanup after address reuse. Owned fields still need layout-aware copying and cleanup; registration does not mean immediate destruction at C-call return.
+
+The built-in host examples now use 31 pure C entries in `source/abi/abi_demo.c`; historical `demo_cpp_*` names remain compatible. Types, interfaces, inheritance and external implementations are ordinary Lepus declarations, appended only when a complete declared name is used so unrelated type identities remain stable. Optional references use standard Option tags and eight-byte logical slots, not C pointer casts.
+
+## Generated C ABI adapters
+
+LLVM can emit scalar external calls directly. Aggregates, arrays, references, optional references and synchronous callbacks use generated adapters; the host compiler lowers the actual platform's C aggregate calling convention.
+Entries receive `LepusAbiFrame *`, use C services to access logical storage and invoke language function values, and copy native results into language storage.
+Implementations may use private C++17 resource management. Hosts include `lepus_abi.h`, without private marshalling headers.
+
+Initialization checks declared symbols and release entries before atomically registering the program's table. References to the same language object share a marshalling copy; writable copies are written back when the call ends.
+A returned pointer may refer into an argument copy, so argument storage survives result copying. Owned native returns follow their release contract on success, callback failure and marshalling failure.
+Synchronous trampolines remain valid only during the current call on the current thread, and detach their language function values when that call ends.

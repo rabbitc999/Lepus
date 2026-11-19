@@ -1,0 +1,83 @@
+/**
+ * @file native_registry.cpp
+ * @brief 运行时 内建服务的名称、实参数量和入口注册。
+ */
+#include "runtime_internal.hpp"
+
+namespace runtime
+{
+using namespace runtimeDetail;
+namespace runtimeDetail
+{
+const SlotNativeEntry kSlotNativeEntries[] = {
+    { "__std_value_to_string", { -1, valueToString } },
+    { "__std_exit", { 1, programExit } },
+    { "__std_assert", { 1, programAssert } },
+    { "__std_panic", { 1, programPanic } },
+    { "std::core::__stringStorageLength", { 1, strLen } },
+    { "std::core::__stringStorageData", { 1, strData } },
+    { "std::core::__stringStorageCapacity", { 1, strCapacity } },
+    { "std::core::__stringStorageKind", { 1, strStorageKind } },
+    { "std::core::__bufferMaxBytes", { 0, bufferMaxBytes } },
+    { "__std_read_text", { 0, readText } },
+    { "__std_input_line", { 0, inputReadLine } },
+    { "__std_pause", { 0, pauseForDebug } },
+    { "__std_input_int", { 0, inputInt } },
+    { "__std_input_uint", { 0, inputUInt } },
+    { "__std_input_float", { 0, inputFloat } },
+    { "__std_input_bool", { 0, inputBool } },
+    { "__std_input_char", { 0, inputChar } },
+    /* 容器：vec / set / map */
+    { "__std_char_load", { 1, charLoad } },
+    { "__std_char_store", { 2, charStore } },
+    { "__std_iter_box", { 4, iterBox } },
+    { "__std_heap_live", { 1, heapLive } },
+    { "__std_heap_drop_live", { 1, heapDropLive } },
+    { "__std_move_live", { 3, moveLifetime<0> } },
+    { "__std_move_require", { 3, moveLifetime<1> } },
+    { "__std_move_end", { 3, moveLifetime<2> } },
+    { "__std_move_begin", { 2, moveLifetime<3> } },
+    { "__std_object_copy", { 1, objectCopy } },
+    { "__std_arc_empty", { 0, arcEmpty } },
+    { "__std_arc_copy", { 1, arcCopy } },
+    { "__std_arc_create", { 4, arcCreate } },
+    { "__std_arc_get", { 4, arcGet } },
+    { "std::concurrency::__arcDowngrade", { 1, arcDowngrade } },
+    { "std::concurrency::__arcUpgrade", { 1, arcUpgrade } },
+    { "std::concurrency::__arcExpired", { 1, arcExpired } },
+    { "__std_closure_new", { 2, closureNew } },
+    { "__std_closure_capture", { 4, closureCapture } },
+    { "__std_closure_capture_copy", { 4, closureCaptureCopy } },
+    { "__std_closure_capture_move", { 6, closureCaptureMove } },
+    { "__std_closure_destructor", { 3, closureDestructor } },
+    { "__std_closure_ref", { 5, closureRef } },
+    { "__std_closure_get", { 2, closureGet } },
+    { "__std_function_copy", { 1, functionCopy } },
+    { "__std_object_free", { 1, objectFree } },
+    { "std::memory::__memoryLiveBytes", { 0, memoryLiveBytes } },
+    { "std::memory::__memoryLiveBlocks", { 0, memoryLiveBlocks } },
+    { "std::memory::__memoryPeakBytes", { 0, memoryPeakBytes } },
+    { "std::core::__rawStorage", { 6, rawStorage } },
+    /* 装箱格子（obj）：值 + 类型号；也是接口指针（胖指针）的运行时表示 */
+    { "__std_obj_new", { 0, objNew } },
+    { "__std_iface_box", { 4, interfaceBox } },
+    { "__std_iface_borrow", { 1, interfaceBorrow } },
+    { "__std_iface_reference", { 4, interfaceReference } },
+    { "__std_obj_set", { -1, objSet } },
+    { "__std_obj_get", { -1, objGet } }, /* 变参：后面跟一串"允许的类型号" */
+    { "__std_obj_has_tag", { -1, objHasTag } },
+    { "__std_obj_get_ptr", { -1, objGetPointer } },
+    { "__std_obj_name", { 1, objName } },
+    { "__std_obj_addr", { 1, objAddress } },
+    { "__std_reference", { 1, requireReference } },
+    { "__std_iface_fail", { 2, ifaceFail } },
+    { "__std_str_fmt", { -1, strFormat } },
+    { "__std_print", { -1, strPrint } },
+    { "__std_put_char", { 1, putChar } },
+    { "std::core::__readLine", { 0, inputReadLine } },
+    { "std::core::__stdinEof", { 0, inputAtEnd } },
+    { "__readLine", { 0, inputReadLine } },
+};
+const SlotNativeTable kSlotNatives{ kSlotNativeEntries, sizeof(kSlotNativeEntries) / sizeof(kSlotNativeEntries[0]) };
+}  // namespace runtimeDetail
+}  // namespace runtime

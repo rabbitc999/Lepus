@@ -1,0 +1,8 @@
+void main() {
+    String first=readLine();
+    String rest=readLines(3);
+    println("[{}]",first);
+    println("[{}]",rest);
+    assert(readLines(0)=="");
+    assert(readLine()=="");
+}

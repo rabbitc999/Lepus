@@ -1,0 +1,1 @@
+lepus: example/samples-error/bare_pointer_inner_upgrade.lep 第 3 行第 5 列：不能改变多级裸指针的内层指针类型

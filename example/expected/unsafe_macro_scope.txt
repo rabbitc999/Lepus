@@ -1,0 +1,1 @@
+unsafe macro scope OK

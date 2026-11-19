@@ -1,0 +1,131 @@
+# 内存分配器
+
+<!-- LANGUAGE NAVIGATION -->
+[English（中文原文）](20-memory-allocator.md) · **简体中文**
+<!-- END LANGUAGE NAVIGATION -->
+
+本篇从地址复用与作用域清理出发，区分 Lepus 值的清理、运行期堆与宿主资源，并说明 malloc／pool 选择、容量统计和外部缓冲区接入。
+
+## 地址复用样例揭示什么
+
+自定义 `runtime::HeapAllocator` 必须准确实现 `capacityAt`：未分配或已释放地址返回 false，有效地址返回到所属块末尾的剩余容量。运行时复用这份分配元数据，先检查再调用底层读写，不额外维护位图。`contains` 只表示地址属于池，不能作为有效分配的依据。可以用位图实现分配器，但仍须识别块边界，不能把两个相邻分配拼成一次合法访问。
+
+[heap_address_reuse.lep](../example/samples/heap_address_reuse.lep) 先分配整数并赋 11，释放后再分配同样大小的整数并赋 22，从新引用读取，正式预期输出为 [22](../example/expected/heap_address_reuse.txt)。物理块可以复用，逻辑身份不会复活；释放前的旧别名不能再解引用。拒绝旧别名的样例见 [heap_stale_alias.lep](../example/samples-error/heap_stale_alias.lep)，正常引用与所有权写法见[核心概念](03-core-concepts.md)。
+
+## new 与作用域清理
+
+[std_parse_random_path_memory.lep](../example/samples/std_parse_random_path_memory.lep) 使用 new 和作用域释放观察分配。拥有值按所有权规则清理，已释放分配的旧别名仍然失效。
+
+## 用样例观察内存统计
+
+```sh
+mkdir -p tmp/doc-example
+lepus run example/samples/std_parse_random_path_memory.lep --allocator malloc --out tmp/doc-example/memory
+```
+
+Lepus 通过 Memory 命名空间管理容器和对象，0.32.10 缺省使用系统 malloc，pool 可选，默认预算 512 MiB；全局 C++ new/delete 保留宿主行为。实现位于 [`source/allocator/`](../source/allocator)，原生导出使用构建时嵌入的匹配资产。
+
+## PC 容量与统计
+
+编译器通过系统 malloc 按需分配内存，无固定的编译内存预算。生成程序的默认运行时堆预算为 **512 MiB（536870912 字节）**，可在运行或导出时配置。
+
+```sh
+lepus run app.lep --memory-size 16777216 --allocator malloc
+lepus build app.lep --memory-size 16777216 --allocator pool --out tmp/app
+```
+
+## 外部缓冲区
+
+缓冲区由宿主持有并覆盖整个调用生命周期。此路径不申请 PC 的后备池。
+返回值 0 表示成功，1 表示运行或分配失败；`stepLimit` 限制执行步数，**传 0 表示不设上限**。原生模块按编译配置保留相应检查。
+同一缓冲区可以反复调用。线程共用受锁保护的池，需等待全部工作线程退出后才能清零。
+
+## C 分配器与 C++ 接入
+
+[`lepus_pool.c`](../source/allocator/lepus_pool.c) 可独立按 C99 编译，块元数据位于缓冲区内，
+无固定块数表，也不会调用全局 C++ 分配操作。底层实现由
+[`lepus_pool.h`](../source/allocator/lepus_pool.h) 的**分配器类型宏** `LEPUS_ALLOCATOR_TYPE` 在编译期选择
+（用 `-DLEPUS_ALLOCATOR_TYPE=…` 覆盖，必须对所有翻译单元一致）：
+
+- `LEPUS_ALLOCATOR_LINKED`（缺省）：**TLSF**（两级隔离适配，Two-Level Segregated Fit）。
+  块头 16 字节，只存「物理前邻 + 大小 + 2 位标志」，空闲链指针放在空闲块自己的载荷里；
+  两级位图（32 个一级 × 32 个二级细分）加空闲双向链表定位，**分配与释放都是 O(1)**，
+  不随块数增长；释放时立即合并相邻空闲块，**释放过的地址可以再分配出去**。
+  这是按 TLSF 论文与 TLSF 2.0 的块头压缩思路自己实现的版本，没有引入上游源码。
+- `LEPUS_ALLOCATOR_LINEAR`：线性（bump）分配，只向后切块，释放只把块记成墓碑，
+  地址到 `reset` 前不复用。适合“地址一旦给出就不再复用”的护栏场景，代价是长循环占用只增不减。
+
+**对齐口径**：池只保证 **16 字节对齐**（块头 16 字节、块大小按 16 取整，所以“块首对齐即载荷对齐”），
+更宽的对齐请求直接返回失败，由上层自行缓冲。常量的 `alignof(max_align_t)` 请求不需要特例路径。
+
+两种实现共用 `McPool` 句柄与 `lepus_pool_*` 接口，上层 arena 与容器无需改动。
+`lepus_pool` 本身不带锁：它是**单线程/调用方串行化**的；缺省 C++ 侧由
+`BufferRuntimeArena` 与 `StaticRuntimeArena` 各自持 `std::mutex` 加锁（运行时线程共享同一个
+`currentRuntimeAllocator()`，所以锁是必须的）。`LEPUS_ALLOCATOR_TYPE` 当前编译进来的名字由
+`Memory::allocatorTypeName` 暴露，便于诊断。
+
+### 小对象按组分配
+
+容器里大量出现 8–120 字节的小对象（指令名、符号名、短字符串）。逐个向池要，光块头与
+向上取整就吃掉一半：一条 23 字节的名字串实际占 48 字节。`Memory::SlabPool`（在
+[`source/lepus_allocator.hpp`](../source/allocator/lepus_allocator.hpp)）因此按组分配：
+一次向池要 64 KiB，组内切成固定尺寸的片（片头 8 字节标签），小对象从组里取，
+整组都空出来时整块还给池。
+
+标签最低位置 1 用来区分「本层的片」与「池的正常块」——TLSF 的块大小永远是 16 的倍数，
+低 2 位只做空闲标志，不会撞上。分配到的指针仍落在池的地址范围内，`release` 仍然只收一个指针，
+上层容器与字符串无需任何改动。效果：50 万条指令的名字从 50 万块降到几百块，
+符号压缩回归的峰值内存从 520 MiB 降到 319 MiB。
+
+[`source/lepus_allocator.hpp`](../source/allocator/lepus_allocator.hpp) 提供
+`Memory::Allocator<T>`、`Vector/Map/Set/Deque/String`、`makeShared/makeUnique` 和回调适配器。
+每个 allocator 保存自己的分配器所有者，跨池复制、移动或切换当前池时仍向原所有者释放。
+所有者必须比其分配的对象活得更久。
+
+```cpp
+alignas(std::max_align_t) unsigned char storage[65536];
+Memory::BufferRuntimeArena arena(storage, sizeof(storage));
+{
+    Memory::RuntimeSession session(arena); // 必须比池内对象先构造
+    Memory::Vector<Memory::String> names;
+    names.emplace_back(1024, 'x');
+} // names 先销毁，session 再清零
+std::size_t peak = arena.peakBytes();
+```
+
+PC 也可使用 `DynamicRuntimeArena(bytes)`；外部缓冲区使用 `BufferRuntimeArena(address, bytes)`。
+直接调用池接口而没有 `RuntimeSession` 时，调用方需要归还所有块后调用 `finish()`。
+仍有活动块时清零会被拒绝，防止存活对象引用已失效的内存。
+
+Lepus 翻译单元及其依赖库必须一致定义 `LEPUS_CUSTOM_ALLOCATOR=1`。
+生成 C++ 解析器通过用户头的 `PARSER_MEMORY_NAMESPACE` 接入这一组类型与工厂。
+普通通用库构建不定义该宏时，别名仍是标准 STL 类型。
+
+## 宿主边界
+
+文件流、正则引擎、操作系统线程栈和应用胶水自己创建的外部资源使用各自宿主设施。
+这些资源不计入池容量，也不由池清零。这一接口支持提供缓冲区的 C++17 宿主，
+没有承诺无标准库或无操作系统的裸机环境。
+
+托管胶水文本和错误参数使用 `Memory::String` / `Memory::String *`。
+普通 `std::string` 宿主签名可以使用 Codec 转换，其宿主字符串由宿主释放。
+
+## 活跃分配与代次隔离
+
+运行时只保存活跃逻辑区间与物理块首的最新代次，不保存释放墓碑或清扫边界。释放立即移除活跃记录；重复释放返回失败。自定义 `HeapAllocator` 保持相同契约。
+
+物理空间可以复用，逻辑引用编码槽号、分配代次与块内偏移，旧引用不能命中新对象。每个曾使用的物理块首仅占一个身份槽，累计分配次数不增加槽数；代次耗尽时拒绝复用该身份，不回绕。身份槽是防止旧引用复活的分配元数据，不是已释放对象列表。
+
+编译器为新建的借用实参生成完整表达式临时所有者，接管返回值时清空源槽。显式释放只改变实际执行路径上的拥有槽与初始化状态；其他分支仍执行自动清理。可证明的重复销毁由编译器合并，释放后访问报 `LEP1205`，跨调用及不透明宿主操作仍由运行时核验活跃分配。
+
+## 选择 malloc 或 pool
+
+使用 `--allocator malloc|pool` 选择本模块的分配器，TOML 的 `[build]` 同样支持 `allocator`。malloc 直接管理宿主块，pool 保留原内存池；两者保持预算、对齐、逻辑分配身份与释放后失效检查。不要用旧 `LEPUS_USE_MALLOC` 开关替代当前配置。
+
+完整的版本与两种分配器对照见[性能文章](12-performance.md)。同一组数据中各负载的优劣不同，应保留实际配置，不能把不同分配器的单项最佳值拼成一个结果。
+
+## 局部值存储与统计观测
+
+当前编译器为局部聚合、定长数组和引用隐藏槽分配每次调用独立的运行时存储，正常控制流下自动释放。它们可能计入 `Memory::stats()` 的活块与字节数；不能把尚存活的局部值所占空间误判为泄漏。比较某段代码的净分配时，应保持观测点的存活对象集合一致，例如把 `Memory::stats().liveBlocks` 保存为标量，避免“前后两个 MemoryStats 局部聚合”本身引入不同数量的存储。
+
+单对象 `new` 与运行时数组的新存储先清零；结构体单对象还初始化默认容器字段。已释放引用仍然失效，清零不能替代生命周期检查或分配代次检查。递归、地址复用和清理回归见 [03 核心概念 §4](03-core-concepts.md#4-无垃圾回收确定性释放)。

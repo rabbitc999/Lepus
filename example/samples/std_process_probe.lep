@@ -1,0 +1,13 @@
+import std::process;
+import std::probe;
+
+void main() {
+    Process process = processRun("echo lepus-process-ok");
+    String output = processRead(&process);
+    int64 status = processClose(&process);
+    assert(status == 0);
+    assert(output == "lepus-process-ok");
+    Probe value;
+    value.value = twice(21);
+    println("process={} probe={}", status, value.value);
+}

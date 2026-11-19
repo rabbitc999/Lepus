@@ -1,0 +1,4648 @@
+# std::iter — 惰性迭代器
+
+<!-- LANGUAGE NAVIGATION -->
+[English（中文原文）](std-iter.md) · **简体中文**
+<!-- END LANGUAGE NAVIGATION -->
+
+[返回库目录](README.md) · [全部符号](symbols.md)
+
+## 引入
+
+```lepus
+import std::iter;
+```
+
+## 公共约定与错误边界
+
+next 消费游标，peek 缓存下一项而不丢弃。转换器惰性执行，collect/fold/count 等终结操作消费输入。sizeHint 返回下界和可选上界。iter/iterMut 引用源容器，intoIter 拥有值；借用有效性由借用检查器约束。repeat/cycle 可无限，须 take 等限制后才能收集。chars 当前按字节推进，不能把它当 Unicode 字素迭代器。
+
+## 参考代码
+
+完整程序：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+```powershell
+lepus run example/samples/iter_pipeline.lep
+```
+
+<details>
+<summary>展开完整参考代码</summary>
+
+```lepus
+import std::iter;
+int64 observed = 0;
+int64 addRefs((int64 const&,int64 const&) value) { return value[0] + value[1]; }
+bool smallRef(int64 const& value) { return value < 3; }
+Iter<int64 const&> reversedLocal() { List<int64> values; values.push(2); values.push(4); return values.iter().rev(); }
+Iter<int64 const&> prefixLocal() { List<int64> values; values.push(2); values.push(4); let split = values.iter().peekingTakeWhile(smallRef); return split[0]; }
+struct IterRecord { String text; int64 number; };
+void updateRecord(IterRecord mut& value) { value.text = value.text + "!"; value.number = value.number + 1; }
+void replaceText(String mut& value) { value = "changed"; }
+int64 textLength(String const& value) { return len(value); }
+List<int64> madeList() { List<int64> result; result.push(2); result.push(3); return result; }
+Iter<int64 const&> localBorrow() { List<int64> result; result.push(6); return result.iter(); }
+int64 squared(int64 value) { return value * value; }
+bool even(int64 value) { return value % 2 == 0; }
+bool positive(int64 value) { return value > 0; }
+bool belowFour(int64 value) { return value < 4; }
+void observe(int64 value) { observed = observed + value; }
+int64 sum(int64 acc, int64 value) { return acc + value; }
+String label(int64 value) { return format("n{}", value); }
+int64 read(int64 const& value) { return value; }
+void bump(int64 mut& value) { value = value + 10; }
+Option<int64> doubledEven(int64 value) {
+    if (value % 2 == 0) { return Option<int64>::Value(value * 2); }
+    return Option<int64>::None;
+}
+Option<int64> firstThree(int64 value) {
+    if (value < 4) { return Option<int64>::Value(value); }
+    return Option<int64>::None;
+}
+Option<int64> running(int64 mut& acc, int64 value) { acc = acc + value; return Option<int64>::Value(acc); }
+Result<int64, Error> checkedSum(int64 acc, int64 value) {
+    if (value == 3) { return Result<int64, Error>::Fail(MessageError::from("three")); }
+    return Result<int64, Error>::Ok(acc + value);
+}
+struct Flaky : IterNext<int64> {
+    int64 calls;
+    Option<int64> next() {
+        self.calls = self.calls + 1;
+        if (self.calls == 2) { return Option<int64>::Value(9); }
+        return Option<int64>::None;
+    }
+    (int64,Option<int64>) sizeHint() { return (0,Option<int64>::None); }
+};
+void main() {
+    let values = intIter(1, 5);
+    let hint = values.sizeHint();
+    assert((hint[0]) == (4));
+    assert(((hint[1]).unwrap()) == (4));
+    assert((values.next().unwrap()) == (1));
+    assert((values.nth(1).unwrap()) == (3));
+    assert((values.count()) == (1));
+    assert((values.next().isNone()) == (true));
+    assert((intIter(1,5).last().unwrap()) == (4));
+    assert((intIter(1,5).all(positive)) == (true));
+    assert((intIter(1,5).any(even)) == (true));
+    assert((intIter(1,5).find(even).unwrap()) == (2));
+    let lazy = intIter(1,6).inspect(observe).map(squared).filter(even).take(2);
+    assert((observed) == (0));
+    let selected = lazy.collect();
+    assert((observed) == (10));
+    assert((selected.len()) == (2));
+    assert((selected[0]) == (4));
+    assert((selected[1]) == (16));
+    assert((intIter(1,5).fold(0, sum)) == (10));
+    assert((intIter(1,7).filterMap(doubledEven).count()) == (3));
+    assert((intIter(1,7).findMap(doubledEven).unwrap()) == (4));
+    assert((intIter(1,7).mapWhile(firstThree).count()) == (3));
+    assert((intIter(1,7).takeWhile(belowFour).count()) == (3));
+    assert((intIter(1,7).skipWhile(belowFour).next().unwrap()) == (4));
+    assert((intIter(1,7).skip(2).take(2).fold(0,sum)) == (7));
+    assert((intIter(0,10).stepBy(2).last().unwrap()) == (8));
+    assert((intIter(1,4).rev().next().unwrap()) == (3));
+    assert((intIter(1,3).cycle().take(7).fold(0,sum)) == (10));
+    assert((repeat<int64>(3).take(4).fold(0,sum)) == (12));
+    assert((intIter(1,3).chain(intIter(3,5)).fold(0,sum)) == (10));
+    assert((intIter(1,4).sameItems(intIter(1,4))) == (true));
+    assert((intIter(1,4).sameItems(intIter(1,5))) == (false));
+    let indexed = intIter(5,7).enumerate().next().unwrap();
+    assert((indexed[0]) == (0));
+    assert((indexed[1]) == (5));
+    let zipped = intIter(1,4).zip("ab".chars()).collect();
+    assert((zipped.len()) == (2));
+    assert(((zipped[1])[0]) == (2));
+    assert(((zipped[1])[1]) == ('b'));
+    let split = intIter(1,7).peekingTakeWhile(belowFour);
+    let first = split[0]; let rest = split[1];
+    assert((first.count()) == (3));
+    assert((rest.next().unwrap()) == (4));
+    assert((rest.next().unwrap()) == (5));
+    let scanned = intIter(1,5).scan(0,running).collect();
+    assert((scanned[3]) == (10));
+    let failed = intIter(1,5).tryFold(0,checkedSum);
+    assert((failed.isErr()) == (true));
+    assert((failed.error().toString()) == ("three"));
+    Flaky state;
+    let nonFused = fromState<int64,Flaky>(state);
+    assert((nonFused.next().isNone()) == (true));
+    assert((nonFused.next().unwrap()) == (9));
+    let fused = fromState<int64,Flaky>(state).fuse();
+    assert((fused.next().isNone()) == (true));
+    assert((fused.next().isNone()) == (true));
+    List<int64> empty;
+    assert((empty.intoIter().count()) == (0));
+    for (int64 round = 0; round < 4; round = round + 1) {
+
+        List<int64> source; source.push(1); source.push(2); source.push(3);
+        {
+            let readonly = source.iter();
+            assert((readonly.map(read).fold(0,sum)) == (6));
+            let collectedRefs = readonly.collect();
+            assert((collectedRefs[0]) == (1));
+            assert((readonly.zip(source.iter()).map(addRefs).fold(0,sum)) == (12));
+            let mutable = source.iterMut();
+            mutable.forEach(bump);
+            assert((source[0]) == (11));
+            assert((source[2]) == (13));
+            int64 const& saved = readonly.next().unwrap();
+            assert((saved) == (11));
+        }
+        source.push(4);
+        let owned = source.intoIter();
+        assert((source.len()) == (0));
+        assert((owned.map(label).collect()[0]) == ("n11"));
+        assert((owned.count()) == (4));
+        let set = {3,1,3};
+        assert((set.intoIter().fold(0,sum)) == (4));
+        assert((set.len()) == (0));
+        let map = {"a":"one","b":"two"};
+        let entries = map.intoIter().collect();
+        assert((map.len()) == (0));
+        for (Pair<String, String> entry in entries) {
+            assert((entry.first == "a" && entry.second == "one")
+            || (entry.first == "b" && entry.second == "two"));
+        }
+        List<String> words; words.push("one"); words.push("two");
+        {
+            let textRefs = words.iterMut(); textRefs.forEach(replaceText);
+            assert((words[0]) == ("changed"));
+            assert((words.iter().map(textLength).fold(0,sum)) == (14));
+        }
+        List<IterRecord> records; IterRecord record; record.text = "record"; record.number = 4; records.push(record);
+        { let refs = records.iterMut(); refs.forEach(updateRecord); }
+        assert(((records[0]).text) == ("record!"));
+        assert(((records[0]).number) == (5));
+        let text = intIter(1,4).map(label).collect();
+        assert((text[2]) == ("n3"));
+
+    }
+    int64 raw[3]; raw[0] = 7; raw[1] = 8; raw[2] = 9;
+    assert((fromSpan<int64>(&raw[0],3).map(read).fold(0,sum)) == (24));
+    int64 total = 0;
+    for (int64 item in intIter(1,4).map(squared)) { total = total + item; }
+    assert((total) == (14));
+    assert((std::core::range(1,5).intoIter().fold(0,sum)) == (10));
+    assert((intIter(5,1,-1).fold(0,sum)) == (14));
+    assert((madeList().intoIter().fold(0,sum)) == (5));
+    assert((madeList().iter().map(read).fold(0,sum)) == (5));
+    let kept = localBorrow();
+    assert((kept.map(read).fold(0,sum)) == (6));
+    let reversedRefs = reversedLocal();
+    assert((reversedRefs.map(read).fold(0,sum)) == (6));
+    let prefixRefs = prefixLocal();
+    assert((prefixRefs.map(read).fold(0,sum)) == (2));
+    assert((intIter(1,1).cycle().next().isNone()) == (true));
+    assert((intIter(1,5).take(0).count()) == (0));
+    let extreme = intIter(-(int64)9223372036854775807 - (int64)1, 9223372036854775807);
+    let extremeHint = extreme.sizeHint();
+    assert((extremeHint[0]) == (0));
+    assert(((extremeHint[1]).isNone()) == (true));
+    assert((intIter(9223372036854775806, 9223372036854775807, 2).count()) == (1));
+    assert((intIter(-(int64)9223372036854775807, -(int64)9223372036854775807 - (int64)1, -2).count()) == (1));
+    println("iterator pipelines OK");
+}
+```
+
+</details>
+
+<details>
+<summary>示例输出</summary>
+
+```text
+iterator pipelines OK
+```
+
+</details>
+
+## 点调用与自由函数对应
+
+`Iter` 的适配器点调用由编译器转为同名自由函数，接收者作为第一个参数。例如 `cursor.map(mapper)` 等价于 `std::iter::map(cursor,mapper)`。下表中的方法同样适用各函数条目的参数、返回值与边界。
+
+| 点调用 | 对应入口 |
+| --- | --- |
+| `cursor.map(...)` | `std::iter::map(cursor,...)` |
+| `cursor.filter(...)` | `std::iter::filter(cursor,...)` |
+| `cursor.filterMap(...)` | `std::iter::filterMap(cursor,...)` |
+| `cursor.mapWhile(...)` | `std::iter::mapWhile(cursor,...)` |
+| `cursor.takeWhile(...)` | `std::iter::takeWhile(cursor,...)` |
+| `cursor.skipWhile(...)` | `std::iter::skipWhile(cursor,...)` |
+| `cursor.findMap(...)` | `std::iter::findMap(cursor,...)` |
+| `cursor.fold(...)` | `std::iter::fold(cursor,...)` |
+| `cursor.tryFold(...)` | `std::iter::tryFold(cursor,...)` |
+| `cursor.scan(...)` | `std::iter::scan(cursor,...)` |
+| `cursor.take(...)` | `std::iter::take(cursor,...)` |
+| `cursor.skip(...)` | `std::iter::skip(cursor,...)` |
+| `cursor.zip(...)` | `std::iter::zip(cursor,...)` |
+| `cursor.cycle(...)` | `std::iter::cycle(cursor,...)` |
+| `cursor.chain(...)` | `std::iter::chain(cursor,...)` |
+| `cursor.rev(...)` | `std::iter::rev(cursor,...)` |
+| `cursor.enumerate(...)` | `std::iter::enumerate(cursor,...)` |
+| `cursor.peekingTakeWhile(...)` | `std::iter::peekingTakeWhile(cursor,...)` |
+| `cursor.stepBy(...)` | `std::iter::stepBy(cursor,...)` |
+| `cursor.fuse(...)` | `std::iter::fuse(cursor,...)` |
+| `cursor.inspect(...)` | `std::iter::inspect(cursor,...)` |
+| `cursor.sameItems(...)` | `std::iter::sameItems(cursor,...)` |
+| `cursor.collect(...)` | `std::iter::collect(cursor,...)` |
+| `list.iter()` / `list.iterMut()` | `listIter(&list)` / `listIterMut(&list)` |
+| `list.intoIter()` | `listIntoIter(&list)`，移动元素，源容器清空 |
+| `set.iter()` / `map.iter()` | `setIter(&set)` / `mapIter(&map)`，借用快照，来源容器保持不变 |
+| `set.intoIter()` / `map.intoIter()` | `setIntoIter(&set)` / `mapIntoIter(&map)`，移动元素，源容器清空 |
+| `text.chars()` / `range.intoIter()` | `chars(text)` / `fromRange(range)` |
+
+## 类型、枚举、常量与字段
+
+公开字段按源码原样列出；句柄和游标字段用于包装器状态，通常通过方法操作。枚举的括号表示变体载荷。
+
+| 所属类型 | 声明 | 说明 |
+| --- | --- | --- |
+| 模块 | <a id="symbol-222"></a>`interface IterNext<T>` | 有状态迭代器接口；每次 next 消费一个元素。 |
+| 模块 | <a id="symbol-223"></a>`struct Iter<T> : Iterator<T>` | 持有惰性游标状态，按 Lepus 值语义复制时获得独立游标。 |
+| Iter | <a id="symbol-224"></a>`Any state` | 以 Any 持有的具体迭代游标状态。 |
+| Iter | <a id="symbol-225"></a>`bool buffered` | 是否已缓存 peek 取得的下一项。 |
+| Iter | <a id="symbol-226"></a>`Option<T> pending` | 等待消费的元素或队列。 |
+| 模块 | <a id="symbol-227"></a>`struct IteratorValueState<T,S : Iterator<T>> : IterNext<T>` | 将语言 Iterator 值保存为独立的惰性游标。 |
+| IteratorValueState | <a id="symbol-228"></a>`S source` | 被适配的源游标或连续存储。 |
+| IteratorValueState | <a id="symbol-229"></a>`int64 position` | 下一项在源存储中的位置。 |
+| 模块 | <a id="symbol-230"></a>`struct IterListState<T> : IterNext<T>` | 列表值迭代状态，保留未消费的元素。 |
+| IterListState | <a id="symbol-231"></a>`List<T> values` | 按声明顺序保存的元素存储。 |
+| IterListState | <a id="symbol-232"></a>`int64 position` | 下一项在源存储中的位置。 |
+| 模块 | <a id="symbol-233"></a>`struct IterRangeState : IterNext<int64>` | 创建半开整数区间的惰性迭代器。 |
+| IterRangeState | <a id="symbol-234"></a>`int64 current` | 当前迭代位置或正在消费的游标。 |
+| IterRangeState | <a id="symbol-235"></a>`int64 stop` | 区间结束边界。 |
+| IterRangeState | <a id="symbol-236"></a>`int64 step` | 每次推进的步长。 |
+| IterRangeState | <a id="symbol-237"></a>`bool done` | 游标是否已经结束。 |
+| 模块 | <a id="symbol-238"></a>`struct IterMapState<T,U> : IterNext<U>` | IterMapState 的惰性状态，仅在 next 时执行回调或消费来源。 |
+| IterMapState | <a id="symbol-239"></a>`Iter<T> source` | 被适配的源游标或连续存储。 |
+| IterMapState | <a id="symbol-240"></a>`U fn(T) callback` | 宿主事件发生时执行的回调。 |
+| 模块 | <a id="symbol-241"></a>`struct IterFilterState<T> : IterNext<T>` | IterFilterState 的惰性状态，仅在 next 时执行回调或消费来源。 |
+| IterFilterState | <a id="symbol-242"></a>`Iter<T> source` | 被适配的源游标或连续存储。 |
+| IterFilterState | <a id="symbol-243"></a>`bool fn(T) predicate` | 用于筛选或判断停止条件的回调。 |
+| 模块 | <a id="symbol-244"></a>`struct IterFilterMapState<T,U> : IterNext<U>` | IterFilterMapState 的惰性状态，仅在 next 时执行回调或消费来源。 |
+| IterFilterMapState | <a id="symbol-245"></a>`Iter<T> source` | 被适配的源游标或连续存储。 |
+| IterFilterMapState | <a id="symbol-246"></a>`Option<U> fn(T) callback` | 宿主事件发生时执行的回调。 |
+| 模块 | <a id="symbol-247"></a>`struct IterMapWhileState<T,U> : IterNext<U>` | IterMapWhileState 的惰性状态，仅在 next 时执行回调或消费来源。 |
+| IterMapWhileState | <a id="symbol-248"></a>`Iter<T> source` | 被适配的源游标或连续存储。 |
+| IterMapWhileState | <a id="symbol-249"></a>`bool done` | 游标是否已经结束。 |
+| IterMapWhileState | <a id="symbol-250"></a>`Option<U> fn(T) callback` | 宿主事件发生时执行的回调。 |
+| 模块 | <a id="symbol-251"></a>`struct IterTakeWhileState<T> : IterNext<T>` | IterTakeWhileState 的惰性状态，仅在 next 时执行回调或消费来源。 |
+| IterTakeWhileState | <a id="symbol-252"></a>`Iter<T> source` | 被适配的源游标或连续存储。 |
+| IterTakeWhileState | <a id="symbol-253"></a>`bool done` | 游标是否已经结束。 |
+| IterTakeWhileState | <a id="symbol-254"></a>`bool fn(T) predicate` | 用于筛选或判断停止条件的回调。 |
+| 模块 | <a id="symbol-255"></a>`struct IterSkipWhileState<T> : IterNext<T>` | IterSkipWhileState 的惰性状态，仅在 next 时执行回调或消费来源。 |
+| IterSkipWhileState | <a id="symbol-256"></a>`Iter<T> source` | 被适配的源游标或连续存储。 |
+| IterSkipWhileState | <a id="symbol-257"></a>`bool skipping` | 是否仍处于跳过前缀的阶段。 |
+| IterSkipWhileState | <a id="symbol-258"></a>`bool fn(T) predicate` | 用于筛选或判断停止条件的回调。 |
+| 模块 | <a id="symbol-259"></a>`struct IterTakeState<T> : IterNext<T>` | IterTakeState 的惰性状态，仅在 next 时执行回调或消费来源。 |
+| IterTakeState | <a id="symbol-260"></a>`Iter<T> source` | 被适配的源游标或连续存储。 |
+| IterTakeState | <a id="symbol-261"></a>`int64 remaining` | 尚需跳过或允许消费的元素数量。 |
+| 模块 | <a id="symbol-262"></a>`struct IterSkipState<T> : IterNext<T>` | IterSkipState 的惰性状态，仅在 next 时执行回调或消费来源。 |
+| IterSkipState | <a id="symbol-263"></a>`Iter<T> source` | 被适配的源游标或连续存储。 |
+| IterSkipState | <a id="symbol-264"></a>`int64 remaining` | 尚需跳过或允许消费的元素数量。 |
+| 模块 | <a id="symbol-265"></a>`struct IterChainState<T> : IterNext<T>` | IterChainState 的惰性状态，仅在 next 时执行回调或消费来源。 |
+| IterChainState | <a id="symbol-266"></a>`Iter<T> left` | 第一个输入游标。 |
+| IterChainState | <a id="symbol-267"></a>`Iter<T> right` | 第二个输入游标。 |
+| IterChainState | <a id="symbol-268"></a>`bool switched` | 是否已切换到第二个输入游标。 |
+| 模块 | <a id="symbol-269"></a>`struct IterZipState<T,U> : IterNext<(T,U)>` | IterZipState 的惰性状态，仅在 next 时执行回调或消费来源。 |
+| IterZipState | <a id="symbol-270"></a>`Iter<T> left` | 第一个输入游标。 |
+| IterZipState | <a id="symbol-271"></a>`Iter<U> right` | 第二个输入游标。 |
+| 模块 | <a id="symbol-272"></a>`struct IterEnumerateState<T> : IterNext<(int64,T)>` | IterEnumerateState 的惰性状态，仅在 next 时执行回调或消费来源。 |
+| IterEnumerateState | <a id="symbol-273"></a>`Iter<T> source` | 被适配的源游标或连续存储。 |
+| IterEnumerateState | <a id="symbol-274"></a>`int64 index` | 当前元素序号，从 0 开始。 |
+| 模块 | <a id="symbol-275"></a>`struct IterStepState<T> : IterNext<T>` | IterStepState 的惰性状态，仅在 next 时执行回调或消费来源。 |
+| IterStepState | <a id="symbol-276"></a>`Iter<T> source` | 被适配的源游标或连续存储。 |
+| IterStepState | <a id="symbol-277"></a>`int64 step` | 每次推进的步长。 |
+| IterStepState | <a id="symbol-278"></a>`bool started` | 是否已消费首个元素。 |
+| 模块 | <a id="symbol-279"></a>`struct IterFuseState<T> : IterNext<T>` | IterFuseState 的惰性状态，仅在 next 时执行回调或消费来源。 |
+| IterFuseState | <a id="symbol-280"></a>`Iter<T> source` | 被适配的源游标或连续存储。 |
+| IterFuseState | <a id="symbol-281"></a>`bool done` | 游标是否已经结束。 |
+| 模块 | <a id="symbol-282"></a>`struct IterInspectState<T> : IterNext<T>` | IterInspectState 的惰性状态，仅在 next 时执行回调或消费来源。 |
+| IterInspectState | <a id="symbol-283"></a>`Iter<T> source` | 被适配的源游标或连续存储。 |
+| IterInspectState | <a id="symbol-284"></a>`void fn(T) action` | 逐项执行的观察或处理回调。 |
+| 模块 | <a id="symbol-285"></a>`struct IterCycleState<T> : IterNext<T>` | IterCycleState 的惰性状态，仅在 next 时执行回调或消费来源。 |
+| IterCycleState | <a id="symbol-286"></a>`Iter<T> initial` | 用于重新开始遍历的初始游标。 |
+| IterCycleState | <a id="symbol-287"></a>`Iter<T> current` | 当前迭代位置或正在消费的游标。 |
+| IterCycleState | <a id="symbol-288"></a>`bool empty` | 输入是否已确认没有元素。 |
+| 模块 | <a id="symbol-289"></a>`struct IterScanState<T,A,U> : IterNext<U>` | IterScanState 的惰性状态，仅在 next 时执行回调或消费来源。 |
+| IterScanState | <a id="symbol-290"></a>`Iter<T> source` | 被适配的源游标或连续存储。 |
+| IterScanState | <a id="symbol-291"></a>`A accumulator` | 扫描过程中保存的累积状态。 |
+| IterScanState | <a id="symbol-292"></a>`Option<U> fn(A mut&, T) callback` | 宿主事件发生时执行的回调。 |
+| 模块 | <a id="symbol-293"></a>`struct IterBufferState<T> : IterNext<T>` | 缓存有限来源，保留来源状态以延长元素引用的有效期。 |
+| IterBufferState | <a id="symbol-294"></a>`List<T> values` | 按声明顺序保存的元素存储。 |
+| IterBufferState | <a id="symbol-295"></a>`Any anchor` | 用于维持缓冲元素借用有效性的源状态。 |
+| IterBufferState | <a id="symbol-296"></a>`int64 position` | 下一项在源存储中的位置。 |
+| 模块 | <a id="symbol-297"></a>`struct IterConstListState<T> : IterNext<T const&>` | 持有列表只读租约的迭代状态，逐项返回 const&。 |
+| IterConstListState | <a id="symbol-298"></a>`Any lease` | 保持源列表存储有效的迭代租约。 |
+| IterConstListState | <a id="symbol-299"></a>`int64 position` | 下一项在源存储中的位置。 |
+| 模块 | <a id="symbol-300"></a>`struct IterMutListState<T> : IterNext<T mut&>` | 持有列表可写租约的迭代状态，逐项返回 mut&。 |
+| IterMutListState | <a id="symbol-301"></a>`Any lease` | 保持源列表存储有效的迭代租约。 |
+| IterMutListState | <a id="symbol-302"></a>`int64 position` | 下一项在源存储中的位置。 |
+| 模块 | <a id="symbol-303"></a>`struct IterSpanState<T> : IterNext<T const&>` | 读取数组或 Span 的只读引用，来源必须覆盖游标生命周期。 |
+| IterSpanState | <a id="symbol-304"></a>`T const& source` | 被适配的源游标或连续存储。 |
+| IterSpanState | <a id="symbol-305"></a>`int64 length` | 连续存储中可访问的元素数量。 |
+| IterSpanState | <a id="symbol-306"></a>`int64 position` | 下一项在源存储中的位置。 |
+| 模块 | <a id="symbol-307"></a>`struct IterCharsState : IterNext<char>` | 按 Lepus 字符模型遍历字符串字节，持有独立字符串副本。 |
+| IterCharsState | <a id="symbol-308"></a>`String source` | 被适配的源游标或连续存储。 |
+| IterCharsState | <a id="symbol-309"></a>`int64 position` | 下一项在源存储中的位置。 |
+| 模块 | <a id="symbol-310"></a>`struct IterRepeatState<T> : IterNext<T>` | 惰性无限重复一个值，可配合 take 创建有限输出。 |
+| IterRepeatState | <a id="symbol-311"></a>`T value` | 保存的单个值。 |
+
+## 函数索引
+
+| 名称 | 声明 |
+| --- | --- |
+| [IterNext::next](#api-0) | `Option<T> next()` |
+| [IterNext::sizeHint](#api-1) | `(int64, Option<int64>) sizeHint()` |
+| [Iter::peek](#api-2) | `Option<T> peek()` |
+| [Iter::next](#api-3) | `Option<T> next()` |
+| [Iter::sizeHint](#api-4) | `(int64, Option<int64>) sizeHint()` |
+| [Iter::iterator](#api-5) | `Option<T> iterator(int64 index)` |
+| [Iter::count](#api-6) | `int64 count()` |
+| [Iter::nth](#api-7) | `Option<T> nth(int64 index)` |
+| [Iter::last](#api-8) | `Option<T> last()` |
+| [Iter::all](#api-9) | `bool all(bool fn(T) predicate)` |
+| [Iter::any](#api-10) | `bool any(bool fn(T) predicate)` |
+| [Iter::find](#api-11) | `Option<T> find(bool fn(T) predicate)` |
+| [Iter::forEach](#api-12) | `void forEach(void fn(T) action)` |
+| [fromState](#api-13) | `Iter<T> fromState<T,S>(S state)` |
+| [IteratorValueState::next](#api-14) | `Option<T> next()` |
+| [IteratorValueState::sizeHint](#api-15) | `(int64, Option<int64>) sizeHint()` |
+| [fromIterator](#api-16) | `Iter<T> fromIterator<T,S : Iterator<T>>(S source)` |
+| [IterListState::next](#api-17) | `Option<T> next()` |
+| [IterListState::sizeHint](#api-18) | `(int64, Option<int64>) sizeHint()` |
+| [fromList](#api-19) | `Iter<T> fromList<T>(List<T> values)` |
+| [IterRangeState::next](#api-20) | `Option<int64> next()` |
+| [IterRangeState::sizeHint](#api-21) | `(int64, Option<int64>) sizeHint()` |
+| [intIter](#api-22) | `Iter<int64> intIter(int64 start, int64 stop, int64 step)` |
+| [intIter](#api-23) | `Iter<int64> intIter(int64 start, int64 stop)` |
+| [IterMapState::next](#api-24) | `Option<U> next()` |
+| [IterMapState::sizeHint](#api-25) | `(int64, Option<int64>) sizeHint()` |
+| [map](#api-26) | `Iter<U> map<T,U>(Iter<T> source, U fn(T) callback)` |
+| [IterFilterState::next](#api-27) | `Option<T> next()` |
+| [IterFilterState::sizeHint](#api-28) | `(int64, Option<int64>) sizeHint()` |
+| [filter](#api-29) | `Iter<T> filter<T>(Iter<T> source, bool fn(T) predicate)` |
+| [IterFilterMapState::next](#api-30) | `Option<U> next()` |
+| [IterFilterMapState::sizeHint](#api-31) | `(int64, Option<int64>) sizeHint()` |
+| [filterMap](#api-32) | `Iter<U> filterMap<T,U>(Iter<T> source, Option<U> fn(T) callback)` |
+| [IterMapWhileState::next](#api-33) | `Option<U> next()` |
+| [IterMapWhileState::sizeHint](#api-34) | `(int64, Option<int64>) sizeHint()` |
+| [mapWhile](#api-35) | `Iter<U> mapWhile<T,U>(Iter<T> source, Option<U> fn(T) callback)` |
+| [IterTakeWhileState::next](#api-36) | `Option<T> next()` |
+| [IterTakeWhileState::sizeHint](#api-37) | `(int64, Option<int64>) sizeHint()` |
+| [takeWhile](#api-38) | `Iter<T> takeWhile<T>(Iter<T> source, bool fn(T) predicate)` |
+| [IterSkipWhileState::next](#api-39) | `Option<T> next()` |
+| [IterSkipWhileState::sizeHint](#api-40) | `(int64, Option<int64>) sizeHint()` |
+| [skipWhile](#api-41) | `Iter<T> skipWhile<T>(Iter<T> source, bool fn(T) predicate)` |
+| [IterTakeState::next](#api-42) | `Option<T> next()` |
+| [IterTakeState::sizeHint](#api-43) | `(int64, Option<int64>) sizeHint()` |
+| [take](#api-44) | `Iter<T> take<T>(Iter<T> source, int64 amount)` |
+| [IterSkipState::next](#api-45) | `Option<T> next()` |
+| [IterSkipState::sizeHint](#api-46) | `(int64, Option<int64>) sizeHint()` |
+| [skip](#api-47) | `Iter<T> skip<T>(Iter<T> source, int64 amount)` |
+| [IterChainState::next](#api-48) | `Option<T> next()` |
+| [IterChainState::sizeHint](#api-49) | `(int64, Option<int64>) sizeHint()` |
+| [chain](#api-50) | `Iter<T> chain<T>(Iter<T> left, Iter<T> right)` |
+| [IterZipState::next](#api-51) | `Option<(T,U)> next()` |
+| [IterZipState::sizeHint](#api-52) | `(int64, Option<int64>) sizeHint()` |
+| [zip](#api-53) | `Iter<(T,U)> zip<T,U>(Iter<T> left, Iter<U> right)` |
+| [IterEnumerateState::next](#api-54) | `Option<(int64,T)> next()` |
+| [IterEnumerateState::sizeHint](#api-55) | `(int64, Option<int64>) sizeHint()` |
+| [enumerate](#api-56) | `Iter<(int64,T)> enumerate<T>(Iter<T> source)` |
+| [IterStepState::next](#api-57) | `Option<T> next()` |
+| [IterStepState::sizeHint](#api-58) | `(int64, Option<int64>) sizeHint()` |
+| [stepBy](#api-59) | `Iter<T> stepBy<T>(Iter<T> source, int64 step)` |
+| [IterFuseState::next](#api-60) | `Option<T> next()` |
+| [IterFuseState::sizeHint](#api-61) | `(int64, Option<int64>) sizeHint()` |
+| [fuse](#api-62) | `Iter<T> fuse<T>(Iter<T> source)` |
+| [IterInspectState::next](#api-63) | `Option<T> next()` |
+| [IterInspectState::sizeHint](#api-64) | `(int64, Option<int64>) sizeHint()` |
+| [inspect](#api-65) | `Iter<T> inspect<T>(Iter<T> source, void fn(T) action)` |
+| [IterCycleState::next](#api-66) | `Option<T> next()` |
+| [IterCycleState::sizeHint](#api-67) | `(int64, Option<int64>) sizeHint()` |
+| [cycle](#api-68) | `Iter<T> cycle<T>(Iter<T> source)` |
+| [IterScanState::next](#api-69) | `Option<U> next()` |
+| [IterScanState::sizeHint](#api-70) | `(int64, Option<int64>) sizeHint()` |
+| [scan](#api-71) | `Iter<U> scan<T,A,U>(Iter<T> source, A initial, Option<U> fn(A mut&, T) callback)` |
+| [collect](#api-72) | `List<T> collect<T>(Iter<T> source)` |
+| [fold](#api-73) | `A fold<T,A>(Iter<T> source, A initial, A fn(A, T) callback)` |
+| [tryFold](#api-74) | `Result<A,E> tryFold<T,A,E>(Iter<T> source, A initial, Result<A,E> fn(A, T) callback)` |
+| [findMap](#api-75) | `Option<U> findMap<T,U>(Iter<T> source, Option<U> fn(T) callback)` |
+| [sameItems](#api-76) | `bool sameItems<T>(Iter<T> left, Iter<T> right)` |
+| [IterBufferState::next](#api-77) | `Option<T> next()` |
+| [IterBufferState::sizeHint](#api-78) | `(int64,Option<int64>) sizeHint()` |
+| [rev](#api-79) | `Iter<T> rev<T>(Iter<T> source)` |
+| [peekingTakeWhile](#api-80) | `(Iter<T>,Iter<T>) peekingTakeWhile<T>(Iter<T> source, bool fn(T) predicate)` |
+| [countIter](#api-81) | `int64 countIter<T>(Iter<T> mut& source)` |
+| [nth](#api-82) | `Option<T> nth<T>(Iter<T> mut& source, int64 index)` |
+| [last](#api-83) | `Option<T> last<T>(Iter<T> mut& source)` |
+| [all](#api-84) | `bool all<T>(Iter<T> mut& source, bool fn(T) predicate)` |
+| [any](#api-85) | `bool any<T>(Iter<T> mut& source, bool fn(T) predicate)` |
+| [find](#api-86) | `Option<T> find<T>(Iter<T> mut& source, bool fn(T) predicate)` |
+| [forEach](#api-87) | `void forEach<T>(Iter<T> mut& source, void fn(T) action)` |
+| [listIntoIter](#api-88) | `Iter<T> listIntoIter<T>(List<T> mut& source)` |
+| [fromRange](#api-89) | `Iter<int64> fromRange(std::core::__Range source)` |
+| [IterConstListState::next](#api-90) | `Option<T const&> next()` |
+| [IterConstListState::sizeHint](#api-91) | `(int64, Option<int64>) sizeHint()` |
+| [IterMutListState::next](#api-92) | `Option<T mut&> next()` |
+| [IterMutListState::sizeHint](#api-93) | `(int64, Option<int64>) sizeHint()` |
+| [listIter](#api-94) | `Iter<T const&> listIter<T>(List<T> const& source)` |
+| [listIterMut](#api-95) | `Iter<T mut&> listIterMut<T>(List<T> mut& source)` |
+| [setIntoIter](#api-96) | `Iter<T> setIntoIter<T>(Set<T> mut& source)` |
+| [setIter](#api-97) | `Iter<T> setIter<T>(Set<T> const& source)` |
+| [mapIntoIter](#api-98) | `Iter<Pair<K,V>> mapIntoIter<K,V>(Map<K,V> mut& source)` |
+| [mapIter](#api-99) | `Iter<Pair<K,V>> mapIter<K,V>(Map<K,V> const& source)` |
+| [IterSpanState::next](#api-100) | `Option<T const&> next()` |
+| [IterSpanState::sizeHint](#api-101) | `(int64, Option<int64>) sizeHint()` |
+| [fromSpan](#api-102) | `Iter<T const&> fromSpan<T>(T const& source, int64 length)` |
+| [IterCharsState::next](#api-103) | `Option<char> next()` |
+| [IterCharsState::sizeHint](#api-104) | `(int64, Option<int64>) sizeHint()` |
+| [chars](#api-105) | `Iter<char> chars(String source)` |
+| [IterRepeatState::next](#api-106) | `Option<T> next()` |
+| [IterRepeatState::sizeHint](#api-107) | `(int64, Option<int64>) sizeHint()` |
+| [repeat](#api-108) | `Iter<T> repeat<T>(T value)` |
+| [groupBy](#api-109) | `Map<K,List<T>> groupBy<T,K>(Iter<T> source, K fn(T) key_of)` |
+| [chunk](#api-110) | `Iter<List<T>> chunk<T>(Iter<T> source, int64 length)` |
+
+<a id="api-0"></a>
+
+### IterNext::next（1）
+
+**声明**
+
+```lepus
+Option<T> next();
+```
+
+**行为**
+
+消费并返回下一项，当前无项时 None。
+
+**参数**
+
+无显式参数。实例方法使用当前接收者。
+
+**返回值**
+
+`Option<T>`。下一项；耗尽时返回 None。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+obj.next();
+```
+
+**源码**：[source/std/iter.lep:9](../../source/std/iter.lep#L9)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-1"></a>
+
+### IterNext::sizeHint（2）
+
+**声明**
+
+```lepus
+(int64, Option<int64>) sizeHint();
+```
+
+**行为**
+
+返回剩余数量下界及可选上界；未知上界为 None。
+
+**参数**
+
+无显式参数。实例方法使用当前接收者。
+
+**返回值**
+
+`(int64, Option<int64>)`。返回剩余数量下界及可选上界；未知上界为 None。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+obj.sizeHint();
+```
+
+**源码**：[source/std/iter.lep:14](../../source/std/iter.lep#L14)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-2"></a>
+
+### Iter::peek（3）
+
+**声明**
+
+```lepus
+Option<T> peek();
+```
+
+**行为**
+
+查看下一项并保留该项供后续消费。
+
+**参数**
+
+无显式参数。实例方法使用当前接收者。
+
+**返回值**
+
+`Option<T>`。查看下一项并保留该项供后续消费。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+obj.peek();
+```
+
+**源码**：[source/std/iter.lep:26](../../source/std/iter.lep#L26)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-3"></a>
+
+### Iter::next（4）
+
+**声明**
+
+```lepus
+Option<T> next();
+```
+
+**行为**
+
+消费并返回下一项，当前无项时 None。
+
+**参数**
+
+无显式参数。实例方法使用当前接收者。
+
+**返回值**
+
+`Option<T>`。下一项；耗尽时返回 None。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+obj.next();
+```
+
+**源码**：[source/std/iter.lep:38](../../source/std/iter.lep#L38)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-4"></a>
+
+### Iter::sizeHint（5）
+
+**声明**
+
+```lepus
+(int64, Option<int64>) sizeHint();
+```
+
+**行为**
+
+返回剩余数量下界及可选上界；未知上界为 None。
+
+**参数**
+
+无显式参数。实例方法使用当前接收者。
+
+**返回值**
+
+`(int64, Option<int64>)`。返回剩余数量下界及可选上界；未知上界为 None。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+obj.sizeHint();
+```
+
+**源码**：[source/std/iter.lep:52](../../source/std/iter.lep#L52)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-5"></a>
+
+### Iter::iterator（6）
+
+**声明**
+
+```lepus
+Option<T> iterator(int64 index);
+```
+
+**行为**
+
+读取指定迭代位置；无元素时返回 None。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `index` | `int64 index` | 从零开始的下标。 | 无 |
+
+**返回值**
+
+`Option<T>`。下一项；耗尽时返回 None。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+obj.iterator(index);
+```
+
+**源码**：[source/std/iter.lep:78](../../source/std/iter.lep#L78)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-6"></a>
+
+### Iter::count（7）
+
+**声明**
+
+```lepus
+int64 count();
+```
+
+**行为**
+
+消费并返回项数。
+
+**参数**
+
+无显式参数。实例方法使用当前接收者。
+
+**返回值**
+
+`int64`。消费并返回项数。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+实现包含 panic 分支；调用前应处理空值或失败状态。
+
+**调用形式**
+
+```lepus
+obj.count();
+```
+
+**源码**：[source/std/iter.lep:85](../../source/std/iter.lep#L85)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-7"></a>
+
+### Iter::nth（8）
+
+**声明**
+
+```lepus
+Option<T> nth(int64 index);
+```
+
+**行为**
+
+消费到从 0 开始的第 index 项，返回 Option。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `index` | `int64 index` | 从零开始的下标。 | 无 |
+
+**返回值**
+
+`Option<T>`。消费到从 0 开始的第 index 项，返回 Option。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+显式前置检查：`index >= 0, "nth 下标不能为负数"`。
+
+**调用形式**
+
+```lepus
+obj.nth(index);
+```
+
+**源码**：[source/std/iter.lep:101](../../source/std/iter.lep#L101)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-8"></a>
+
+### Iter::last（9）
+
+**声明**
+
+```lepus
+Option<T> last();
+```
+
+**行为**
+
+消费全部剩余项并返回最后一项。
+
+**参数**
+
+无显式参数。实例方法使用当前接收者。
+
+**返回值**
+
+`Option<T>`。消费全部剩余项并返回最后一项。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+实现包含 panic 分支；调用前应处理空值或失败状态。
+
+**调用形式**
+
+```lepus
+obj.last();
+```
+
+**源码**：[source/std/iter.lep:117](../../source/std/iter.lep#L117)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-9"></a>
+
+### Iter::all（10）
+
+**声明**
+
+```lepus
+bool all(bool fn(T) predicate);
+```
+
+**行为**
+
+消费并判断是否全部满足谓词，空源为 true。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `predicate` | `bool fn(T) predicate` | 元素筛选条件。 | 无 |
+
+**返回值**
+
+`bool`。消费并判断是否全部满足谓词，空源为 true。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+实现包含 panic 分支；调用前应处理空值或失败状态。
+
+**调用形式**
+
+```lepus
+obj.all(predicate);
+```
+
+**源码**：[source/std/iter.lep:133](../../source/std/iter.lep#L133)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-10"></a>
+
+### Iter::any（11）
+
+**声明**
+
+```lepus
+bool any(bool fn(T) predicate);
+```
+
+**行为**
+
+消费并判断是否存在满足谓词的项，空源为 false。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `predicate` | `bool fn(T) predicate` | 元素筛选条件。 | 无 |
+
+**返回值**
+
+`bool`。消费并判断是否存在满足谓词的项，空源为 false。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+实现包含 panic 分支；调用前应处理空值或失败状态。
+
+**调用形式**
+
+```lepus
+obj.any(predicate);
+```
+
+**源码**：[source/std/iter.lep:150](../../source/std/iter.lep#L150)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-11"></a>
+
+### Iter::find（12）
+
+**声明**
+
+```lepus
+Option<T> find(bool fn(T) predicate);
+```
+
+**行为**
+
+消费到首个 predicate 为真的项并返回 Option。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `predicate` | `bool fn(T) predicate` | 元素筛选条件。 | 无 |
+
+**返回值**
+
+`Option<T>`。消费到首个 predicate 为真的项并返回 Option。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+实现包含 panic 分支；调用前应处理空值或失败状态。
+
+**调用形式**
+
+```lepus
+obj.find(predicate);
+```
+
+**源码**：[source/std/iter.lep:167](../../source/std/iter.lep#L167)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-12"></a>
+
+### Iter::forEach（13）
+
+**声明**
+
+```lepus
+void forEach(void fn(T) action);
+```
+
+**行为**
+
+逐项调用 action 并消费迭代器。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `action` | `void fn(T) action` | 元素处理函数。 | 无 |
+
+**返回值**
+
+无返回值。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+实现包含 panic 分支；调用前应处理空值或失败状态。
+
+**调用形式**
+
+```lepus
+obj.forEach(action);
+```
+
+**源码**：[source/std/iter.lep:184](../../source/std/iter.lep#L184)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-13"></a>
+
+### fromState（14）
+
+**声明**
+
+```lepus
+Iter<T> fromState<T,S>(S state);
+```
+
+**行为**
+
+复制实现 IterNext<T> 的状态值到专有存储，返回 Iter<T>。
+
+将实现 IterNext 的值装入独立游标。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `state` | `S state` | 初始状态值。 | 无 |
+
+**返回值**
+
+`Iter<T>`。复制实现 IterNext<T> 的状态值到专有存储，返回 Iter<T>。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+fromState<T,S>(state);
+```
+
+**源码**：[source/std/iter.lep:206](../../source/std/iter.lep#L206)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-14"></a>
+
+### IteratorValueState::next（15）
+
+**声明**
+
+```lepus
+Option<T> next();
+```
+
+**行为**
+
+消费并返回下一项，当前无项时 None。
+
+从语言迭代协议读取下一项。
+
+**参数**
+
+无显式参数。实例方法使用当前接收者。
+
+**返回值**
+
+`Option<T>`。本次元素，或表示迭代结束的 None。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+obj.next();
+```
+
+**源码**：[source/std/iter.lep:220](../../source/std/iter.lep#L220)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-15"></a>
+
+### IteratorValueState::sizeHint（16）
+
+**声明**
+
+```lepus
+(int64, Option<int64>) sizeHint();
+```
+
+**行为**
+
+返回剩余数量下界及可选上界；未知上界为 None。
+
+提供未知长度的剩余项估计。
+
+**参数**
+
+无显式参数。实例方法使用当前接收者。
+
+**返回值**
+
+`(int64, Option<int64>)`。下界为零，上界未知。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+obj.sizeHint();
+```
+
+**源码**：[source/std/iter.lep:231](../../source/std/iter.lep#L231)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-16"></a>
+
+### fromIterator（17）
+
+**声明**
+
+```lepus
+Iter<T> fromIterator<T,S : Iterator<T>>(S source);
+```
+
+**行为**
+
+复制实现 Iterator<T> 的来源值，建立可组合的独立惰性游标；不会消费来源变量。
+
+复制语言迭代器值，建立可组合的独立游标。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `source` | `S source` | 实现 Iterator<T> 的来源值。 | 无 |
+
+**返回值**
+
+`Iter<T>`。拥有来源副本的惰性迭代器。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+fromIterator<T,S >>(source);
+```
+
+**源码**：[source/std/iter.lep:241](../../source/std/iter.lep#L241)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-17"></a>
+
+### IterListState::next（18）
+
+**声明**
+
+```lepus
+Option<T> next();
+```
+
+**行为**
+
+消费并返回下一项，当前无项时 None。
+
+**参数**
+
+无显式参数。实例方法使用当前接收者。
+
+**返回值**
+
+`Option<T>`。下一项；耗尽时返回 None。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+obj.next();
+```
+
+**源码**：[source/std/iter.lep:256](../../source/std/iter.lep#L256)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-18"></a>
+
+### IterListState::sizeHint（19）
+
+**声明**
+
+```lepus
+(int64, Option<int64>) sizeHint();
+```
+
+**行为**
+
+返回剩余数量下界及可选上界；未知上界为 None。
+
+**参数**
+
+无显式参数。实例方法使用当前接收者。
+
+**返回值**
+
+`(int64, Option<int64>)`。返回剩余数量下界及可选上界；未知上界为 None。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+obj.sizeHint();
+```
+
+**源码**：[source/std/iter.lep:268](../../source/std/iter.lep#L268)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-19"></a>
+
+### fromList（20）
+
+**声明**
+
+```lepus
+Iter<T> fromList<T>(List<T> values);
+```
+
+**行为**
+
+用列表值构造迭代器。
+
+从列表创建独立值迭代器。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `values` | `List<T> values` | 操作参数。 | 无 |
+
+**返回值**
+
+`Iter<T>`。用列表值构造迭代器。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+fromList(values);
+```
+
+**源码**：[source/std/iter.lep:280](../../source/std/iter.lep#L280)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-20"></a>
+
+### IterRangeState::next（21）
+
+**声明**
+
+```lepus
+Option<int64> next();
+```
+
+**行为**
+
+消费并返回下一项，当前无项时 None。
+
+**参数**
+
+无显式参数。实例方法使用当前接收者。
+
+**返回值**
+
+`Option<int64>`。下一项；耗尽时返回 None。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+obj.next();
+```
+
+**源码**：[source/std/iter.lep:296](../../source/std/iter.lep#L296)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-21"></a>
+
+### IterRangeState::sizeHint（22）
+
+**声明**
+
+```lepus
+(int64, Option<int64>) sizeHint();
+```
+
+**行为**
+
+返回剩余数量下界及可选上界；未知上界为 None。
+
+**参数**
+
+无显式参数。实例方法使用当前接收者。
+
+**返回值**
+
+`(int64, Option<int64>)`。返回剩余数量下界及可选上界；未知上界为 None。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+obj.sizeHint();
+```
+
+**源码**：[source/std/iter.lep:313](../../source/std/iter.lep#L313)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-22"></a>
+
+### intIter（23）
+
+**声明**
+
+```lepus
+Iter<int64> intIter(int64 start, int64 stop, int64 step);
+```
+
+**行为**
+
+构造半开整数区间 [start,stop) 的惰性迭代器，步长不能为零。
+
+按起止值和步长建立惰性整数迭代器。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `start` | `int64 start` | 区间起点。 | 无 |
+| `stop` | `int64 stop` | 区间终点，不包含。 | 无 |
+| `step` | `int64 step` | 步长。 | 无 |
+
+**返回值**
+
+`Iter<int64>`。构造半开整数区间 [start,stop) 的惰性迭代器，步长不能为零。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+显式前置检查：`step != 0, "迭代器区间步长不能为零"`。
+
+**调用形式**
+
+```lepus
+intIter(start, stop, step);
+```
+
+**源码**：[source/std/iter.lep:347](../../source/std/iter.lep#L347)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-23"></a>
+
+### intIter（24）
+
+**声明**
+
+```lepus
+Iter<int64> intIter(int64 start, int64 stop);
+```
+
+**行为**
+
+构造半开整数区间 [start,stop) 的惰性迭代器，步长不能为零。
+
+按起止值和步长建立惰性整数迭代器。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `start` | `int64 start` | 区间起点。 | 无 |
+| `stop` | `int64 stop` | 区间终点，不包含。 | 无 |
+
+**返回值**
+
+`Iter<int64>`。构造半开整数区间 [start,stop) 的惰性迭代器，步长不能为零。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+intIter(start, stop);
+```
+
+**源码**：[source/std/iter.lep:362](../../source/std/iter.lep#L362)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-24"></a>
+
+### IterMapState::next（25）
+
+**声明**
+
+```lepus
+Option<U> next();
+```
+
+**行为**
+
+消费并返回下一项，当前无项时 None。
+
+**参数**
+
+无显式参数。实例方法使用当前接收者。
+
+**返回值**
+
+`Option<U>`。下一项；耗尽时返回 None。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+obj.next();
+```
+
+**源码**：[source/std/iter.lep:374](../../source/std/iter.lep#L374)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-25"></a>
+
+### IterMapState::sizeHint（26）
+
+**声明**
+
+```lepus
+(int64, Option<int64>) sizeHint();
+```
+
+**行为**
+
+返回剩余数量下界及可选上界；未知上界为 None。
+
+**参数**
+
+无显式参数。实例方法使用当前接收者。
+
+**返回值**
+
+`(int64, Option<int64>)`。返回剩余数量下界及可选上界；未知上界为 None。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+obj.sizeHint();
+```
+
+**源码**：[source/std/iter.lep:385](../../source/std/iter.lep#L385)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-26"></a>
+
+### map（27）
+
+**声明**
+
+```lepus
+Iter<U> map<T,U>(Iter<T> source, U fn(T) callback);
+```
+
+**行为**
+
+惰性调用 mapper，将 T 转成 U。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `source` | `Iter<T> source` | 来源游标、容器或连续存储。 | 无 |
+| `callback` | `U fn(T) callback` | 处理元素或累加状态的函数。 | 无 |
+
+**返回值**
+
+`Iter<U>`。惰性调用 mapper，将 T 转成 U。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+map(source, callback);
+```
+
+**源码**：[source/std/iter.lep:397](../../source/std/iter.lep#L397)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-27"></a>
+
+### IterFilterState::next（28）
+
+**声明**
+
+```lepus
+Option<T> next();
+```
+
+**行为**
+
+消费并返回下一项，当前无项时 None。
+
+**参数**
+
+无显式参数。实例方法使用当前接收者。
+
+**返回值**
+
+`Option<T>`。下一项；耗尽时返回 None。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+实现包含 panic 分支；调用前应处理空值或失败状态。
+
+**调用形式**
+
+```lepus
+obj.next();
+```
+
+**源码**：[source/std/iter.lep:412](../../source/std/iter.lep#L412)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-28"></a>
+
+### IterFilterState::sizeHint（29）
+
+**声明**
+
+```lepus
+(int64, Option<int64>) sizeHint();
+```
+
+**行为**
+
+返回剩余数量下界及可选上界；未知上界为 None。
+
+**参数**
+
+无显式参数。实例方法使用当前接收者。
+
+**返回值**
+
+`(int64, Option<int64>)`。返回剩余数量下界及可选上界；未知上界为 None。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+obj.sizeHint();
+```
+
+**源码**：[source/std/iter.lep:428](../../source/std/iter.lep#L428)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-29"></a>
+
+### filter（30）
+
+**声明**
+
+```lepus
+Iter<T> filter<T>(Iter<T> source, bool fn(T) predicate);
+```
+
+**行为**
+
+惰性保留 predicate 为真的项。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `source` | `Iter<T> source` | 来源游标、容器或连续存储。 | 无 |
+| `predicate` | `bool fn(T) predicate` | 元素筛选条件。 | 无 |
+
+**返回值**
+
+`Iter<T>`。惰性保留 predicate 为真的项。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+filter(source, predicate);
+```
+
+**源码**：[source/std/iter.lep:441](../../source/std/iter.lep#L441)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-30"></a>
+
+### IterFilterMapState::next（31）
+
+**声明**
+
+```lepus
+Option<U> next();
+```
+
+**行为**
+
+消费并返回下一项，当前无项时 None。
+
+**参数**
+
+无显式参数。实例方法使用当前接收者。
+
+**返回值**
+
+`Option<U>`。下一项；耗尽时返回 None。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+实现包含 panic 分支；调用前应处理空值或失败状态。
+
+**调用形式**
+
+```lepus
+obj.next();
+```
+
+**源码**：[source/std/iter.lep:456](../../source/std/iter.lep#L456)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-31"></a>
+
+### IterFilterMapState::sizeHint（32）
+
+**声明**
+
+```lepus
+(int64, Option<int64>) sizeHint();
+```
+
+**行为**
+
+返回剩余数量下界及可选上界；未知上界为 None。
+
+**参数**
+
+无显式参数。实例方法使用当前接收者。
+
+**返回值**
+
+`(int64, Option<int64>)`。返回剩余数量下界及可选上界；未知上界为 None。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+obj.sizeHint();
+```
+
+**源码**：[source/std/iter.lep:473](../../source/std/iter.lep#L473)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-32"></a>
+
+### filterMap（33）
+
+**声明**
+
+```lepus
+Iter<U> filterMap<T,U>(Iter<T> source, Option<U> fn(T) callback);
+```
+
+**行为**
+
+调用返回 Option 的 mapper，只输出 Value。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `source` | `Iter<T> source` | 来源游标、容器或连续存储。 | 无 |
+| `callback` | `Option<U> fn(T) callback` | 处理元素或累加状态的函数。 | 无 |
+
+**返回值**
+
+`Iter<U>`。调用返回 Option 的 mapper，只输出 Value。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+filterMap(source, callback);
+```
+
+**源码**：[source/std/iter.lep:486](../../source/std/iter.lep#L486)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-33"></a>
+
+### IterMapWhileState::next（34）
+
+**声明**
+
+```lepus
+Option<U> next();
+```
+
+**行为**
+
+消费并返回下一项，当前无项时 None。
+
+**参数**
+
+无显式参数。实例方法使用当前接收者。
+
+**返回值**
+
+`Option<U>`。下一项；耗尽时返回 None。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+obj.next();
+```
+
+**源码**：[source/std/iter.lep:502](../../source/std/iter.lep#L502)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-34"></a>
+
+### IterMapWhileState::sizeHint（35）
+
+**声明**
+
+```lepus
+(int64, Option<int64>) sizeHint();
+```
+
+**行为**
+
+返回剩余数量下界及可选上界；未知上界为 None。
+
+**参数**
+
+无显式参数。实例方法使用当前接收者。
+
+**返回值**
+
+`(int64, Option<int64>)`。返回剩余数量下界及可选上界；未知上界为 None。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+obj.sizeHint();
+```
+
+**源码**：[source/std/iter.lep:521](../../source/std/iter.lep#L521)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-35"></a>
+
+### mapWhile（36）
+
+**声明**
+
+```lepus
+Iter<U> mapWhile<T,U>(Iter<T> source, Option<U> fn(T) callback);
+```
+
+**行为**
+
+转换元素，遇到首个 None 时结束。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `source` | `Iter<T> source` | 来源游标、容器或连续存储。 | 无 |
+| `callback` | `Option<U> fn(T) callback` | 处理元素或累加状态的函数。 | 无 |
+
+**返回值**
+
+`Iter<U>`。转换元素，遇到首个 None 时结束。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+mapWhile(source, callback);
+```
+
+**源码**：[source/std/iter.lep:534](../../source/std/iter.lep#L534)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-36"></a>
+
+### IterTakeWhileState::next（37）
+
+**声明**
+
+```lepus
+Option<T> next();
+```
+
+**行为**
+
+消费并返回下一项，当前无项时 None。
+
+**参数**
+
+无显式参数。实例方法使用当前接收者。
+
+**返回值**
+
+`Option<T>`。下一项；耗尽时返回 None。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+obj.next();
+```
+
+**源码**：[source/std/iter.lep:550](../../source/std/iter.lep#L550)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-37"></a>
+
+### IterTakeWhileState::sizeHint（38）
+
+**声明**
+
+```lepus
+(int64, Option<int64>) sizeHint();
+```
+
+**行为**
+
+返回剩余数量下界及可选上界；未知上界为 None。
+
+**参数**
+
+无显式参数。实例方法使用当前接收者。
+
+**返回值**
+
+`(int64, Option<int64>)`。返回剩余数量下界及可选上界；未知上界为 None。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+obj.sizeHint();
+```
+
+**源码**：[source/std/iter.lep:569](../../source/std/iter.lep#L569)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-38"></a>
+
+### takeWhile（39）
+
+**声明**
+
+```lepus
+Iter<T> takeWhile<T>(Iter<T> source, bool fn(T) predicate);
+```
+
+**行为**
+
+输出谓词为真的前缀，消费使谓词失败的那一项。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `source` | `Iter<T> source` | 来源游标、容器或连续存储。 | 无 |
+| `predicate` | `bool fn(T) predicate` | 元素筛选条件。 | 无 |
+
+**返回值**
+
+`Iter<T>`。输出谓词为真的前缀，消费使谓词失败的那一项。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+takeWhile(source, predicate);
+```
+
+**源码**：[source/std/iter.lep:582](../../source/std/iter.lep#L582)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-39"></a>
+
+### IterSkipWhileState::next（40）
+
+**声明**
+
+```lepus
+Option<T> next();
+```
+
+**行为**
+
+消费并返回下一项，当前无项时 None。
+
+**参数**
+
+无显式参数。实例方法使用当前接收者。
+
+**返回值**
+
+`Option<T>`。下一项；耗尽时返回 None。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+实现包含 panic 分支；调用前应处理空值或失败状态。
+
+**调用形式**
+
+```lepus
+obj.next();
+```
+
+**源码**：[source/std/iter.lep:598](../../source/std/iter.lep#L598)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-40"></a>
+
+### IterSkipWhileState::sizeHint（41）
+
+**声明**
+
+```lepus
+(int64, Option<int64>) sizeHint();
+```
+
+**行为**
+
+返回剩余数量下界及可选上界；未知上界为 None。
+
+**参数**
+
+无显式参数。实例方法使用当前接收者。
+
+**返回值**
+
+`(int64, Option<int64>)`。返回剩余数量下界及可选上界；未知上界为 None。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+obj.sizeHint();
+```
+
+**源码**：[source/std/iter.lep:615](../../source/std/iter.lep#L615)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-41"></a>
+
+### skipWhile（42）
+
+**声明**
+
+```lepus
+Iter<T> skipWhile<T>(Iter<T> source, bool fn(T) predicate);
+```
+
+**行为**
+
+在前缀谓词为真期间丢弃，之后输出全部剩余项。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `source` | `Iter<T> source` | 来源游标、容器或连续存储。 | 无 |
+| `predicate` | `bool fn(T) predicate` | 元素筛选条件。 | 无 |
+
+**返回值**
+
+`Iter<T>`。在前缀谓词为真期间丢弃，之后输出全部剩余项。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+skipWhile(source, predicate);
+```
+
+**源码**：[source/std/iter.lep:628](../../source/std/iter.lep#L628)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-42"></a>
+
+### IterTakeState::next（43）
+
+**声明**
+
+```lepus
+Option<T> next();
+```
+
+**行为**
+
+消费并返回下一项，当前无项时 None。
+
+**参数**
+
+无显式参数。实例方法使用当前接收者。
+
+**返回值**
+
+`Option<T>`。下一项；耗尽时返回 None。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+obj.next();
+```
+
+**源码**：[source/std/iter.lep:644](../../source/std/iter.lep#L644)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-43"></a>
+
+### IterTakeState::sizeHint（44）
+
+**声明**
+
+```lepus
+(int64, Option<int64>) sizeHint();
+```
+
+**行为**
+
+返回剩余数量下界及可选上界；未知上界为 None。
+
+**参数**
+
+无显式参数。实例方法使用当前接收者。
+
+**返回值**
+
+`(int64, Option<int64>)`。返回剩余数量下界及可选上界；未知上界为 None。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+obj.sizeHint();
+```
+
+**源码**：[source/std/iter.lep:655](../../source/std/iter.lep#L655)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-44"></a>
+
+### take（45）
+
+**声明**
+
+```lepus
+Iter<T> take<T>(Iter<T> source, int64 amount);
+```
+
+**行为**
+
+最多输出前 count 项。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `source` | `Iter<T> source` | 来源游标、容器或连续存储。 | 无 |
+| `amount` | `int64 amount` | 元素数量，不能为负数。 | 无 |
+
+**返回值**
+
+`Iter<T>`。最多输出前 count 项。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+显式前置检查：`amount >= 0, "take 数量不能为负数"`。
+
+**调用形式**
+
+```lepus
+take(source, amount);
+```
+
+**源码**：[source/std/iter.lep:676](../../source/std/iter.lep#L676)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-45"></a>
+
+### IterSkipState::next（46）
+
+**声明**
+
+```lepus
+Option<T> next();
+```
+
+**行为**
+
+消费并返回下一项，当前无项时 None。
+
+**参数**
+
+无显式参数。实例方法使用当前接收者。
+
+**返回值**
+
+`Option<T>`。下一项；耗尽时返回 None。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+obj.next();
+```
+
+**源码**：[source/std/iter.lep:692](../../source/std/iter.lep#L692)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-46"></a>
+
+### IterSkipState::sizeHint（47）
+
+**声明**
+
+```lepus
+(int64, Option<int64>) sizeHint();
+```
+
+**行为**
+
+返回剩余数量下界及可选上界；未知上界为 None。
+
+**参数**
+
+无显式参数。实例方法使用当前接收者。
+
+**返回值**
+
+`(int64, Option<int64>)`。返回剩余数量下界及可选上界；未知上界为 None。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+obj.sizeHint();
+```
+
+**源码**：[source/std/iter.lep:707](../../source/std/iter.lep#L707)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-47"></a>
+
+### skip（48）
+
+**声明**
+
+```lepus
+Iter<T> skip<T>(Iter<T> source, int64 amount);
+```
+
+**行为**
+
+丢弃前 count 项。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `source` | `Iter<T> source` | 来源游标、容器或连续存储。 | 无 |
+| `amount` | `int64 amount` | 元素数量，不能为负数。 | 无 |
+
+**返回值**
+
+`Iter<T>`。丢弃前 count 项。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+显式前置检查：`amount >= 0, "skip 数量不能为负数"`。
+
+**调用形式**
+
+```lepus
+skip(source, amount);
+```
+
+**源码**：[source/std/iter.lep:732](../../source/std/iter.lep#L732)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-48"></a>
+
+### IterChainState::next（49）
+
+**声明**
+
+```lepus
+Option<T> next();
+```
+
+**行为**
+
+消费并返回下一项，当前无项时 None。
+
+**参数**
+
+无显式参数。实例方法使用当前接收者。
+
+**返回值**
+
+`Option<T>`。下一项；耗尽时返回 None。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+obj.next();
+```
+
+**源码**：[source/std/iter.lep:749](../../source/std/iter.lep#L749)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-49"></a>
+
+### IterChainState::sizeHint（50）
+
+**声明**
+
+```lepus
+(int64, Option<int64>) sizeHint();
+```
+
+**行为**
+
+返回剩余数量下界及可选上界；未知上界为 None。
+
+**参数**
+
+无显式参数。实例方法使用当前接收者。
+
+**返回值**
+
+`(int64, Option<int64>)`。返回剩余数量下界及可选上界；未知上界为 None。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+obj.sizeHint();
+```
+
+**源码**：[source/std/iter.lep:763](../../source/std/iter.lep#L763)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-50"></a>
+
+### chain（51）
+
+**声明**
+
+```lepus
+Iter<T> chain<T>(Iter<T> left, Iter<T> right);
+```
+
+**行为**
+
+先输出第一源，再输出第二源。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `left` | `Iter<T> left` | 左侧来源。 | 无 |
+| `right` | `Iter<T> right` | 右侧来源。 | 无 |
+
+**返回值**
+
+`Iter<T>`。先输出第一源，再输出第二源。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+chain(left, right);
+```
+
+**源码**：[source/std/iter.lep:775](../../source/std/iter.lep#L775)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-51"></a>
+
+### IterZipState::next（52）
+
+**声明**
+
+```lepus
+Option<(T,U)> next();
+```
+
+**行为**
+
+消费并返回下一项，当前无项时 None。
+
+**参数**
+
+无显式参数。实例方法使用当前接收者。
+
+**返回值**
+
+`Option<(T,U)>`。下一项；耗尽时返回 None。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+obj.next();
+```
+
+**源码**：[source/std/iter.lep:790](../../source/std/iter.lep#L790)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-52"></a>
+
+### IterZipState::sizeHint（53）
+
+**声明**
+
+```lepus
+(int64, Option<int64>) sizeHint();
+```
+
+**行为**
+
+返回剩余数量下界及可选上界；未知上界为 None。
+
+**参数**
+
+无显式参数。实例方法使用当前接收者。
+
+**返回值**
+
+`(int64, Option<int64>)`。返回剩余数量下界及可选上界；未知上界为 None。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+obj.sizeHint();
+```
+
+**源码**：[source/std/iter.lep:805](../../source/std/iter.lep#L805)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-53"></a>
+
+### zip（54）
+
+**声明**
+
+```lepus
+Iter<(T,U)> zip<T,U>(Iter<T> left, Iter<U> right);
+```
+
+**行为**
+
+将两个源配对，较短源结束时终止。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `left` | `Iter<T> left` | 左侧来源。 | 无 |
+| `right` | `Iter<U> right` | 右侧来源。 | 无 |
+
+**返回值**
+
+`Iter<(T,U)>`。将两个源配对，较短源结束时终止。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+zip(left, right);
+```
+
+**源码**：[source/std/iter.lep:817](../../source/std/iter.lep#L817)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-54"></a>
+
+### IterEnumerateState::next（55）
+
+**声明**
+
+```lepus
+Option<(int64,T)> next();
+```
+
+**行为**
+
+消费并返回下一项，当前无项时 None。
+
+**参数**
+
+无显式参数。实例方法使用当前接收者。
+
+**返回值**
+
+`Option<(int64,T)>`。下一项；耗尽时返回 None。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+obj.next();
+```
+
+**源码**：[source/std/iter.lep:832](../../source/std/iter.lep#L832)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-55"></a>
+
+### IterEnumerateState::sizeHint（56）
+
+**声明**
+
+```lepus
+(int64, Option<int64>) sizeHint();
+```
+
+**行为**
+
+返回剩余数量下界及可选上界；未知上界为 None。
+
+**参数**
+
+无显式参数。实例方法使用当前接收者。
+
+**返回值**
+
+`(int64, Option<int64>)`。返回剩余数量下界及可选上界；未知上界为 None。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+obj.sizeHint();
+```
+
+**源码**：[source/std/iter.lep:845](../../source/std/iter.lep#L845)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-56"></a>
+
+### enumerate（57）
+
+**声明**
+
+```lepus
+Iter<(int64,T)> enumerate<T>(Iter<T> source);
+```
+
+**行为**
+
+给每项附加从 0 开始的序号。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `source` | `Iter<T> source` | 来源游标、容器或连续存储。 | 无 |
+
+**返回值**
+
+`Iter<(int64,T)>`。给每项附加从 0 开始的序号。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+enumerate(source);
+```
+
+**源码**：[source/std/iter.lep:856](../../source/std/iter.lep#L856)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-57"></a>
+
+### IterStepState::next（58）
+
+**声明**
+
+```lepus
+Option<T> next();
+```
+
+**行为**
+
+消费并返回下一项，当前无项时 None。
+
+**参数**
+
+无显式参数。实例方法使用当前接收者。
+
+**返回值**
+
+`Option<T>`。下一项；耗尽时返回 None。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+obj.next();
+```
+
+**源码**：[source/std/iter.lep:871](../../source/std/iter.lep#L871)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-58"></a>
+
+### IterStepState::sizeHint（59）
+
+**声明**
+
+```lepus
+(int64, Option<int64>) sizeHint();
+```
+
+**行为**
+
+返回剩余数量下界及可选上界；未知上界为 None。
+
+**参数**
+
+无显式参数。实例方法使用当前接收者。
+
+**返回值**
+
+`(int64, Option<int64>)`。返回剩余数量下界及可选上界；未知上界为 None。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+obj.sizeHint();
+```
+
+**源码**：[source/std/iter.lep:882](../../source/std/iter.lep#L882)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-59"></a>
+
+### stepBy（60）
+
+**声明**
+
+```lepus
+Iter<T> stepBy<T>(Iter<T> source, int64 step);
+```
+
+**行为**
+
+按指定步长抽取元素，步长必须为正。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `source` | `Iter<T> source` | 来源游标、容器或连续存储。 | 无 |
+| `step` | `int64 step` | 步长。 | 无 |
+
+**返回值**
+
+`Iter<T>`。按指定步长抽取元素，步长必须为正。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+显式前置检查：`step > 0, "stepBy 步长必须大于零"`。
+
+**调用形式**
+
+```lepus
+stepBy(source, step);
+```
+
+**源码**：[source/std/iter.lep:894](../../source/std/iter.lep#L894)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-60"></a>
+
+### IterFuseState::next（61）
+
+**声明**
+
+```lepus
+Option<T> next();
+```
+
+**行为**
+
+消费并返回下一项，当前无项时 None。
+
+**参数**
+
+无显式参数。实例方法使用当前接收者。
+
+**返回值**
+
+`Option<T>`。下一项；耗尽时返回 None。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+obj.next();
+```
+
+**源码**：[source/std/iter.lep:910](../../source/std/iter.lep#L910)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-61"></a>
+
+### IterFuseState::sizeHint（62）
+
+**声明**
+
+```lepus
+(int64, Option<int64>) sizeHint();
+```
+
+**行为**
+
+返回剩余数量下界及可选上界；未知上界为 None。
+
+**参数**
+
+无显式参数。实例方法使用当前接收者。
+
+**返回值**
+
+`(int64, Option<int64>)`。返回剩余数量下界及可选上界；未知上界为 None。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+obj.sizeHint();
+```
+
+**源码**：[source/std/iter.lep:924](../../source/std/iter.lep#L924)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-62"></a>
+
+### fuse（63）
+
+**声明**
+
+```lepus
+Iter<T> fuse<T>(Iter<T> source);
+```
+
+**行为**
+
+一旦 next 返回 None，后续始终 None。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `source` | `Iter<T> source` | 来源游标、容器或连续存储。 | 无 |
+
+**返回值**
+
+`Iter<T>`。一旦 next 返回 None，后续始终 None。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+fuse(source);
+```
+
+**源码**：[source/std/iter.lep:938](../../source/std/iter.lep#L938)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-63"></a>
+
+### IterInspectState::next（64）
+
+**声明**
+
+```lepus
+Option<T> next();
+```
+
+**行为**
+
+消费并返回下一项，当前无项时 None。
+
+**参数**
+
+无显式参数。实例方法使用当前接收者。
+
+**返回值**
+
+`Option<T>`。下一项；耗尽时返回 None。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+obj.next();
+```
+
+**源码**：[source/std/iter.lep:952](../../source/std/iter.lep#L952)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-64"></a>
+
+### IterInspectState::sizeHint（65）
+
+**声明**
+
+```lepus
+(int64, Option<int64>) sizeHint();
+```
+
+**行为**
+
+返回剩余数量下界及可选上界；未知上界为 None。
+
+**参数**
+
+无显式参数。实例方法使用当前接收者。
+
+**返回值**
+
+`(int64, Option<int64>)`。返回剩余数量下界及可选上界；未知上界为 None。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+obj.sizeHint();
+```
+
+**源码**：[source/std/iter.lep:963](../../source/std/iter.lep#L963)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-65"></a>
+
+### inspect（66）
+
+**声明**
+
+```lepus
+Iter<T> inspect<T>(Iter<T> source, void fn(T) action);
+```
+
+**行为**
+
+遍历时先执行观察回调，再输出原项。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `source` | `Iter<T> source` | 来源游标、容器或连续存储。 | 无 |
+| `action` | `void fn(T) action` | 元素处理函数。 | 无 |
+
+**返回值**
+
+`Iter<T>`。遍历时先执行观察回调，再输出原项。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+inspect(source, action);
+```
+
+**源码**：[source/std/iter.lep:975](../../source/std/iter.lep#L975)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-66"></a>
+
+### IterCycleState::next（67）
+
+**声明**
+
+```lepus
+Option<T> next();
+```
+
+**行为**
+
+消费并返回下一项，当前无项时 None。
+
+**参数**
+
+无显式参数。实例方法使用当前接收者。
+
+**返回值**
+
+`Option<T>`。下一项；耗尽时返回 None。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+obj.next();
+```
+
+**源码**：[source/std/iter.lep:991](../../source/std/iter.lep#L991)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-67"></a>
+
+### IterCycleState::sizeHint（68）
+
+**声明**
+
+```lepus
+(int64, Option<int64>) sizeHint();
+```
+
+**行为**
+
+返回剩余数量下界及可选上界；未知上界为 None。
+
+**参数**
+
+无显式参数。实例方法使用当前接收者。
+
+**返回值**
+
+`(int64, Option<int64>)`。返回剩余数量下界及可选上界；未知上界为 None。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+obj.sizeHint();
+```
+
+**源码**：[source/std/iter.lep:1010](../../source/std/iter.lep#L1010)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-68"></a>
+
+### cycle（69）
+
+**声明**
+
+```lepus
+Iter<T> cycle<T>(Iter<T> source);
+```
+
+**行为**
+
+循环输出源的缓冲副本；空源保持为空。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `source` | `Iter<T> source` | 来源游标、容器或连续存储。 | 无 |
+
+**返回值**
+
+`Iter<T>`。循环输出源的缓冲副本；空源保持为空。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+cycle(source);
+```
+
+**源码**：[source/std/iter.lep:1021](../../source/std/iter.lep#L1021)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-69"></a>
+
+### IterScanState::next（70）
+
+**声明**
+
+```lepus
+Option<U> next();
+```
+
+**行为**
+
+消费并返回下一项，当前无项时 None。
+
+**参数**
+
+无显式参数。实例方法使用当前接收者。
+
+**返回值**
+
+`Option<U>`。下一项；耗尽时返回 None。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+obj.next();
+```
+
+**源码**：[source/std/iter.lep:1037](../../source/std/iter.lep#L1037)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-70"></a>
+
+### IterScanState::sizeHint（71）
+
+**声明**
+
+```lepus
+(int64, Option<int64>) sizeHint();
+```
+
+**行为**
+
+返回剩余数量下界及可选上界；未知上界为 None。
+
+**参数**
+
+无显式参数。实例方法使用当前接收者。
+
+**返回值**
+
+`(int64, Option<int64>)`。返回剩余数量下界及可选上界；未知上界为 None。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+obj.sizeHint();
+```
+
+**源码**：[source/std/iter.lep:1048](../../source/std/iter.lep#L1048)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-71"></a>
+
+### scan（72）
+
+**声明**
+
+```lepus
+Iter<U> scan<T,A,U>(Iter<T> source, A initial, Option<U> fn(A mut&, T) callback);
+```
+
+**行为**
+
+以可变状态调用回调，产生 Option 输出。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `source` | `Iter<T> source` | 来源游标、容器或连续存储。 | 无 |
+| `initial` | `A initial` | 初始值或累加状态。 | 无 |
+| `callback` | `Option<U> fn(A mut&, T) callback` | 处理元素或累加状态的函数。 | 无 |
+
+**返回值**
+
+`Iter<U>`。以可变状态调用回调，产生 Option 输出。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+scan<T,A,U>(source, initial, callback);
+```
+
+**源码**：[source/std/iter.lep:1062](../../source/std/iter.lep#L1062)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-72"></a>
+
+### collect（73）
+
+**声明**
+
+```lepus
+List<T> collect<T>(Iter<T> source);
+```
+
+**行为**
+
+消费迭代器，收集到独立 List。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `source` | `Iter<T> source` | 来源游标、容器或连续存储。 | 无 |
+
+**返回值**
+
+`List<T>`。消费迭代器，收集到独立 List。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+实现包含 panic 分支；调用前应处理空值或失败状态。
+
+**调用形式**
+
+```lepus
+collect(source);
+```
+
+**源码**：[source/std/iter.lep:1076](../../source/std/iter.lep#L1076)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-73"></a>
+
+### fold（74）
+
+**声明**
+
+```lepus
+A fold<T,A>(Iter<T> source, A initial, A fn(A, T) callback);
+```
+
+**行为**
+
+从 initial 开始按顺序累积。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `source` | `Iter<T> source` | 来源游标、容器或连续存储。 | 无 |
+| `initial` | `A initial` | 初始值或累加状态。 | 无 |
+| `callback` | `A fn(A, T) callback` | 处理元素或累加状态的函数。 | 无 |
+
+**返回值**
+
+`A`。从 initial 开始按顺序累积。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+实现包含 panic 分支；调用前应处理空值或失败状态。
+
+**调用形式**
+
+```lepus
+fold(source, initial, callback);
+```
+
+**源码**：[source/std/iter.lep:1096](../../source/std/iter.lep#L1096)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-74"></a>
+
+### tryFold（75）
+
+**声明**
+
+```lepus
+Result<A,E> tryFold<T,A,E>(Iter<T> source, A initial, Result<A,E> fn(A, T) callback);
+```
+
+**行为**
+
+累积到首个 Fail 时短路返回，否则 Ok。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `source` | `Iter<T> source` | 来源游标、容器或连续存储。 | 无 |
+| `initial` | `A initial` | 初始值或累加状态。 | 无 |
+| `callback` | `Result<A,E> fn(A, T) callback` | 处理元素或累加状态的函数。 | 无 |
+
+**返回值**
+
+`Result<A,E>`。累积到首个 Fail 时短路返回，否则 Ok。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+实现包含 panic 分支；调用前应处理空值或失败状态。
+
+**调用形式**
+
+```lepus
+tryFold(source, initial, callback);
+```
+
+**源码**：[source/std/iter.lep:1116](../../source/std/iter.lep#L1116)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-75"></a>
+
+### findMap（76）
+
+**声明**
+
+```lepus
+Option<U> findMap<T,U>(Iter<T> source, Option<U> fn(T) callback);
+```
+
+**行为**
+
+转换并返回首个 Value。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `source` | `Iter<T> source` | 来源游标、容器或连续存储。 | 无 |
+| `callback` | `Option<U> fn(T) callback` | 处理元素或累加状态的函数。 | 无 |
+
+**返回值**
+
+`Option<U>`。转换并返回首个 Value。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+实现包含 panic 分支；调用前应处理空值或失败状态。
+
+**调用形式**
+
+```lepus
+findMap(source, callback);
+```
+
+**源码**：[source/std/iter.lep:1139](../../source/std/iter.lep#L1139)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-76"></a>
+
+### sameItems（77）
+
+**声明**
+
+```lepus
+bool sameItems<T>(Iter<T> left, Iter<T> right);
+```
+
+**行为**
+
+逐项比较两个源的值及长度是否一致。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `left` | `Iter<T> left` | 左侧来源。 | 无 |
+| `right` | `Iter<T> right` | 右侧来源。 | 无 |
+
+**返回值**
+
+`bool`。逐项比较两个源的值及长度是否一致。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+实现包含 panic 分支；调用前应处理空值或失败状态。
+
+**调用形式**
+
+```lepus
+sameItems(left, right);
+```
+
+**源码**：[source/std/iter.lep:1160](../../source/std/iter.lep#L1160)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-77"></a>
+
+### IterBufferState::next（78）
+
+**声明**
+
+```lepus
+Option<T> next();
+```
+
+**行为**
+
+消费并返回下一项，当前无项时 None。
+
+读取下一项。
+
+**参数**
+
+无显式参数。实例方法使用当前接收者。
+
+**返回值**
+
+`Option<T>`。下一项，耗尽返回 None。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+obj.next();
+```
+
+**源码**：[source/std/iter.lep:1181](../../source/std/iter.lep#L1181)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-78"></a>
+
+### IterBufferState::sizeHint（79）
+
+**声明**
+
+```lepus
+(int64,Option<int64>) sizeHint();
+```
+
+**行为**
+
+返回剩余数量下界及可选上界；未知上界为 None。
+
+返回剩余数量。
+
+**参数**
+
+无显式参数。实例方法使用当前接收者。
+
+**返回值**
+
+`(int64,Option<int64>)`。相等的下界与上界。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+obj.sizeHint();
+```
+
+**源码**：[source/std/iter.lep:1187](../../source/std/iter.lep#L1187)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-79"></a>
+
+### rev（80）
+
+**声明**
+
+```lepus
+Iter<T> rev<T>(Iter<T> source);
+```
+
+**行为**
+
+产生逆序结果；实现会缓冲输入，不能用于无限源。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `source` | `Iter<T> source` | 来源游标、容器或连续存储。 | 无 |
+
+**返回值**
+
+`Iter<T>`。产生逆序结果；实现会缓冲输入，不能用于无限源。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+rev(source);
+```
+
+**源码**：[source/std/iter.lep:1198](../../source/std/iter.lep#L1198)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-80"></a>
+
+### peekingTakeWhile（81）
+
+**声明**
+
+```lepus
+(Iter<T>,Iter<T>) peekingTakeWhile<T>(Iter<T> source, bool fn(T) predicate);
+```
+
+**行为**
+
+分离满足谓词的前缀与剩余迭代器，失败项保留在剩余部分。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `source` | `Iter<T> source` | 来源游标、容器或连续存储。 | 无 |
+| `predicate` | `bool fn(T) predicate` | 元素筛选条件。 | 无 |
+
+**返回值**
+
+`(Iter<T>,Iter<T>)`。分离满足谓词的前缀与剩余迭代器，失败项保留在剩余部分。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+peekingTakeWhile(source, predicate);
+```
+
+**源码**：[source/std/iter.lep:1217](../../source/std/iter.lep#L1217)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-81"></a>
+
+### countIter（82）
+
+**声明**
+
+```lepus
+int64 countIter<T>(Iter<T> mut& source);
+```
+
+**行为**
+
+消费并返回项数。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `source` | `Iter<T> mut& source` | 来源游标、容器或连续存储。 | 无 |
+
+**返回值**
+
+`int64`。消费并返回项数。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+countIter<T>(source);
+```
+
+**源码**：[source/std/iter.lep:1236](../../source/std/iter.lep#L1236)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-82"></a>
+
+### nth（83）
+
+**声明**
+
+```lepus
+Option<T> nth<T>(Iter<T> mut& source, int64 index);
+```
+
+**行为**
+
+消费到从 0 开始的第 index 项，返回 Option。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `source` | `Iter<T> mut& source` | 来源游标、容器或连续存储。 | 无 |
+| `index` | `int64 index` | 从零开始的下标。 | 无 |
+
+**返回值**
+
+`Option<T>`。消费到从 0 开始的第 index 项，返回 Option。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+nth<T>(source, index);
+```
+
+**源码**：[source/std/iter.lep:1247](../../source/std/iter.lep#L1247)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-83"></a>
+
+### last（84）
+
+**声明**
+
+```lepus
+Option<T> last<T>(Iter<T> mut& source);
+```
+
+**行为**
+
+消费全部剩余项并返回最后一项。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `source` | `Iter<T> mut& source` | 来源游标、容器或连续存储。 | 无 |
+
+**返回值**
+
+`Option<T>`。消费全部剩余项并返回最后一项。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+last<T>(source);
+```
+
+**源码**：[source/std/iter.lep:1257](../../source/std/iter.lep#L1257)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-84"></a>
+
+### all（85）
+
+**声明**
+
+```lepus
+bool all<T>(Iter<T> mut& source, bool fn(T) predicate);
+```
+
+**行为**
+
+消费并判断是否全部满足谓词，空源为 true。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `source` | `Iter<T> mut& source` | 来源游标、容器或连续存储。 | 无 |
+| `predicate` | `bool fn(T) predicate` | 元素筛选条件。 | 无 |
+
+**返回值**
+
+`bool`。消费并判断是否全部满足谓词，空源为 true。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+all<T>(source, predicate);
+```
+
+**源码**：[source/std/iter.lep:1268](../../source/std/iter.lep#L1268)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-85"></a>
+
+### any（86）
+
+**声明**
+
+```lepus
+bool any<T>(Iter<T> mut& source, bool fn(T) predicate);
+```
+
+**行为**
+
+消费并判断是否存在满足谓词的项，空源为 false。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `source` | `Iter<T> mut& source` | 来源游标、容器或连续存储。 | 无 |
+| `predicate` | `bool fn(T) predicate` | 元素筛选条件。 | 无 |
+
+**返回值**
+
+`bool`。消费并判断是否存在满足谓词的项，空源为 false。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+any<T>(source, predicate);
+```
+
+**源码**：[source/std/iter.lep:1279](../../source/std/iter.lep#L1279)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-86"></a>
+
+### find（87）
+
+**声明**
+
+```lepus
+Option<T> find<T>(Iter<T> mut& source, bool fn(T) predicate);
+```
+
+**行为**
+
+消费到首个 predicate 为真的项并返回 Option。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `source` | `Iter<T> mut& source` | 来源游标、容器或连续存储。 | 无 |
+| `predicate` | `bool fn(T) predicate` | 元素筛选条件。 | 无 |
+
+**返回值**
+
+`Option<T>`。消费到首个 predicate 为真的项并返回 Option。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+find<T>(source, predicate);
+```
+
+**源码**：[source/std/iter.lep:1290](../../source/std/iter.lep#L1290)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-87"></a>
+
+### forEach（88）
+
+**声明**
+
+```lepus
+void forEach<T>(Iter<T> mut& source, void fn(T) action);
+```
+
+**行为**
+
+逐项调用 action 并消费迭代器。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `source` | `Iter<T> mut& source` | 来源游标、容器或连续存储。 | 无 |
+| `action` | `void fn(T) action` | 元素处理函数。 | 无 |
+
+**返回值**
+
+无返回值。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+forEach<T>(source, action);
+```
+
+**源码**：[source/std/iter.lep:1301](../../source/std/iter.lep#L1301)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-88"></a>
+
+### listIntoIter（89）
+
+**声明**
+
+```lepus
+Iter<T> listIntoIter<T>(List<T> mut& source);
+```
+
+**行为**
+
+取得拥有列表值的迭代器。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `source` | `List<T> mut& source` | 来源游标、容器或连续存储。 | 无 |
+
+**返回值**
+
+`Iter<T>`。取得拥有列表值的迭代器。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+listIntoIter<T>(source);
+```
+
+**源码**：[source/std/iter.lep:1311](../../source/std/iter.lep#L1311)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-89"></a>
+
+### fromRange（90）
+
+**声明**
+
+```lepus
+Iter<int64> fromRange(std::core::__Range source);
+```
+
+**行为**
+
+将核心整数 range 转为通用 Iter。
+
+将 std::core::range 转为独立有状态游标。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `source` | `std::core::__Range source` | 来源游标、容器或连续存储。 | 无 |
+
+**返回值**
+
+`Iter<int64>`。将核心整数 range 转为通用 Iter。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+fromRange(source);
+```
+
+**源码**：[source/std/iter.lep:1323](../../source/std/iter.lep#L1323)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-90"></a>
+
+### IterConstListState::next（91）
+
+**声明**
+
+```lepus
+Option<T const&> next();
+```
+
+**行为**
+
+消费并返回下一项，当前无项时 None。
+
+**参数**
+
+无显式参数。实例方法使用当前接收者。
+
+**返回值**
+
+`Option<T const&>`。下一项；耗尽时返回 None。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+obj.next();
+```
+
+**源码**：[source/std/iter.lep:1364](../../source/std/iter.lep#L1364)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-91"></a>
+
+### IterConstListState::sizeHint（92）
+
+**声明**
+
+```lepus
+(int64, Option<int64>) sizeHint();
+```
+
+**行为**
+
+返回剩余数量下界及可选上界；未知上界为 None。
+
+**参数**
+
+无显式参数。实例方法使用当前接收者。
+
+**返回值**
+
+`(int64, Option<int64>)`。返回剩余数量下界及可选上界；未知上界为 None。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+obj.sizeHint();
+```
+
+**源码**：[source/std/iter.lep:1376](../../source/std/iter.lep#L1376)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-92"></a>
+
+### IterMutListState::next（93）
+
+**声明**
+
+```lepus
+Option<T mut&> next();
+```
+
+**行为**
+
+消费并返回下一项，当前无项时 None。
+
+**参数**
+
+无显式参数。实例方法使用当前接收者。
+
+**返回值**
+
+`Option<T mut&>`。下一项；耗尽时返回 None。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+obj.next();
+```
+
+**源码**：[source/std/iter.lep:1388](../../source/std/iter.lep#L1388)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-93"></a>
+
+### IterMutListState::sizeHint（94）
+
+**声明**
+
+```lepus
+(int64, Option<int64>) sizeHint();
+```
+
+**行为**
+
+返回剩余数量下界及可选上界；未知上界为 None。
+
+**参数**
+
+无显式参数。实例方法使用当前接收者。
+
+**返回值**
+
+`(int64, Option<int64>)`。返回剩余数量下界及可选上界；未知上界为 None。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+obj.sizeHint();
+```
+
+**源码**：[source/std/iter.lep:1400](../../source/std/iter.lep#L1400)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-94"></a>
+
+### listIter（95）
+
+**声明**
+
+```lepus
+Iter<T const&> listIter<T>(List<T> const& source);
+```
+
+**行为**
+
+取得只读元素引用的迭代器。
+
+借用列表，不复制元素，next 返回只读引用。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `source` | `List<T> const& source` | 来源游标、容器或连续存储。 | 无 |
+
+**返回值**
+
+`Iter<T const&>`。取得只读元素引用的迭代器。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+listIter<T>(source);
+```
+
+**源码**：[source/std/iter.lep:1412](../../source/std/iter.lep#L1412)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-95"></a>
+
+### listIterMut（96）
+
+**声明**
+
+```lepus
+Iter<T mut&> listIterMut<T>(List<T> mut& source);
+```
+
+**行为**
+
+取得可写元素引用的迭代器。
+
+借用可写列表，next 返回可写引用。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `source` | `List<T> mut& source` | 来源游标、容器或连续存储。 | 无 |
+
+**返回值**
+
+`Iter<T mut&>`。取得可写元素引用的迭代器。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+listIterMut<T>(source);
+```
+
+**源码**：[source/std/iter.lep:1424](../../source/std/iter.lep#L1424)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-96"></a>
+
+### setIntoIter（97）
+
+**声明**
+
+```lepus
+Iter<T> setIntoIter<T>(Set<T> mut& source);
+```
+
+**行为**
+
+取得集合值的迭代器。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `source` | `Set<T> mut& source` | 来源游标、容器或连续存储。 | 无 |
+
+**返回值**
+
+`Iter<T>`。取得集合值的迭代器。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+setIntoIter<T>(source);
+```
+
+**源码**：[source/std/iter.lep:1457](../../source/std/iter.lep#L1457)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-97"></a>
+
+### setIter（98）
+
+**声明**
+
+```lepus
+Iter<T> setIter<T>(Set<T> const& source);
+```
+
+**行为**
+
+借用集合构造迭代器：把元素快照进迭代器状态，来源集合保持不变；迭代器本身仍是一次性消费。
+
+借用集合建立迭代器：把元素快照进迭代器状态，来源集合保持不变。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `source` | `Set<T> const& source` | 来源集合，只读借用。 | 无 |
+
+**返回值**
+
+`Iter<T>`。独立有状态的元素迭代器；迭代器本身仍是一次性消费。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+setIter<T>(source);
+```
+
+**源码**：[source/std/iter.lep:1473](../../source/std/iter.lep#L1473)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-98"></a>
+
+### mapIntoIter（99）
+
+**声明**
+
+```lepus
+Iter<Pair<K,V>> mapIntoIter<K,V>(Map<K,V> mut& source);
+```
+
+**行为**
+
+取得映射键值对的迭代器。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `source` | `Map<K,V> mut& source` | 来源游标、容器或连续存储。 | 无 |
+
+**返回值**
+
+`Iter<Pair<K,V>>`。取得映射键值对的迭代器。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+mapIntoIter<K,V>(source);
+```
+
+**源码**：[source/std/iter.lep:1488](../../source/std/iter.lep#L1488)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-99"></a>
+
+### mapIter（100）
+
+**声明**
+
+```lepus
+Iter<Pair<K,V>> mapIter<K,V>(Map<K,V> const& source);
+```
+
+**行为**
+
+借用映射构造键值对元组迭代器：把键值对快照进迭代器状态，来源映射保持不变；迭代器本身仍是一次性消费。
+
+借用映射建立迭代器：把 Pair<K,V> 键值对快照进迭代器状态，来源映射保持不变。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `source` | `Map<K,V> const& source` | 来源映射，只读借用。 | 无 |
+
+**返回值**
+
+`Iter<Pair<K,V>>`。独立有状态的 Pair<K,V> 迭代器；迭代器本身仍是一次性消费。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+mapIter<K,V>(source);
+```
+
+**源码**：[source/std/iter.lep:1504](../../source/std/iter.lep#L1504)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-100"></a>
+
+### IterSpanState::next（101）
+
+**声明**
+
+```lepus
+Option<T const&> next();
+```
+
+**行为**
+
+消费并返回下一项，当前无项时 None。
+
+**参数**
+
+无显式参数。实例方法使用当前接收者。
+
+**返回值**
+
+`Option<T const&>`。下一项；耗尽时返回 None。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+obj.next();
+```
+
+**源码**：[source/std/iter.lep:1523](../../source/std/iter.lep#L1523)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-101"></a>
+
+### IterSpanState::sizeHint（102）
+
+**声明**
+
+```lepus
+(int64, Option<int64>) sizeHint();
+```
+
+**行为**
+
+返回剩余数量下界及可选上界；未知上界为 None。
+
+**参数**
+
+无显式参数。实例方法使用当前接收者。
+
+**返回值**
+
+`(int64, Option<int64>)`。返回剩余数量下界及可选上界；未知上界为 None。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+obj.sizeHint();
+```
+
+**源码**：[source/std/iter.lep:1535](../../source/std/iter.lep#L1535)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-102"></a>
+
+### fromSpan（103）
+
+**声明**
+
+```lepus
+Iter<T const&> fromSpan<T>(T const& source, int64 length);
+```
+
+**行为**
+
+从连续存储视图构造迭代器。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `source` | `T const& source` | 来源游标、容器或连续存储。 | 无 |
+| `length` | `int64 length` | 连续存储的有效元素数量。 | 无 |
+
+**返回值**
+
+`Iter<T const&>`。从连续存储视图构造迭代器。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+显式前置检查：`length >= 0, "迭代器长度不能为负数"`。
+
+**调用形式**
+
+```lepus
+fromSpan<T>(source, length);
+```
+
+**源码**：[source/std/iter.lep:1547](../../source/std/iter.lep#L1547)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-103"></a>
+
+### IterCharsState::next（104）
+
+**声明**
+
+```lepus
+Option<char> next();
+```
+
+**行为**
+
+消费并返回下一项，当前无项时 None。
+
+**参数**
+
+无显式参数。实例方法使用当前接收者。
+
+**返回值**
+
+`Option<char>`。下一项；耗尽时返回 None。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+obj.next();
+```
+
+**源码**：[source/std/iter.lep:1563](../../source/std/iter.lep#L1563)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-104"></a>
+
+### IterCharsState::sizeHint（105）
+
+**声明**
+
+```lepus
+(int64, Option<int64>) sizeHint();
+```
+
+**行为**
+
+返回剩余数量下界及可选上界；未知上界为 None。
+
+**参数**
+
+无显式参数。实例方法使用当前接收者。
+
+**返回值**
+
+`(int64, Option<int64>)`。返回剩余数量下界及可选上界；未知上界为 None。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+obj.sizeHint();
+```
+
+**源码**：[source/std/iter.lep:1575](../../source/std/iter.lep#L1575)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-105"></a>
+
+### chars（106）
+
+**声明**
+
+```lepus
+Iter<char> chars(String source);
+```
+
+**行为**
+
+按字符串字节构造 char 迭代器，非 Unicode 字素切分。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `source` | `String source` | 来源游标、容器或连续存储。 | 无 |
+
+**返回值**
+
+`Iter<char>`。按字符串字节构造 char 迭代器，非 Unicode 字素切分。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+chars(source);
+```
+
+**源码**：[source/std/iter.lep:1586](../../source/std/iter.lep#L1586)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-106"></a>
+
+### IterRepeatState::next（107）
+
+**声明**
+
+```lepus
+Option<T> next();
+```
+
+**行为**
+
+消费并返回下一项，当前无项时 None。
+
+**参数**
+
+无显式参数。实例方法使用当前接收者。
+
+**返回值**
+
+`Option<T>`。下一项；耗尽时返回 None。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+obj.next();
+```
+
+**源码**：[source/std/iter.lep:1599](../../source/std/iter.lep#L1599)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-107"></a>
+
+### IterRepeatState::sizeHint（108）
+
+**声明**
+
+```lepus
+(int64, Option<int64>) sizeHint();
+```
+
+**行为**
+
+返回剩余数量下界及可选上界；未知上界为 None。
+
+**参数**
+
+无显式参数。实例方法使用当前接收者。
+
+**返回值**
+
+`(int64, Option<int64>)`。返回剩余数量下界及可选上界；未知上界为 None。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+obj.sizeHint();
+```
+
+**源码**：[source/std/iter.lep:1606](../../source/std/iter.lep#L1606)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-108"></a>
+
+### repeat（109）
+
+**声明**
+
+```lepus
+Iter<T> repeat<T>(T value);
+```
+
+**行为**
+
+构造无限重复 value 的源，通常搭配 take。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `value` | `T value` | 元素值。 | 无 |
+
+**返回值**
+
+`Iter<T>`。构造无限重复 value 的源，通常搭配 take。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+repeat(value);
+```
+
+**源码**：[source/std/iter.lep:1616](../../source/std/iter.lep#L1616)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-109"></a>
+
+### groupBy（110）
+
+**声明**
+
+```lepus
+Map<K,List<T>> groupBy<T,K>(Iter<T> source, K fn(T) key_of);
+```
+
+**行为**
+
+按键分组，保留每组中元素的来源顺序。消费有限游标。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `source` | `Iter<T> source` | 输入游标、存储或事件来源值 | 无 |
+| `key_of` | `K fn(T) key_of` | 从元素提取分组键的回调 | 无 |
+
+**返回值**
+
+`Map<K,List<T>>`。按键分组，保留每组中元素的来源顺序。消费有限游标。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+
+**调用形式**
+
+```lepus
+groupBy(source, key_of);
+```
+
+**源码**：[source/std/iter.lep:1632](../../source/std/iter.lep#L1632)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。
+
+<a id="api-110"></a>
+
+### chunk（111）
+
+**声明**
+
+```lepus
+Iter<List<T>> chunk<T>(Iter<T> source, int64 length);
+```
+
+**行为**
+
+按正长度惰性分块，保留最后的非空短块。长度小于一时触发断言。
+
+**参数**
+
+| 参数 | 类型／声明 | 含义 | 默认值 |
+| --- | --- | --- | --- |
+| `source` | `Iter<T> source` | 输入游标、存储或事件来源值 | 无 |
+| `length` | `int64 length` | 目标有效元素数，必须非负。 | 无 |
+
+**返回值**
+
+`Iter<List<T>>`。按正长度惰性分块，保留最后的非空短块。长度小于一时触发断言。
+
+**错误与边界**
+
+遵循本页“公共约定与错误边界”。
+显式前置检查：`length > 0, "chunk length must be positive"`。
+
+**调用形式**
+
+```lepus
+chunk(source, length);
+```
+
+**源码**：[source/std/iter.lep:1701](../../source/std/iter.lep#L1701)。
+
+**完整示例**：[example/samples/iter_pipeline.lep](../../example/samples/iter_pipeline.lep)。

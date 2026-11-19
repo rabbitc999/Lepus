@@ -1,0 +1,24 @@
+void main() {
+    int64* empty;
+    int64** outerEmpty;
+    int64*** thirdEmpty;
+    void* opaque;
+    assert(empty == null && null == outerEmpty && thirdEmpty == null && opaque == null);
+    int64 value = 7;
+    unsafe {
+        int64 mut* writable = cast<int64 mut*>(&value);
+        int64* readable = writable;
+        int64** outer = cast<int64**>(&readable);
+        int64 mut* mut* writableOuter = cast<int64 mut* mut*>(&writable);
+        int64 mut** readableOuter = writableOuter;
+        assert(readable != null && null != outer && **outer == 7);
+        **writableOuter = 41;
+        **readableOuter = 42;
+        assert(*readable == 42);
+    }
+    assert(value == 42);
+    int64 a = 6;
+    int64 b = 7;
+    assert(a * b == 42);
+    println("bare pointer levels OK");
+}

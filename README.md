@@ -1,0 +1,215 @@
+# Lepus 语言
+
+<!-- LANGUAGE NAVIGATION -->
+[English](README.en.md) · **简体中文**
+<!-- END LANGUAGE NAVIGATION -->
+
+Lepus 是静态类型语言，编译到原生程序。赋值、传参和返回默认复制值，共享要显式取引用（`T const&` 只读、`T mut&` 可写）或移动；语言里没有指针，也没有地址算术。没有 GC，资源在离开作用域时确定性释放。
+
+名称、类型、泛型、独立借用和存活范围都在编译期检查，卫生宏在语义分析阶段展开；Any 保留具体类型信息，泛型与继承按具体类型匹配，已知调用可静态化或内联，行为不变时复制可以消除。
+
+标准库提供容器、迭代器、JSON/TOML、正则、路径与进程、网络、SQL、线性代数、并发等模块，见 [标准库概览](doc/07-stdlib-overview.md)。
+
+## 名称与能力入口
+
+Lepus 五个字母各对应一项语言特性，C 与 L 大写：
+
+| 字母 | 英文含义 | 对应特性 |
+| --- | --- | --- |
+| **C** | **Copy** | 独立的可观察值，显式引用和移动；行为不变时可消除复制 |
+| **h** | **Hygienic** | 卫生绑定和具有明确求值规则的参数类别 |
+| **a** | **Any** | Any 保留具体类型信息，继续遵守所有权与引用来源规则 |
+| **L** | **Lifetime** | 静态检查来源和存活范围；unsafe 与外部代码另有前提 |
+| **i** | **Interface** | 泛型、继承与具体类型匹配；已知调用可静态化或内联 |
+
+名称写法和验证入口见[名称与相关能力](doc/37-name-freeze.md)。
+
+## 编译过程
+
+文法生成的前端先做模块加载与来源映射，构建 AST；卫生宏在语义分析阶段展开。名称、类型、泛型和独立借用检查完成后，直接遍历 AST 生成 LLVM IR，由 LLVM 优化并生成原生代码。
+正常运行与导出跳过 Lepus 四元式的生成、写盘、重读与组装。
+
+![Lepus 编译流程：源码、模块加载、解析、语义期宏展开、借用检查、已检查 AST 与 LLVM Build](doc/images/lepus-compilation.png)
+
+## 发布构建
+
+使用 `./Lepus.exe build input.lep --out build/program --checked`，从完成语义检查的 AST 直接生成 LLVM 代码，再生成并链接原生产物。内置 LLVM 变体在进程内完成优化、机器码生成和 LLD 链接；外置变体使用 `library/llvm/` 工具链或 `--llvm` 指定的 clang。`--emit-llvm` 可以只导出 `.ll` 模块。
+
+![Lepus 发布构建流程：已检查 AST、LLVM IR、内置或外置 LLVM、目标链接与交付](doc/images/lepus-aot.png)
+
+生成的应用无需 LLVM DLL；应用自身使用的 C ABI 动态库按链接约定交付。完整选项见 [LLVM 构建](doc/38-build.md)，逐步操作见书稿[第 27 章 发布构建](doc/book/27-发布构建.md)。
+
+## 运行过程
+
+`run` 编译并执行 checked 原生机器码；`build` 默认导出 unchecked 原生产物。原生运行时提供共享内存、所有权、宿主回调与线程服务。
+
+## 文档
+
+| 文档 | 面向 | 内容 |
+| --- | --- | --- |
+| [文档入口](doc/README.md) | 所有人 | 按「你想做什么」跳转到下面任意一篇 |
+| [01 快速开始](doc/01-quickstart.md) | 第一次用的人 | 安装、第一个程序、常用命令速查 |
+| [02 语言速览](doc/02-language-tour.md) | 有经验的开发者 | 14 段可运行片段走一遍 Lepus 长什么样 |
+| [03 核心概念](doc/03-core-concepts.md) | 准备深入使用的人 | 值语义、非空引用、无 GC 的资源管理 |
+| [04 语言参考](doc/04-language-reference.md) | 日常写代码的人 | 按主题查阅语法、语义与常见错误 |
+| [05 交付安全](doc/05-delivery-security.md) | 需要对外交付的团队 | 四种交付形态、四步法、逆向成本与边界声明 |
+| [06 跨平台部署](doc/06-deployment.md) | 做部署的人 | 源码运行与字节码部署、桌面 / 嵌入式 Linux、资源与边界 |
+| [07 标准库概览](doc/07-stdlib-overview.md) | 想知道「能做什么」的人 | 标准库模块按能力域速查 |
+| [库函数 API 参考](doc/library/README.md) | 查阅库 API 的人 | 模块的声明、重载、参数、返回值、错误边界与完整示例 |
+| [08 宿主集成与 C ABI](doc/08-host-integration.md) | 做集成的人 | `abi` 块、宿主胶水绑定、类型映射、可空引用 |
+| [09 工具链使用](doc/09-toolchain.md) | 日常用 `lepus` 的人 | 场景指令、选项、`lepus.toml`、报错呈现、调试 |
+| [17 当前能力](doc/17-capabilities.md) | 评估与集成人员 | 实现能力、默认配置、宿主/目标宿主及工具边界 |
+| [10 路线图](doc/10-roadmap.md) | 贡献者、长期用户 | 短中长期目标与「明确不做的事」 |
+
+**英文版**：[`doc/en/`](doc/en/README.en.md) 维护对应的功能说明；未提供完整译文的底层规格从英文入口链接中文版。
+
+中文版优先维护，中英文共有的代码片段保持一致；标准库目录以 API 索引为准。
+
+配套资源：
+
+- [`example/samples/`](example/samples/)：可运行的正式样例，标准输出在 [`example/expected/`](example/expected/)。
+- [`example/samples-error/`](example/samples-error/)：预期报错的样例，诊断文本在 [`example/expected-error/`](example/expected-error/)。
+- [`doc/examples/`](doc/examples/)：需要配套工程布局的示例（ABI、SQLite）。
+- [完整语法参考（EBNF）](doc/14-grammar-ebnf.md)：文法的权威形式。
+
+## 构建
+
+在项目根目录执行：
+
+```sh
+sh gen.sh          # 首次构建先生成解析器，需要 HareParse 文法生成器
+make               # 构建 lepus 与 build/lepus-frontend/libparser.a
+./lepus example/samples/hello.lep
+sh check.sh        # 运行正常与错误样例
+```
+
+首次构建先执行 `sh gen.sh`，再执行 `make`。解析器源码（`lepus_parser.cpp` /
+`lepus_parser.hpp` / `lepus_parser_user.h` / `lepus_main.cpp`）是生成物，不纳入版本管理。
+
+首次构建以及修改下面这些真源后需要重新生成；提交真源，不提交解析器生成物：
+
+```sh
+sh gen.sh          # 用 IELR 从 lepus.gram 重新生成前端（需要 [HareParse](https://github.com/rabbitc999/HareParse) 文法生成器）
+```
+
+- `source/lepus.gram` / `source/lepus_token.gram`（文法）
+- `source/lepus_semantics.cpp` / `source/semantics/*.cpp`（`%epilogue include` 展开进 `lepus_parser.cpp`）
+- `source/lepus_driver.cpp`（`%main include` 展开进 `lepus_main.cpp`）
+
+> 忘了跑 `gen.sh` 是最容易踩的坑：`lepus_main.cpp` 是 `source/lepus_driver.cpp` 的**生成副本**，
+> 只 `make` 不会重新生成它，于是你会看到"改了没生效"。
+
+`gen.sh` 需要一份 HareParse 文法生成器。最省事是把它放到项目根目录 `./HareParse[.exe]`；
+也可以让它待在旁边的 HareParse 仓库里（`gen.sh` 会自动找 `../HareParse/build/bin/`）。
+
+解析器生成源码、头文件与报告统一位于 `source/`；对象文件与解析器静态库位于 `build/lepus-frontend/`，不会散落到仓库根目录。SQLite 与 miniz 在构建时按锁定版本下载，不在源码树保存副本，见[在线构建依赖](doc/42-build-dependencies.md)。
+
+## 快速使用
+
+```sh
+./lepus run  example/samples/hello.lep        # 解释运行（默认）
+./lepus new  hello-lepus                       # 新建应用工程
+```
+
+`lepus` 是统一工具链入口：前端、两档 C/C++ 导出、工程生成与清理都在同一程序里。更多子命令与 `--mode` 见 [工具链使用](doc/09-toolchain.md)。
+
+### 调试
+
+VS Code 通过 GDB/MI 调试带 DWARF 源码行与变量信息的原生程序，支持源码断点、继续、单步进入／越过／跳出，以及调用栈、参数、局部变量和表达式。开发调试保留符号并使用 O0；`--debug-optimized` 或 VSCode 的 `debugMode: "optimized"` 保留 DWARF 并使用 O3／LTO，支持内联调用帧。普通发布构建仍使用最高优化。见[构建调试](doc/43-native-debugging.md)。
+
+### 报错
+
+语法错误给到**文件、行号、列号**，并回显出错那一行、按出错位置的长度画波浪号：
+
+```text
+语法错误：example/samples-error/syntax_extern_impl_removed.lep 第 2 行第 8 列：期望 标识符 / 常量(const) / 可变(mut) / 新建(new) 等 17 个之一，实际是 实现(impl)
+ 2 | extern impl Value : Some = binding;
+   |        ~~~~
+```
+
+- 波浪号的宽度就是出错 Token 的长度；制表符按 4 列制表位铺平，中文按 2 列算，所以列不会歪。
+- 出错位置落在 `import` 引入的模块里时，指向**真正写错的那个文件**，不是展开后的主文件。
+- 不再显示 Token 内部名：`SEMI` → `分号(;)`、`IMPL` → `实现(impl)`、`VARIABLE` → `标识符`。
+- 报错文案跟随显示语言（`LEPUS_LANG=zh|en` 或 `--lang`），同一处错误分别为：
+
+  ```text
+  期望 标识符 / 常量(const) / 可变(mut) / 新建(new) 等 17 个之一，实际是 实现(impl)
+  expected one of identifier / constant(const) / mutable(mut) / new(new) (17 candidates), found impl(impl)
+  ```
+
+  语义错误（类型不匹配、未定义符号等）目前仍是中文：那些文案写在编译器核心里，
+  不在报错呈现层。
+
+## 语言速览
+
+```c
+struct Item { int64 value; };
+
+void main() {
+    List<Item> items;
+    Item item;
+    item.value = 7;
+    items.push(item);
+    println("{}", items.len());
+
+}
+```
+
+值语义是默认：赋值、传参、返回都复制；要共享就显式取引用（`T const&` 只读、`T mut&` 可写），没有指针与地址算术。没有 GC，资源在离开作用域时确定性释放。标准库提供容器、迭代器、JSON/TOML、正则、路径与进程、网络、SQL、线性代数、并发等，见 [标准库概览](doc/07-stdlib-overview.md)。
+
+## 配置
+
+项目可用 `lepus.toml` 设置运行方式、编译器路径与搜索目录；命令行参数优先。示例：
+
+```toml
+[lepus]
+run = "run"
+opt_level = 2
+main = "src/main.lep"
+```
+
+`[lepus] main` 指定工程主文件：**不给源文件**执行时用它当入口（即构建项目）；
+命令行显式给了文件就是单文件编译，不看主文件。`lepus new` 生成的工程默认带这一行。
+
+## Linux 部署
+
+桌面和嵌入式 Linux 共用同一套操作系统宿主与运行时核心。编译器及原生依赖按目标架构构建，
+部署生成的原生应用及其动态依赖、资源文件。标准模块需要的运行时服务链接到应用中。
+见[部署说明](doc/06-deployment.md)。
+
+## 目录结构
+
+```text
+lepus/
+├── lepus.gram / lepus_token.gram   文法：词法声明与产生式
+├── gen.sh / Makefile               构建与自测
+├── source/                         编译器前端、导出器与胶水
+│   ├── std/                        标准库模块（.lep）
+│   ├── glue/                       宿主侧 C++ 胶水
+│   ├── allocator/                  桌面分配器
+│   ├── lsp/ dap/                   编辑器集成
+│   └── generator/            生成独立编译器工程的入口
+├── library/                        可复用 C++ 库与目标宿主
+│   ├── ircode/                     四元式与 原生共享运行时
+│   ├── bignum/ json/ toml/ console/ lztext/ …
+│   └── …
+├── doc/                            面向使用者的文档（00–20、99）
+│   ├── en/                         英文版（入口 + 00–11、13、99，共 15 篇）
+│   └── library/                    库函数 API 参考（按模块分页）
+├── example/                        示例（samples、错误样例、calculator 等）
+├── tests/                          Python 验收脚本
+├── tools/                          图标与总览图等辅助脚本
+└── sql-lepus/                      SQL 最小用法示例
+```
+
+## 来源与边界
+
+编译器前端由本仓库的 `source/lepus.gram` 经 [HareParse](https://github.com/rabbitc999/HareParse) 生成，从已检查的 AST 直接生成 LLVM IR，再由 LLVM 构建出原生程序。
+
+[HareParse 仓库](https://github.com/rabbitc999/HareParse) 支持以五种模式生成用 Lepus 编写的解析器（上游目标名仍为 `--lang chali`）：**LL(1)、SLR(1)、LALR(1)、LR(1) 和 IELR(1)**，分别通过 `--mode ll1`、`slr`、`lalr`、`lr1` 或 `ielr` 选择。生成的 `parser.chl` 可以用 Lepus 运行或构建。该仓库的编译器前端使用 C++17 输出目标并采用 IELR(1)，配置见 `gen.sh`。
+
+类型、所有权和运行期规则由语言定义；宿主平台、导出目标与外部库要求另行核对。已实现能力、默认配置与平台边界见[能力说明](doc/17-capabilities.md)，版本号以 [`VERSION`](VERSION) 为准。
+
+## 许可证
+
+Apache License 2.0，见 [LICENSE](LICENSE) 与 [NOTICE](NOTICE)。

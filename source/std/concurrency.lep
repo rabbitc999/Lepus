@@ -1,0 +1,138 @@
+module std::concurrency;
+
+/* 统一跨线程结果：0 完成，1 超时，2 关闭，3 取消，4 队列满，5 失败，6 无效句柄。 */
+const int64 READY = 0;
+const int64 TIMEOUT = 1;
+const int64 CLOSED = 2;
+const int64 CANCELLED = 3;
+const int64 FULL = 4;
+const int64 FAILED = 5;
+const int64 INVALID = 6;
+
+struct Receive<T> {
+    int64 status;
+    T value;
+    bool isReady() { return self.status == READY; }
+};
+
+int64 __channelCreate(int64 capacity);
+void __channelClose(int64 handle);
+int64 __poll(int64 handle, int64 millis);
+int64 __channelSend<T>(int64 handle, int64 millis, T value);
+T __channelTake<T>();
+int64 __fetchAdd(int64 handle, int64 delta);
+bool __compareExchange(int64 handle, int64 expected, int64 desired);
+
+/** 跨线程引用计数句柄，复制与清理由对象表维护。 */
+opcode __ArcStorage {
+    new = __std_arc_empty;
+    copy = __std_arc_copy;
+    drop = __std_object_free;
+};
+
+__ArcStorage __arcCreate<T>(T value);
+T __arcGet<T>(int64 handle);
+__ArcStorage __arcDowngrade(int64 handle);
+__ArcStorage __arcUpgrade(int64 handle);
+bool __arcExpired(int64 handle);
+
+/** 可跨线程复制的强引用。各副本共同拥有一个不可变的值快照。 */
+struct Arc<T> {
+    __ArcStorage __storage;
+
+    /** 查询句柄是否为空。 */
+    bool isEmpty() { return self.__storage.opcode == 0; }
+
+    /** 增加一份强引用；普通赋值也采用相同的所有权语义。 */
+    Arc<T> clone() { return self; }
+
+    /** 在当前线程恢复独立的值副本。空句柄触发运行时错误。 */
+    T get() { return __arcGet<T>(self.__storage.opcode); }
+
+    /** 创建可跨线程传递的弱引用。空强引用产生空弱引用。 */
+    ArcWeak<T> downgrade() {
+        ArcWeak<T> result;
+        result.__storage = __arcDowngrade(self.__storage.opcode);
+        return result;
+    }
+
+    /** 释放当前强引用。最后一份强引用释放载荷。 */
+    void close() { self.__storage = __ArcStorage::new(); }
+};
+
+/** 可跨线程复制的弱引用，仅观察 Arc 载荷的存活状态。 */
+struct ArcWeak<T> {
+    __ArcStorage __storage;
+
+    /** 检查当前时刻是否已经失效。空句柄也视为失效。 */
+    bool isExpired() { return __arcExpired(self.__storage.opcode); }
+
+    /** 原子地尝试取得强引用，失效时返回空 Arc。 */
+    Arc<T> upgrade() {
+        Arc<T> result;
+        result.__storage = __arcUpgrade(self.__storage.opcode);
+        return result;
+    }
+
+    /** 释放当前弱引用。 */
+    void close() { self.__storage = __ArcStorage::new(); }
+};
+
+/** 创建可跨线程共享的值快照，元素须符合线程传值规则。
+ * @param value 用于生成共享快照的值。
+ * @return 持有新快照的强引用。
+ */
+Arc<T> arc<T>(T value) {
+    Arc<T> result;
+    result.__storage = __arcCreate(value);
+    return result;
+}
+
+/* 线程组拥有共享槽；Shared 只保存非拥有标识，复制不会复制或销毁槽内值。 */
+/* 每次 get/set/swap 原子；组合调用不构成原子事务。 */
+struct Shared<T> {
+    int64 __identity;
+    static Shared<T> create(T value) { self.__identity = std::core::__sharedCreate<T>(value); }
+    T get() { return std::core::__sharedGet<T>(self.__identity); }
+    void set(T value) { std::core::__sharedSet<T>(self.__identity, value); }
+    T swap(T value) { return std::core::__sharedSwap<T>(self.__identity, value); }
+    /** 共享槽的引用标识，不拥有槽内值。 */
+    int64 id() { return self.__identity; }
+};
+
+/* 整数原子更新单独提供，避免给任意 Shared<T> 承诺算术语义。 */
+struct AtomicInt64 {
+    Shared<int64> slot;
+    static AtomicInt64 create(int64 value) { self.slot = Shared<int64>::create(value); }
+    int64 get() { return self.slot.get(); }
+    void set(int64 value) { self.slot.set(value); }
+    int64 fetchAdd(int64 delta) { return __fetchAdd(self.slot.id(), delta); }
+
+    /** 原子地比较并更新整数槽。
+     * @param expected 预期的当前值。
+     * @param desired 比较相等时写入的新值。
+     * @return 已交换时为 true，否则为 false。
+     */
+    bool compareExchange(int64 expected, int64 desired) {
+        return __compareExchange(self.slot.id(), expected, desired);
+    }
+};
+
+/* 可复制句柄指向线程组内同一有界队列，传输载荷按值复制。显式 close 后先排空再返回 CLOSED。 */
+struct Channel<T> {
+    int64 handle;
+    static Channel<T> create(int64 capacity) { self.handle = __channelCreate(capacity); }
+    int64 sendFor(T value, int64 millis) { return __channelSend<T>(self.handle, millis, value); }
+    int64 send(T value) { return self.sendFor(value, -1); }
+    int64 trySend(T value) { return self.sendFor(value, 0); }
+    Receive<T> receiveFor(int64 millis) {
+        Receive<T> result;
+        if (self.handle <= 0) { result.status = INVALID; return result; }
+        result.status = __poll(self.handle, millis);
+        if (result.status == READY) { result.value = __channelTake<T>(); }
+        return result;
+    }
+    Receive<T> receive() { return self.receiveFor(-1); }
+    Receive<T> tryReceive() { return self.receiveFor(0); }
+    void close() { if (self.handle > 0) { __channelClose(self.handle); } }
+};

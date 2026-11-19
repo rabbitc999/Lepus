@@ -1,0 +1,1 @@
+语法错误：example/samples-error/bare_null_assignment.lep 第 1 行第 36 列：期望 等于(==) / 不等于(!=) 之一，实际是 分号(;)

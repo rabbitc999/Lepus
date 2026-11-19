@@ -1,0 +1,110 @@
+/** @file lepus_i18n.hpp
+ * @brief Lepus 工具链与运行时的中、英静态消息及系统语言检测。
+ */
+#ifndef LEPUS_I18N_HPP
+#define LEPUS_I18N_HPP
+#include <atomic>
+#include <cstdlib>
+#include <cstring>
+#include <string>
+#include <vector>
+#include <utility>
+#include "console/utf8.hpp"
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
+#if defined(_WIN32) && !defined(_MSC_VER)
+extern "C" int __cdecl __wgetmainargs(int*, wchar_t***, wchar_t***, int, void*);
+#endif
+#ifdef _MSC_VER
+#include <corecrt_startup.h>
+#endif
+namespace lepus_i18n {
+/** @brief 获取系统命令行的 UTF-8 实参；Windows 使用 CRT 的宽字符解析结果。
+ * @param argc 原始参数数量。 @param argv 原始参数数组。 @return 拥有型 UTF-8 参数。
+ */
+inline std::vector<std::string> processArguments(int argc, char **argv){
+    static tool_console::Session console;
+    return tool_console::arguments(argc,argv);
+}
+
+/** @brief 支持的显示语言；Auto 仅用于选择，不作为消息表下标。 */
+enum class Language { Zh, En, Auto };
+/** @brief 识别语言名称和系统区域串。 @param value UTF-8 区域名称。 @return 可识别语言或 Auto。 */
+inline Language parse(const char *value) {
+    if (!value || !*value) return Language::Auto;
+    const auto lower=[](char c){ return c>='A' && c<='Z' ? char(c-'A'+'a') : c; };
+    if (std::strlen(value)>=2) {
+        const char a=lower(value[0]),b=lower(value[1]);
+        if (value[2]==0 || value[2]=='_' || value[2]=='-' || value[2]=='.' || value[2]=='@') {
+            if(a=='z' && b=='h')return Language::Zh;
+            if(a=='e' && b=='n')return Language::En;
+        }
+    }
+    return Language::Auto;
+}
+/** @brief 自动选择：LEPUS_LANG、POSIX 区域环境、Windows UI 语言、英文。 @return 具体显示语言。 */
+inline Language detect() {
+    const char *setting=std::getenv("LEPUS_LANG");
+    if (setting && std::strcmp(setting,"auto")!=0) {
+        const auto found=parse(setting); return found==Language::Auto?Language::En:found;
+    }
+    for(const char *name:{"LC_ALL","LC_MESSAGES","LANG"}) {
+        const char *value=std::getenv(name);
+        if(value && *value) { const auto found=parse(value); return found==Language::Auto?Language::En:found; }
+    }
+#ifdef _WIN32
+    const WORD primary=PRIMARYLANGID(GetUserDefaultUILanguage());
+    if(primary==LANG_CHINESE)return Language::Zh;
+#endif
+    return Language::En;
+}
+/** @brief 显式语言状态；静态存储不占用语言对象的 Arena。 @return 原子状态。 */
+inline std::atomic<int>& selection(){static std::atomic<int> value{-1};return value;}
+/** @brief 获取当前语言。 @return 具体显示语言。 */
+inline Language language(){const int selected=selection().load(std::memory_order_relaxed);static const Language automatic=detect();return selected<0?automatic:static_cast<Language>(selected);}
+/** @brief 覆盖当前进程语言。 @param value 语言，Auto 重新读取环境。 @return 无。 */
+inline void select(Language value){selection().store(static_cast<int>(value==Language::Auto?detect():value),std::memory_order_relaxed);}
+/** @brief 静态消息记录；标识符、路径及用户程序输出不进入翻译表。 */
+struct Message {const char *zh,*en;};
+// LEPUS_CATALOG_BEGIN
+// LEPUS_CATALOG_END
+/** @brief 查询编译期内嵌的消息，缺失时保留完整原文。 @param original 中文消息键。 @return 生命周期为进程的 UTF-8 文本。 */
+inline const char *text(const char *original){
+    const auto chosen=language();if(chosen==Language::Zh)return original;
+    std::size_t low=0,high=sizeof(messages)/sizeof(messages[0]);
+    while(low<high){const auto mid=low+(high-low)/2;const int order=std::strcmp(original,messages[mid].zh);if(order==0)return messages[mid].en;if(order<0)high=mid;else low=mid+1;}
+    return original;
+}
+/** @brief 提取工具选项并将显式语言传递给开发子进程；-- 后的参数保持原样。
+ * @param arguments 规范化后的 argv；成功时删除语言选项。 @param error 失败说明。 @return 选项合法时为 true。
+ */
+inline bool configure(std::vector<std::string>& arguments,std::string& error){
+    for(std::size_t i=1;i<arguments.size();){
+        if(arguments[i]=="--")break;
+        const bool separate=arguments[i]=="--lang";
+        if(!separate && arguments[i].compare(0,7,"--lang=")!=0){++i;continue;}
+        if(separate && (i+1==arguments.size() || arguments[i+1]=="--")) {error=text("lang 后需要 zh、en 或 auto");return false;}
+        const std::string value=separate?arguments[i+1]:arguments[i].substr(7);
+        if(value!="zh" && value!="en" && value!="auto") {error=std::string(text("不支持的显示语言："))+value;return false;}
+#ifdef _WIN32
+        _putenv_s("LEPUS_LANG",value.c_str());
+        _putenv_s("PYTHONIOENCODING","utf-8");
+#else
+        setenv("LEPUS_LANG",value.c_str(),1);
+        setenv("PYTHONIOENCODING","utf-8",1);
+#endif
+        select(value=="auto"?Language::Auto:parse(value.c_str()));
+        arguments.erase(arguments.begin()+i,arguments.begin()+i+(separate?2:1));
+    }
+    return true;
+}
+} // namespace lepus_i18n
+#define LEPUS_TEXT(original) (::lepus_i18n::text(original))
+#endif

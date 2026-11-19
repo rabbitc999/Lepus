@@ -1,0 +1,29 @@
+import std::gui;
+
+void main() {
+    assert(openWindow(560, 380, "Lepus desktop", 1));
+    let count = button("Count");
+    let quit = button("Close");
+    let enabled = checkBox("Enable counter");
+    let input = textBox("Edit this text");
+    let slider = slider("Value");
+    let progress = progressBar("");
+    assert(enabled.setChecked(true));
+    assert(slider.setRange(0, 100)); assert(progress.setRange(0, 100));
+    int64 clicks = 0;
+    count.onClick(void fn mut(Event event) { clicks += 1; });
+    quit.onClick(void fn(Event event) { requestClose(); });
+    run(void fn mut() {
+        label((int32)24, (int32)20, (int32)500, (int32)28, "Clicks: " + clicks.toString());
+        enabled.draw(Rect::at(24, 64, 24, 24));
+        count.setEnabled(enabled.checked());
+        count.draw(Rect::at(24, 108, 152, 36));
+        quit.draw(Rect::at(200, 108, 152, 36));
+        input.draw(Rect::at(24, 168, 328, 32));
+        slider.draw(Rect::at(80, 228, 272, 24));
+        progress.setValue(slider.value());
+        progress.draw(Rect::at(24, 284, 328, 24));
+    });
+    count.close(); quit.close(); enabled.close(); input.close(); slider.close(); progress.close();
+    println("clicks={}", clicks);
+}

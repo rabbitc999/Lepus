@@ -1,0 +1,12 @@
+unsafe int64 layout() {
+    unsafe { return __rawSize(int64); }
+}
+
+$macro layoutInTemplate() -> expr { unsafe { yield layout(); } }
+$macro relay(body: block) -> stmt { unsafe { body; } }
+
+void main() {
+    assert($layoutInTemplate() == 8);
+    unsafe { $relay({ assert(layout() == 8); }); }
+    println("unsafe macro scope OK");
+}

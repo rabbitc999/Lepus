@@ -1,0 +1,1196 @@
+# 04 Language reference
+
+<!-- LANGUAGE NAVIGATION -->
+**English** · [简体中文](../04-language-reference.md)
+<!-- END LANGUAGE NAVIGATION -->
+
+Lepus syntax and semantics, by topic. For a first impression read the
+[Language tour](02-language-tour.md); for the reasoning behind the design read
+[Core concepts](03-core-concepts.md).
+
+The authoritative form of the grammar is the [EBNF grammar reference](../14-grammar-ebnf.md). This document is
+about how to use it.
+
+> Except where noted, every snippet here was executed on a default build.
+
+---
+
+## 1. Lexical structure
+
+| Category | Spelling | Notes |
+| --- | --- | --- |
+| Line comment | `// …` | |
+| Block comment | `/* … */` | nestable |
+| Identifier | `[A-Za-z_][A-Za-z0-9_]*` | case-sensitive |
+| Integer literal | `42`, `0xFF`, `b1010`, `1u`, `0xffu`, `b_101u` | Lowercase `u`: unsigned, defaults to `uint64`; `-1u` is rejected |
+| Float literal | `3.14`, `1e9`, `1.5f`, `1f` | Unsuffixed: `float64`; lowercase `f`: `float32` |
+| Character literal | `'M'`, `'\n'` | type `char` |
+| String literal | `"hello"` | type `std::core::String` |
+| Boolean | `true` / `false` | |
+
+Statements end with `;`, blocks use `{ }`. Macros start with `$`;
+see §14.
+
+Ordinary string literals with identical byte contents share one generated data item within a program,
+including uses in different functions and empty literals. Independent `String` values retain value copying
+and deterministic cleanup, so changing one variable does not change another. Literals cannot be modified
+directly or borrowed through mutable references to their bytes.
+
+Owned String values provide `capacity()`, `maxCapacity()`, `reserve(bytes)`, `append(text)`, `clear()` and `truncate(bytes)`.
+`append` changes the current value. Clearing or shortening its byte length retains capacity; `reserve` never shrinks it. Growth takes the greater of the required size and twice the current capacity, with overflow and capacity checks. Growth may release the replaced buffer; drop releases the final buffer. Copies continue to own independent storage. `truncate` does not re-encode UTF-8, does nothing beyond the current length, and rejects negative lengths.
+
+```lepus
+String buffer;
+buffer.reserve(128);
+buffer.append("中文🙂");
+int64 capacity = buffer.capacity();
+buffer.clear();
+assert(buffer.isEmpty() && buffer.capacity() == capacity);
+```
+
+`maxCapacity()` subtracts the buffer terminator byte from the allocator's single-block payload budget. The descriptor and other live objects also consume the total budget, so requests below this limit may still run out of memory. Mutating methods require a writable receiver and reject const values, readonly references, and overlapping direct active byte borrows; raw addresses obtained before growth must not be reused afterward. Methods returning new values, including `substring` and `remove`, retain their existing value semantics.
+
+---
+
+## 2. Types
+
+### Primitive types
+
+| Category | Types |
+| --- | --- |
+| Signed integers | `int8` `int16` `int32` `int64` |
+| Unsigned integers | `uint8` `uint16` `uint32` `uint64` |
+| Floating point | `float32` `float64` |
+| Other scalars | `bool` `char` |
+| String | `String` (i.e. `std::core::String`) |
+| Big numbers / high precision | `BigInteger` `BigDecimal` |
+
+`char` holds one UTF-8 byte in the range 0–255 and shares u8 arithmetic and one-byte memory access with `uint8`.
+Adjacent elements of `char[]` and `uint8[]` are one byte apart. Loads zero-extend, stores truncate high bits,
+and arithmetic wraps with u8 semantics. A character literal must decode to exactly one byte; multibyte text
+uses strings, whose indexing and length count UTF-8 bytes. Structures retain their field-slot layout;
+the access width of a byte field does not imply that the whole structure is packed.
+
+**No implicit narrowing.** `int64 -> int32` and `int64 -> char` both need an explicit cast:
+`(int32)x` / `(char)x`.
+
+A decimal literal's magnitude tops out at `9223372036854775807`, with one exception:
+`-9223372036854775808`. The 2^63 magnitude does not fit in `int64` and is only valid directly
+behind a unary minus, where it is exactly the minimum; a bare `9223372036854775808` still reports
+that the decimal integer is out of int64 range.
+
+An integer literal with no type context defaults to `int64`, but inside an expression it takes
+its type from context:
+
+- the target of an assignment / initialization / argument / `return` propagates inward — both
+  literals in `int32 a = 1 + 2;` are `int32`, so the whole expression is `int32`;
+- in binary arithmetic / bitwise operators the **other operand's type** counts too — with
+  `int32 x = 1;`, the `1` in `x + 1` is `int32`, so no `(int32)1` is needed;
+- comparisons and logical operators do not propagate (their result is not an operand type), and
+  with no context at all (`let n = 1 + 2;`) the literal stays `int64`;
+- pinning happens only when the value fits: an out-of-range literal falls back to `int64` and is
+  reported by the usual "narrowing needs a cast" rule — never silently truncated.
+
+Runnable check: [`literal_context_type.lep`](../../example/samples/literal_context_type.lep).
+
+### Compound types
+
+| Spelling | Meaning |
+| --- | --- |
+| `T a[N]` | fixed-length array with length in the type |
+| `T a[]` / local `T[] a` | owning runtime-length array created with `new[n]`; parameters also accept both forms |
+| `(A, B)` | tuple; read members via `[0]` / `[1]` with an in-range compile-time integer index |
+| `R fn(A, B)` | function type |
+| `T mut&` / `T const&` | writable / read-only reference (`T &` ≡ `T const&`) |
+| `Option<T>` | maybe a value: `Value(v)` / `None` |
+| `Result<T, E>` | maybe a failure: `Ok(v)` / `Fail(e)` |
+| `List<T>` `Map<K,V>` `Set<T>` | built-in containers |
+| `std::core::Any` | type-erased box, used for runtime polymorphism |
+
+---
+
+### Transparent type aliases
+
+At module scope, `type alias Name = Type;` gives a type another spelling. The alias and its target share type identity, borrowing and ownership rules, assignment compatibility, overload matching, and generic inference. The existing `type Name = Type;` declaration introduces a host type with a distinct identity.
+
+```lepus
+type alias Byte = uint8;
+type alias Reply<T> = Result<T, String>;
+type alias Mapper<In, Out = In> = Out fn(In);
+
+Reply<int64> lookup(bool found) {
+    if (found) { return Ok(42); }
+    return Fail("missing");
+}
+```
+
+Generic aliases use the existing type parameters, interface constraints, default arguments, and `N:int64` constant parameters. Resolve the target and defaults in the declaring module and explicit arguments in the calling module. Qualify an alias with its module name or use its short name after directly importing that module. If every generic parameter has a default, `Block block;` and `Block<> block;` are equivalent. Alias chains must be acyclic. An alias for a named type can qualify static members or enum variants, as in `Reply<int64>::Fail("missing")`. The implicitly available `std::core::StdResult<T>` denotes `Result<T, Error>`.
+
+## 3. Declarations
+
+```lepus
+const int64 LIMIT = 100;   // constant
+int64 counter = 0;         // variable
+let inferred = LIMIT;      // inferred type
+```
+
+- Top-level declarations are global; declarations inside a function are local.
+- Struct fields and static fields: §6.
+- Array lengths may be constant expressions.
+
+---
+
+## 4. Functions
+
+Place `export` before a function definition to expose it to native callers:
+
+```lepus
+#export("f_add")
+int64 add(int64 left, int64 right)
+{
+    return left + right;
+}
+```
+
+`Lepus build library.lep --shared --out build/library` generates a shared library and its C ABI
+header. Use the symbols declared in that header (`f_add` in this example). Shared-library
+sources may omit `main`; executable sources still require it. Call `lepus_init()` before
+exported functions and `lepus_finish()` afterwards. These entries run global initialization
+and cleanup respectively. Repeatable `--export` options can add further exported functions.
+Module-qualified and overloaded functions retain their actual labels; consult the generated
+header for their complete signatures.
+
+
+```lepus
+int64 add(int64 a, int64 b) { return a + b; }
+void log(String message) { println("{}", message); }
+```
+
+- Parameters are **by value** (copies) by default. To avoid copying, or to allow mutation, write
+  `T mut&` / `T const&`.
+- Runtime arrays follow the same rule: `T[] items` copies the length and elements, so changes
+  to the copy do not affect the argument. `T[] & items` and `T[] const& items` are read-only
+  references; `T[] mut& items` is a mutable reference. Bind a reference with `&array`, or
+  forward an existing array reference directly. A read-only reference cannot write elements,
+  obtain mutable element references, or be passed to a mutable reference parameter. References
+  to local arrays cannot outlive their source. Resource-owning elements retain their normal
+  copy and destruction rules.
+- Overloading is supported: selection is by argument types.
+- Variadic trailing parameters are written `T... items`, used with `for-in` or `std::iter`.
+- `static` methods belong to the type and are called `Type::method()`.
+- The entry point is named `main`, returns `void`, and takes no parameters or `std::core::List<std::core::String> arguments`. Normal completion or `return;` from `void main` produces process exit code 0; panic still fails.
+
+### Multiple return values and generic tuples
+
+Use a tuple as the return type. `return a, value;` is equivalent to `return (a, value);`.
+Type parameters may occur in any tuple element and are replaced by explicit specialization or argument inference.
+Existing assignment targets also provide context for generic return-type inference.
+
+```lepus
+(int32, T) func<T>(T value) {
+    int32 a = 1;
+    return a, value;
+}
+void main() {
+    String str1 = "aaa", str2;
+    int32 c;
+    c, str2 = func<String>(str1);
+    assert(c == 1 && str2 == "aaa");
+}
+```
+
+`c, str2 = ...;` and `(c, str2) = ...;` assign to existing writable targets. Declare new bindings with `let (c, str2) = ...;`.
+The complete source tuple is evaluated and saved once before targets are assigned from left to right, so
+`a, b = (b, a);` or `(a, b) = (b, a);` swaps values. Variables, writable fields, array or container elements, and writable references
+are supported; `a, (b, c) = ...;` matches nested tuples. Element counts, shapes and target types must match.
+Const variables and read-only references cannot be assigned. Ordinary copy, drop, reference and lifetime
+checks apply. Tuple members such as `[0]` remain read-only.
+
+### `move`: transfer ownership without copying
+
+`move` is a **unary prefix operator**, written `move x`; the result type is inferred from the operand and no import is needed. The operand is a place expression: a variable, `self`, a member (`move obj.field`), an index (`move list[i]`), or a pointer / reference itself — pointers and references dereference one level automatically, so write `move p`, while `move *p` is a syntax error. Use the variable or reference directly; an extra address-of expression is not accepted.
+
+```lepus
+struct Message { String text; };
+void main() {
+    Message source;
+    source.text = "hello";
+    Message result = move source;
+    println("{}", result.text);
+}
+```
+
+The argument is evaluated once. Existing resource handles and aggregate slots are transferred to the result, then the source storage is cleared and its value lifetime ends. Moving does not clone strings, containers, Any or closures and does not run the source's close/drop methods. The destination owns the transferred resources and eventually destroys them. Borrowed reference fields retain their original lifetime constraints.
+
+Only writable places are accepted; literals, temporaries, read-only references and const sources are rejected. Supported targets include scalars, strings, containers, Any, owned interface values, functions, concrete aggregates, and file/process handles. Arrays and opaque host types cannot be moved directly; concrete array elements can be moved.
+
+Statically tracked reads and repeated moves after a move are rejected, including scalar reads and aliases. Assignment does not restore usability; a new declaration is required. Redeclaration requires the whole variable to have been moved on every incoming path. Moving one field leaves disjoint fields usable but prevents reading the complete aggregate.
+
+Aggregate lifetime markers prevent duplicate destruction. Moving from manually allocated storage does not free its storage block; drop the original reference when appropriate. Ordinary assignment and ordinary value parameters still copy. Use references for calls that must avoid copying, and move explicitly where the result should take ownership. Initialization, assignment, returns and temporary reception transfer owned fields from the move result. See the [Ownership transfer](24-ownership-move.md).
+
+Desktop and embedded Linux hosts share the single `source/ircode/` core and configure resources through their host integration.
+
+### Default arguments
+
+A parameter can have a default expression; calls may omit a trailing sequence of arguments:
+
+```lepus
+int64 add(int64 a, int64 b = 10) { return a + b; }
+String greet(String name = "Lepus") { return "Hello, " + name; }
+// add(2) == 12; add(2, 3) == 5; greet() == "Hello, Lepus"
+```
+
+Free functions, instance methods, static methods, and constructors support defaults. Generic functions
+can infer types from explicitly supplied arguments. Each omitted argument evaluates its default at
+call time; explicitly supplied arguments skip that evaluation. Names resolve in the defining module's
+global scope, independently of caller locals. Defaults cannot refer to parameters or `self`.
+After a default parameter, only more default parameters or a final variadic parameter may follow.
+Positional arguments bind from left to right, without skipping intermediate parameters.
+
+Defaults are excluded from function types and overload signatures. Overload matching accepts omitted
+trailing defaults and retains exact matching before numeric widening; multiple matches in the same
+tier are ambiguous. When omitted defaults cause ambiguity, diagnostics list candidate parameter types,
+names, default markers, and omitted parameters, with advice to supply distinguishing arguments or
+adjust overload signatures. Function pointers and lambdas still require all fixed arguments in their `fn(...)`
+type. Enum payload fields and interface method declarations do not support defaults yet.
+
+### Constructors and `new`
+
+A struct may define a constructor, called with `new(...)`:
+
+```lepus
+struct Counter {
+    static int64 alive;
+    int64 value;
+    Counter(int64 value) { self.value = value; Counter::alive = Counter::alive + 1; }
+    static int64 count() { return Counter::alive; }
+};
+void main() {
+    Counter c = new Counter(7);
+    println("value={} alive={}", c.value, Counter::count());
+}
+```
+
+```text
+value=7 alive=1
+```
+
+Heap objects are written `T mut& p = new T;` (no constructor arguments — the element type comes from
+`p`'s type) and freed with `p.drop();`.
+
+`new(args)` carries no type information — **the declaration on the left decides which constructor
+runs**:
+
+| Form | Which path |
+| --- | --- |
+| `T v = new T(args);` | owning value with runtime-allocated storage, calls `T`'s **real constructor** (same name as `T`) |
+| `T mut& p = new T(args);` | heap object, same real constructor, remember `p.drop();` |
+| `T v = T::create(args);` | **named constructor entry point** `static T create(...)` |
+| `T v = T::otherFactory();` | an ordinary static factory (any name) |
+
+```lepus
+struct Point {
+    int64 x;
+    int64 y;
+    Point(int64 x, int64 y) { self.x = x; self.y = y; }             // real constructor
+    static Point create(int64 x, int64 y) { self.x = x * 10; self.y = y * 10; }  // named entry point
+};
+void main() {
+    Point o = new Point(3, 4);    // real constructor → 3,4
+    Point mut& p = new Point(1, 2);  // real constructor + heap → 1,2
+    Point q = Point::create(3, 4);  // named constructor entry point → 30,40
+    println("{},{} {} {} {} {}", o.x, o.y, p.x, p.y, q.x, q.y);
+    p.drop();
+}
+```
+
+```text
+3,4 1 2 30 40
+```
+
+`static T create(...)` is a **named constructor entry point**: it also carries an implicit `self`, so the
+body writes into `self` (or `self.field`), and the call site takes the constructed value.
+The body may fall through, use `return self;`, or end initialization early with `return;`.
+Returning `self` neither copies nor moves the receiver; other return expressions are rejected.
+Discarding its result is an error.
+
+A generic struct’s `create` entry can infer the owner’s type arguments from its inputs, as in `Pair::create(key, value)` and `Pair::create((key, value))`. If the inputs do not uniquely determine the types, write `Pair<K, V>::create(...)` explicitly.
+
+---
+
+## Passing conventions for value parameters
+
+Prefix a parameter type in an ordinary named top-level function with `#MoveOnly` or `#CopyOnly`. Each directive applies to one value parameter.
+
+```lepus
+struct Entry { String name; };
+
+void consume(#MoveOnly Entry value) { println("{}", value.name); }
+void inspect(#CopyOnly Entry value) { println("{}", value.name); }
+
+void main() {
+    Entry entry;
+    entry.name = "Lepus";
+    inspect(entry);
+    consume(move entry);
+}
+```
+
+`#MoveOnly` accepts aggregates with concrete layouts and primitive scalars. Use `move` for an existing value, or pass an owned temporary directly. `#CopyOnly` requires a copyable type, uses ordinary pass-by-value copying, and rejects a direct `move` argument. These parameters are required, and functions that declare them must be called directly. Declare reference parameters with `const&` or `mut&`.
+
+## 5. Operators
+
+```lepus
+void main() {
+    int64 a = 17;
+    int64 b = 5;
+    println("{} {} {} {} {}", a + b, a - b, a * b, a / b, a % b);
+    println("{} {} {}", a & b, a | b, a ^ b);
+    println("{} {}", a << 1, a >> 1);
+    println("{} {} {}", a > b, a == b, (a > 10 && b < 10) || false);
+    a += 3;
+    println("{}", a);
+}
+```
+
+```text
+22 12 85 3 2
+1 21 20
+17 8
+1 0 1
+20
+```
+
+Precedence follows C: unary > multiplicative > additive > shift > relational > equality > bitwise AND >
+bitwise XOR > bitwise OR > logical AND > logical OR. When in doubt, parenthesise.
+
+Compound assignment `+=` `-=` `*=` `/=` `%=` `&=` `|=` `^=` `<<=` `>>=` all exist.
+
+`++` / `--` check actual storage targets. Within a full expression, an updated target cannot also be read or written by another operation.
+`i = i++`, `i += i++`, `i++ + i`, and `i++ + ++i` report `LEP1301`.
+Independent targets are allowed in `a = (i++) + (j++)`, `a += i++`, and `f(i++, j++)`.
+Distinct fields and distinct constant indices are independent; dynamic indices conservatively overlap when their separation cannot be proved.
+Direct reference aliases use their source identity. Parentheses, arguments, and short-circuit branches remain part of the enclosing full expression;
+statements, declaration initializers, and the three for clauses are checked separately.
+
+Assignment target locations are evaluated once: `a[f()] += 1` calls `f()` once, and both `a[i++] = 1` and
+`a[i++] += 1` increment `i` once. Compound assignment saves the location before reading, calculating, and writing back.
+The array element and its index variable are different targets. See [`expression_effects.lep`](../../example/samples/expression_effects.lep).
+
+Structs may overload operators by inheriting the **left interfaces** `Add` / `Subtract` /
+`Multiply` / `Divide` / `Modulo` / `Equal` / `NotEqual` / `Less` / `LessOrEqual` / `Greater` /
+`GreaterOrEqual` / `And` / `Or` / `Xor` / `ShiftLeft` / `ShiftRight` (methods `leftAdd` and
+friends); the other side of the operator needs its own implementation via the **right
+interfaces** such as `RightAdd` (method `rightAdd`). Type arguments are written
+`<result type, other operand type>`.
+
+**Anything the compiler can derive, you don't have to write:**
+
+- **Commutativity**: `+` `*` `==` `!=` `&` `|` `^` are commutative, so with only the left
+  interface declared, `5 + a` works exactly like `a + 5` (the two operands are swapped for you).
+  Subtraction / division / modulo / ordering / shifts are **not** commutative — the reverse
+  direction needs an explicit `RightSubtract`-style right interface.
+- **Comparison duality**: with only `Less` declared, `5 > a` (dual — same as `a < 5`), `a >= 5`
+  (negated — `!(a < 5)`) and `5 <= a` (dual + negated) all work. `a > 5` does not: that needs
+  `int64 < Vec`, so `Vec` has to provide `Greater`. `==` and `!=` negate each other.
+- **Explicit beats derived**: with both `Add` and `RightAdd` declared, `5 + a` uses `RightAdd`
+  and is not shadowed by commutativity. `&&` / `||` are built-in short-circuit operators and
+  **cannot be overloaded** (the diagnostic says so directly).
+- **Right-side switches**: commutativity and duality both borrow the right-hand operand as the
+  receiver, so in `5 + a` what matters is what `a`'s type says —
+  - **nothing declared**: derive as above; both `a + 5` and `5 + a` work;
+  - **`RightAdd` declared**: the right direction is yours; `5 + a` only uses `rightAdd`, and if
+    its parameter cannot take the left operand it is an error — it does **not** fall back to
+    borrowing `Add`;
+  - **compiler directive `#NoRightAdd`**: explicitly forbidden; `5 + a` is an error. It is
+    written before the `struct` and named `#NoRight` + the left interface name
+    (`#NoRightAdd`, `#NoRightLess`, …), with no type arguments and no inheritance-list entry;
+    the left direction `a + 5` is unaffected. `#NoRightXxx` wins over `RightXxx`.
+- **Turning derivation off**: `#NoAddReplace` before the `struct` removes **every** automatic
+  derivation for that interface — `5 + a` no longer swaps and `a >= 5` is no longer negated
+  from `Less`. The name is `#No` + interface + `Replace` (`#NoLessReplace`,
+  `#NoMultiplyReplace`, …) and several may be written in a row. The interface must be one the
+  type really implements and one that has derivation to cancel, otherwise it is an error.
+  Direct calls are untouched, and `#NoRightAdd` only closes the right-hand direction.
+- **Evaluation order**: swapping changes only which operand is the receiver, not when they are
+  evaluated — still left to right (`bump() + makeA()` runs `bump()` first, then `makeA()`).
+- **Same operand pair, different result types**: one type may implement both `Add<int64,int64>`
+  and `Add<Vec,int64>` — the two `leftAdd(int64)` methods differ only in return type. Ordinary
+  method overloading cannot do that (C++ cannot either — return type alone does not
+  disambiguate), so operator interfaces **make an exception**: the mangled name carries the
+  return type, and both survive. Which one is picked is decided by the **target type** —
+  `int64 x = a + 3;` takes the `int64`-returning one, `Vec y = a + 3;` takes the `Vec`-returning
+  one. With no target type (`let z = a + 3;`) it is an error that asks you to say which —
+  the compiler never silently picks one.
+
+Runnable checks: [`operator_symmetry.lep`](../../example/samples/operator_symmetry.lep),
+[`operator_right_direction.lep`](../../example/samples/operator_right_direction.lep),
+[`operator_result_choice.lep`](../../example/samples/operator_result_choice.lep),
+[`operator_swap_eval_order.lep`](../../example/samples/operator_swap_eval_order.lep). Rejected
+forms:
+[`operator_asymmetric_reverse.lep`](../../example/samples-error/operator_asymmetric_reverse.lep),
+[`operator_right_forbidden.lep`](../../example/samples-error/operator_right_forbidden.lep),
+[`operator_right_explicit.lep`](../../example/samples-error/operator_right_explicit.lep),
+[`operator_result_ambiguous.lep`](../../example/samples-error/operator_result_ambiguous.lep),
+[`logical_operator_overload.lep`](../../example/samples-error/logical_operator_overload.lep).
+
+---
+
+## 6. Structs
+
+Declarations of `struct`, `enum`, and `interface` end at the closing `}`. The trailing semicolon is optional, and existing `};` declarations remain valid. Fields, abstract interface methods, and ordinary statements retain their semicolon requirements.
+
+```lepus
+struct Point {
+    int64 x;
+    int64 y;
+
+    int64 sum() { return self.x + self.y; }
+    static Point origin() { Point p; p.x = 0; p.y = 0; return p; }
+};
+```
+
+- Fields and methods share one pair of braces; inside a method `self` refers to the receiver.
+- `static` fields/methods belong to the type: `Point::origin()`.
+- Interfaces: `struct Circle : Shape { … }`, several interfaces comma-separated, all must be fully
+  implemented.
+- `Drop` (destructor) and `Closeable` (early close) — see
+  [Core concepts](03-core-concepts.md#4-no-garbage-collection-deterministic-release).
+- Constructors: §4.
+
+---
+
+## 7. Enums and match
+
+```lepus
+enum Message {
+    Quit,
+    Move(int32 x, int32 y),
+    Text(String text)
+};
+```
+
+Variants may carry fields (algebraic data types). Handle them with `match`:
+
+```lepus
+void show(Message message) {
+    match (message) {
+        Message::Quit => { println("quit"); }
+        Message::Move(x, y) => { println("move {} {}", x, y); }
+        Message::Text(text) => { println("text {}", text); }
+    }
+}
+```
+
+`match` checks **exhaustiveness**: omitting a variant is a compile error. `_` is the catch-all.
+
+### Scalar match: constants and ranges
+
+```lepus
+int64 grade(int64 score) {
+    match (score) {
+        100 => { return 3; }
+        rangeEq(90, 99) => { return 2; }
+        rangeEq(60, 89) => { return 1; }
+        _ => { return 0; }
+    }
+    return 0;
+}
+```
+
+Integer and `char` range patterns use standard calls:
+
+| Spelling | Meaning |
+| --- | --- |
+| `std::core::range<T>(a, b)` | `a <= x < b` |
+| `std::core::rangeEq<T>(a, b)` | `a <= x <= b` |
+
+`<T>` may be omitted when the endpoint types can be inferred. Range patterns support integers and `char`; ordered conditions on floats and String use guards. Custom values implementing `Equal<T>` can be match subjects, with branch values compared through that protocol. The subject is evaluated once and branches are tested in source order.
+
+Integer patterns with compile-time bounds are checked for overlapping coverage. `rangeEq(15,25)` and `rangeEq(10,20)`, or `15 =>` and `rangeEq(15,20)`, produce warning `LEP1601`. `range(10,15)` and `rangeEq(15,20)` do not overlap. Empty ranges are ignored. Comparisons preserve full int64/uint64 precision and consider only values representable by the subject. Constant-expression bounds are checked; runtime bounds are not inferred.
+
+Warnings do not prevent compilation or change branch order. Patterns are tested in source order, followed by their guards. Guarded patterns can also receive coverage warnings; this does not prove that a branch is unreachable. Duplicate unguarded single-value patterns remain compilation errors. CLI warnings include source locations, JSON uses `severity: "warning"`, and the editor displays warning severity.
+
+### Guards
+
+Interface types can be owned values, generic arguments and enum payloads, for example `Error error = MessageError::from("reason");` and `Result<String, Error>`. Each owned interface copy has independent concrete storage and cleanup. Interface references continue to borrow their source. Owned interface values cannot hide nonglobal borrowed references.
+
+An interface match uses `Concrete(value)` and requires `_` or `_(other)` for unknown implementations. Nested enum patterns combine outer tags and payload types, in source order:
+
+```lepus
+match (res) // Result<A, B>; E and F implement interface B
+{
+    OK(A a) => { /* success interface payload */ }
+    Ok(_) => { /* success fallback without a binding */ }
+    Fail(E b) => { /* concrete error E */ }
+    Fail(F c) => { /* concrete error F */ }
+    Fail(_ d) => { /* remaining errors as interface B */ }
+}
+```
+
+`Fail(_)` is an unbound fallback; an asterisk is not part of this syntax. Ok remains the canonical Result success tag; match patterns also accept OK. A fallback may be omitted only when exhaustiveness is provable. Known implementations do not close an open interface. See the [runnable example](../../example/samples/interface_payload_match.lep).
+
+For a single interface payload, `Fail::IoError(e)` is equivalent to `Fail(IoError e)`, with `Fail::IoError(_)` for no binding. The tag may be omitted as `IoError(e)` only when its unique destination is unambiguous and its name does not collide with a variant. This sugar is restricted to single-payload variants. Multiple payloads retain the tag and parentheses: `Pair(A a, B b)` or `Many(A a, B b, text, count)`. Ordinary payloads may use untyped variable bindings; interface payloads need type annotations only for dynamic type filtering.
+
+The type pattern `MessageError(error)` binds the concrete `MessageError` object, not its string field; use `error.toString()` for the text. Each `?` unwraps one layer of `Result<Result<T,E1>,E2>`, so `Ok((value?)?)` propagates both failure layers. Normal implicit text conversion still applies when the destination payload is `String`: `Ok(value?)` may turn the remaining inner `Result` into a successful string such as `"Fail(inner)"`. That does not propagate the inner failure. Keep both `?` operators when both error layers must be checked. See the [nested Result stress tests](../../tests/lepus_nested_result_stress.py).
+
+Bind a variable, then add a condition with `if`:
+
+```lepus
+enum Choice { Value(String text) };
+int64 kind(Choice choice) {
+    match (choice) {
+        Choice::Value(text) if text == "good" => { return 1; }
+        Choice::Value(text) => { return 0; }
+    }
+    return -1;
+}
+```
+
+```text
+kind(Choice::Value("good")) = 1
+kind(Choice::Value("bad"))  = 0
+```
+
+---
+
+
+### Automatic enum payload wrapping from a target type
+
+With a known target type, initializers, assignments, arguments and returns may provide a single-payload variant's payload directly:
+
+```lepus
+Result<String, Error> failure() {
+    return MessageError::from("failed");
+}
+void main() {
+    Option<int64> value = (int64)7;
+    value = (int64)9;
+    Result<String, Error> result = MessageError::from("initial");
+    result = "ready";
+}
+```
+
+This supplies `Fail(...)`, `Value(...)` or `Ok(...)` as appropriate, also for custom enums. An expression already having the target enum type passes through unchanged. Exact payload types win, followed by compatible references, interfaces and ordinary implicit conversions. Universal String formatting ranks last, so an error object assigned to `Result<String, Error>` selects Fail. Equal best matches are rejected: `Result<String, String> result = "ambiguous";` needs an explicit Ok or Fail. Zero-payload and multiple-payload variants do not participate. Recursive enum conversion cycles are not expanded.
+
+The target enum and its generic arguments must already be known; wrapping does not replace generic inference or relax narrowing, moves, reference origins or `#borrow`. Resources still require explicit move where applicable, and local references cannot escape through a wrapper. An unconstrained let expression does not guess an outer enum. Explicit constructors remain useful for intentional success/failure selection, ambiguity and nested layers. See the [runnable payload wrapping example](../../example/samples/enum_payload_wrapping.lep).
+
+
+## 8. Interfaces and runtime polymorphism
+
+```lepus
+interface Shape {
+    int64 area();
+    String describe() { return "shape"; }   // default implementation
+};
+```
+
+- An interface holds methods only; methods may have default bodies, but **no fields**.
+- Interfaces can inherit: `interface B : A { … }`.
+- A struct may implement several interfaces; two requirements with the same signature count once
+  (deduplicated).
+- An interface name can be a reference target, as in `Shape mut& view`. The reference carries a logical address and a concrete type tag. `.area()` selects an implementation at runtime by tag. The native fast path reads both words in one handle lookup for borrowed and owned interface values.
+
+Interface references bind directly to concrete references whose types implement the interface:
+
+```lepus
+Circle circle;
+circle.r = 4;
+Shape const& view = &circle;
+```
+
+The same conversion works in assignments, arguments, and returns without an Any intermediary. A read-only source cannot become mutable. Views borrow their source; copying a view does not extend the concrete object's lifetime. Existing Any values can still expose interface views through checked reference extraction.
+
+See [`example/samples/interface.lep`](../../example/samples/interface.lep).
+
+---
+
+## 9. Generics
+
+```lepus
+int64 total<T: Shape>(T shape) { return shape.area(); }
+```
+
+- Type parameters follow the name: `<T>`, `<T, U>`.
+- Constraints are written `T: Interface`; several are comma-separated.
+- Generic structs work the same: `struct Triple<T: Valued, K, V> { … }`.
+- Monomorphised at compile time; the call site is resolved statically, no vtable overhead.
+- Calls may be explicit (`total<Circle>(c)`) or inferred.
+
+An outer template can bind some parameters of an inner template while retaining its own parameters.
+Concrete uses recursively generate complete instances:
+
+```lepus
+struct TypeC { int64 value; };
+struct TypeA<T, V> { T first; V second; };
+struct TypeB<T> { TypeA<T, TypeC> item; };
+
+void main() {
+    TypeB<String> b;
+    b.item.first = "nested";
+    b.item.second.value = 7;
+    assert(b.item.first == "nested" && b.item.second.value == 7);
+}
+```
+
+The field of `TypeB<String>` becomes `TypeA<String, TypeC>`. `TypeB<int64>` has its own layout,
+methods and static fields. A template with identical canonical arguments reuses its instance;
+`String` and `std::core::String`, for example, do not produce duplicates. Unique imported type names and their module-qualified spellings also share an instance.
+Further nesting and reordered parameters work with generic functions, interface constraints,
+enum payloads, containers, tuples, function values and references.
+Inside methods, `item.first`, `item = value` and `&item` follow the same layout and ownership rules as `self.item`.
+
+Default type arguments use `struct MyBox<T, V = T, W = TypeA<T, V>> { W value; };`.
+Defaults may refer to earlier parameters and are bound from left to right, including nested expansion.
+Self references and forward references are rejected. The same rule applies to unbound parameters with
+explicit defaults during generic function inference; unbound parameters without explicit defaults are errors.
+Omitted struct arguments require explicit types or defaults written in the template declaration; they no longer default to Any. Constraints are checked after concrete
+nested instances have been generated. Monomorphisation preserves strings, characters and comments verbatim.
+
+This is template composition; parameter-pattern partial specialisation with separate implementation bodies
+has no syntax at present. Recursive value fields are rejected, while references to the same instance are allowed.
+Expanding recursion is diagnosed: a compilation allows at most 1024 generic instances and rejects type-expression
+nesting at 128 levels. The regression suite, [`tests/lepus_generic_monomorphization.py`](../../tests/lepus_generic_monomorphization.py),
+covers runtime execution, instance reuse and invalid programs.
+
+---
+
+## 10. Control flow
+
+```lepus
+void main() {
+    int64 i = 0;
+    while (i < 3) { i = i + 1; }
+    println("while={}", i);
+    int64 n = 0;
+    loop {
+        n = n + 1;
+        if (n >= 3) { yield n; }
+    }
+    println("loop={}", n);
+    int64 total = 0;
+    for (int64 k = 0; k < 5; k++) {
+        if (k == 1) { continue; }
+        total += k;
+    }
+    println("for={}", total);
+}
+```
+
+```text
+while=3
+loop=3
+for=9
+```
+
+| Construct | Notes |
+| --- | --- |
+| `if / elif / else` | conditional branches; else if and elif are interchangeable |
+| `while cond { }` | test before body |
+| `loop { … yield v; }` | infinite loop; `yield` carries the result |
+| `for T x in c { }` | iterate a container / iterator |
+| `break` / `continue` / `return` | exit / continue / return |
+
+Parentheses around the condition are optional for `if` / `elif` / `else if` / `while` / `for-in`: `if flag { }` equals `if (flag) { }` and `for T x in c { }` equals `for (T x in c) { }`. The condition ends at the opening brace of the body. `loop` has no condition and never used parentheses. The three-part `for (init; cond; step)` still requires parentheses to delimit its three clauses.
+
+Three-part `for (int64 i = 0; i < n; i++) { ... }` scopes declarations to the loop. Continue runs the update before testing again. Each part is optional; comma-separated initialization and update expressions run left to right.
+
+> `loop { … }` is an **expression**, but a `loop` in statement position takes no trailing
+> semicolon; when a declaration, assignment, argument or return value receives it, the
+> enclosing statement supplies the semicolon (`int64 v = loop { … };`).
+
+Both for forms support else with loop variables still in scope. C-style for exposes the final initialized state; for-in exposes its last value or an ordinary value default for empty input. Copyable borrowed elements are saved independently before the next iterator call can invalidate them. Handle noncopyable borrowed elements in the body; references without a proven valid origin cannot be read on empty paths. Plain break enters the fallback, while value-producing yield delivers the result and skips else.
+
+---
+
+## 11. Containers
+
+```lepus
+void main() {
+    List<int64> xs;
+    xs.push(1);
+    xs.push(2);
+    xs.push(3);
+    println("len={} at1={} has2={}", xs.len(), xs.at(1), xs.has(2));
+    Map<String, int64> m;
+    m["a"] = 1;
+    println("m={}", m["a"]);
+}
+```
+
+```text
+len=3 at1=2 has2=1
+m=1
+```
+
+| Container | Common operations |
+| --- | --- |
+| `List<T>` | `push` `pop` `len` `at` `[]` `has` `remove` `clear` |
+| `Map<K, V>` | `[]` `has` `remove` `len` `keys` `values` |
+| `Set<T>` | `insert` `has` `remove` `len` |
+
+Collection literals: `[1, 2, 3]` is a `List`, `{1, 2, 3}` is a `Set`, and `{"a": 1}` is a `Map`. Write an empty list as `List<T> values = [];`. Empty braces require Set or Map context.
+
+Iterator chains (`map` / `filter` / `collect`) need `import std::iter;` — see
+[Language tour](02-language-tour.md#7-collections-and-iterators).
+
+---
+
+
+### Fixed multidimensional and growable arrays
+
+Write `int64 matrix[2, 3];` or `int64 cube[2, 3, 4];`. Chained brackets such as `int64 cube[2][3][4];` and mixed forms are equivalent, including array fields. Extents are positive compile-time integers. Storage is contiguous and row-major. `cube[i,j,k]` and `cube[i][j][k]` evaluate each index once and check every dimension; all indices are required. Assignment and value parameters preserve independent copies.
+
+Local owning arrays accept both `T[] a = new[n];` and `T a[] = new[n];`. Both forms use the same runtime array type and keep a fixed length after allocation. Parameters also accept `T[] a` and `T a[]`; value parameters copy independent elements and length, while `T[] const&` and `T[] mut&` borrow. Local arrays require an initializer: `new[n]`, an array variable or an array-valued call. `const T[] a = ...;` creates a read-only owning binding. Global owning declarations retain `T a[]`. Both local forms share copying, returns, cleanup and borrow checking; see the [runtime array declaration regression](../../tests/lepus_runtime_array_declarations.py). For growable storage, import `std::array` and use `std::array::DynamicArray<T>`, implemented in Lepus:
+
+```lepus
+import std::array;
+void main() {
+    DynamicArray<int64> values;
+    values.reserve(8);
+    values.push(7);
+    values.resize(3);
+    values.set(1, 9);
+    assert(values[0] == 7 && values[1] == 9 && values[2] == 0);
+    assert(values.len() == 3 && values.capacity() >= 8);
+}
+```
+
+`reserve(n)` only increases capacity; `push(value)` doubles capacity when full. `resize(n)` appends default values or releases removed values; `clear()` retains capacity. Read with `[]` / `at`, write with `set`. Invalid indices and negative lengths or capacities fail. `pop()` returns `Option<T>`; `toArray()` returns an independent runtime array. Copies own independent elements and buffers, cleaned up at scope exit. Growth replaces storage; do not retain references into the backing buffer. Growth currently follows runtime-array value copying; no speed advantage over builtin List is promised.
+
+
+### Explicit copying with `Copy<T>`
+
+`Copy<T>` declares `T copy();`, returning an independent value. For example: `struct Packet: Copy<Packet> { String text; Packet copy() { return self; } };`. Returning `self` follows existing value semantics: strings, owning fields and arrays are copied independently; reference fields remain borrowed and retain their lifetime limits. `DynamicArray<T>` implements `Copy<DynamicArray<T>>` and preserves length and capacity in the copy.
+
+Generic code may use `T duplicate<T: Copy<T>>(T const& value) { return value.copy(); }`; interface references can dispatch `copy()` too. An explicit interface declaration is required; a same-named method alone does not satisfy the constraint. This interface does not change assignment or value parameters, is not an implicit-copy eligibility marker, and does not override `#NonCopyable` or `Closeable` restrictions. `Copy<T>` and `#NonCopyable` are mutually exclusive, including inherited interfaces and host `impl` declarations. `Closeable` types receive the noncopyable flag automatically and cannot implement `Copy<T>`, even if the method would return a fresh object. Existing `Clone<T>::clone()` behavior remains available.
+
+## 12. Modules and imports
+
+```lepus
+module mylib::math;      // declare the module this file belongs to
+import std::iter;        // import a module
+import std::text;
+```
+
+- A module is declared with `module name::subname;`, usually on the first line. A user file without this declaration belongs to `program`; its declarations can be referenced as `program::name`.
+- Imported functions, constants, interfaces, enums, structs, and opcodes may use an unambiguous short name. Omit function type arguments when the arguments determine them: `foldValue(items, 0, add)`. Keep necessary type arguments in declarations, such as `List<int64>`, and use a qualified name to resolve conflicts.
+- The core module `std::core` (`println` / `format` / `assert` / `len` / `Any` …) is loaded
+  automatically and needs no `import`.
+- Visibility, exports and cross-module generics: see
+  [`example/samples/import_names.lep`](../../example/samples/import_names.lep).
+
+---
+
+## 13. Reference cheat-sheet
+
+Lepus's borrow checker can be pictured as a “dead-object detector”: it checks for invalidated origins at uses and constrains reference escapes. It still analyzes scopes and origin propagation; it does not rely solely on runtime dangling-reference detection or enforce Rust's exclusive mutable-borrow rule. See the [lifetime metaphor and its limits](11-algorithm-validation.md#a-lifetime-metaphor).
+
+```lepus
+int64 value = 7;
+int64 mut& alias = &value;    // writable reference
+int64 const& view = &value;   // read-only reference (same as int64 &)
+alias = 9;                    // writing through it writes value
+```
+
+```lepus
+T mut& owned = new T;         // heap object (element type from owned's type)
+owned.drop();                  // free
+```
+
+Rules and restrictions (escape checking, `LEP1204`): see
+[Core concepts](03-core-concepts.md#2-references-non-null-and-never-outliving-their-target).
+
+---
+
+## 14. Macros
+
+Use `$if`, `$elif`, `$else` inside macros for compile-time template selection. Use `import` for modules.
+
+`$macro A` requires `$A`; `$macro A()` requires `$A()`. Parameter groups are explicit and match the definition. The generated parser builds macro ASTs; semantic analysis performs hygienic substitution and type inference before quadruple generation. Template locals are hygienic, arguments keep caller bindings, and helpers resolve at the definition. No automatic parentheses or numbered temporary names are used.
+
+Helper names in a macro template must be visible at its definition. A caller local with the same name cannot supply a missing declaration. An undeclared helper reports an undeclared variable instead of being treated as an integer when checking block result types.
+
+```lepus
+$macro ADD<T:a>(a, b) -> {
+cast<T>(a + b)
+}
+void main() {
+    int32 value = 1;
+    int32 result = $ADD(value, 2);
+}
+```
+
+Use `$macro NAME(...) -> category { ... }` for an explicit result or `$macro NAME(...) -> { ... }` for the implicit result rules. `item` and `member` require an explicit category. Braced controls include `$if (condition) { ... }` and `$for (variable in source) { ... }`.
+
+`<T:a>` infers from the argument's static type; `<T:#res>` (or the compatible `<T>` form) infers from the expected result type. Explicit types take priority. Square, round and curly groups match strictly in order. `...rest` / `..rest` capture a variadic tail, traversed by `$for`. `$match (x is expr)` supports exactly `expr`, `ident`, `type`, `block` and `stmt`, with ordered `$else (is category)` branches. `$regex (x is "pattern")` uses complete ECMAScript matching of original text. Unselected output is excluded from final semantic checks.
+
+Fixed parameters and variadic tails support value, expr, ident, type, stmt, block and pattern categories. Value arguments evaluate once in source order and mutations affect their copies. Expression fragments execute at their placements, possibly repeatedly or never. References use value: `&n` is read-only and `mut &n` writes the source. Explicit results use `-> expr`, `-> stmt`, `-> item` or `-> member` for expressions, statements, module declarations and type members. `$fields<T>()`, `$member`, `$for`, `$if` and compile-time diagnostics generate operations over concrete struct fields. See the [macro tutorial](../book/en/22-macros.md).
+
+`$stringify(x)` reads original spelling; `$concat(a, b)` produces identifiers only. `$line`, `$file` and `$module` preserve origins. `$replace A(x) x + 1` is a single-line definition. See [hygienic macros](25-literals-operators-macros.md#compile-time-hygienic-ast-macros).
+
+## 15. Annotations and reflection
+
+```lepus
+@annotation Route(path: String, level: int32 = 2)
+
+@Route("/health", level: 1)
+int64 health() { return 200; }
+```
+
+- `@annotation Name(params)` declares an annotation type; parameters may have defaults.
+- Annotations can sit on structs, interfaces, enums, fields, methods, constructors and functions.
+- At run time you can query annotations, signatures, and layout for exposed declarations.
+
+Reflection artifacts require a capable target runtime. Compile explicitly with `--no-reflection` for
+a runtime built without reflection. Metadata and annotation rules are specified in the [reflection document](../19-reflection.md).
+
+Full examples: [`example/reflection/`](../../example/reflection/) (`annotations.lep`,
+`dispatch.lep`, `queries.lep`).
+
+---
+
+## 16. The C boundary: compiler directives and raw storage
+
+`opcode` declares an opaque object owned by ABI or C++ glue:
+
+```lepus
+opcode Number {
+    new = createNumber;
+    drop = destroyNumber;
+    copy = copyNumber;
+};
+
+#NonCopyable
+opcode FileHandle {
+    new = openFile;
+    drop = closeFile;
+};
+```
+
+A `struct` may declare any number of fields of `opcode` types. Each field maintains its own value and lifecycle.
+
+Both `new` and `drop` bindings are required. Copyable types also require a `copy`
+binding that creates an independent host record. `#NonCopyable` omits `copy` and
+prohibits copying during initialization, assignment, value arguments and value
+returns. It still supports ownership transfer with `T target = move source;`,
+including explicit `move value` in value arguments and returns. This applies to
+all opcode types. A struct that implements `Closeable` follows the same rule
+automatically: a copy would mean two owners and two `close()` calls, so copying is
+refused without an extra directive (see [declaration sugars](29-declaration-sugars.md)).
+Moving does not call copy; the source binding becomes invalid
+and the final owner is responsible for drop. `Type::new(...)`
+invokes the creation binding. An opcode is a special struct containing an opaque
+glue handle. Its body may also declare ordinary fields, instance methods and
+static methods. The language stores, copies and destroys ordinary fields; they
+do not describe the host object's memory layout. Methods may read `self.opcode`
+and pass it to glue. This internal handle is accessible only in its declaring
+module and is read-only after creation: assignment, compound assignment and
+mutable references are forbidden. Reflection follows the existing `@Reflect`
+rules and can read the object and its public fields, while excluding the internal
+`opcode` handle. Language-service suggestions exclude that internal handle.
+Strings and arrays retain their value semantics.
+`String`, `File` and `Process` use `opcode` declarations in `std::core`. `BigInteger` and
+`BigDecimal` use `opcode` declarations in `std::big_number`. The frontend represents
+all five with the same `Kind` enumerator. Lowercase `string` is not a type alias for `String`.
+
+```lepus
+#abi("C", "./native.dll", "c_function")
+int64 c_function(int64 x);
+```
+
+An `#abi` directive imports C ABI functions from a library. The path resolves relative to the declaring source file, and the library must sit next to the artifact.
+Type mapping, nullable references and glue bindings: see
+[Host integration and C ABI](08-host-integration.md).
+
+`#abi("C", "library", "native_symbol")` applies to one imported function declaration. `#export("native_symbol")` applies to a function implementation; `build --shared --out` selects the output library. Exports marshal scalars and resource-free value structures using the target C ABI and emit accurate C declarations.
+
+`unsafe { ... }` grants raw-operation permission to the current block. An `unsafe T f(...)` declaration is a contract for callers. Unsafe operations in its body also require an explicit block. Closures are checked independently, and macro arguments retain the permissions of their call site. Ordinary array, reference and arithmetic checks remain active.
+
+`T*` is a read-only bare pointer and `T mut*` is writable. Each level has its own qualifier. For example, `T* mut*` can replace the read-only pointer value it points to. A writable pointer can implicitly become a read-only pointer to the same target type. Every dereference requires an explicit `unsafe` block. The keyword `null` is valid only in `==` and `!=` comparisons with bare pointers.
+
+`std::core::RawStorage<T>` owns capacity without constructing spare elements. `RawPtr<T>` carries a typed allocation identity and index without extending lifetime. `initAt`, `takeAt`, `dropAt`, `readAt`, `borrowAt` and `relocateNonOverlapping` require unsafe permission. The public `std::core::rawSize<T>()` needs no unsafe scope and returns the byte size of the current Lepus value layout: `rawSize<uint8>()` is 1 and `rawSize<int64>()` is 8; aggregates use the language layout. It does not report a dynamic object's allocation size or the host C ABI `sizeof`. Direct arrays, host aliases and void are unsupported; wrap arrays in a named struct. Internal `__rawSize(T)` and `__rawAlign(T)` remain restricted to unsafe kernels. Borrowed references must not outlive their allocation or initialized element.
+
+`BarePtr<T>` encapsulates its address. A bare pointer derived from raw storage keeps the allocation identity. `p + n`, `n + p` and `p - n` use the static element stride. `p - q` requires one shared live allocation and returns an integral element distance. `barePointer`, `pointerFromAddress`, `dereference`, `memcpy` and `memset` require unsafe scope. Dereferences and nonempty byte operations validate the source allocation and the entire range for derived pointers. Byte operations count bytes. Nonempty copies must not overlap. These operations do not change initialization bits or invoke resource hooks. See [Raw storage and C ABI directives](41-unsafe-abi.md) and [book chapter 25](../book/en/25-unsafe.md).
+
+---
+
+## 17. Common built-ins
+
+| Function | Effect |
+| --- | --- |
+| `println(fmt, …)` | formatted output with a newline |
+| `format(fmt, …)` | format into a string |
+| `assert(cond)` | assert; aborts on failure |
+| `len(x)` | length of a string / container |
+| `{}` inside `println` | positional placeholder; the type is inferred |
+
+Brace placeholders format floats with eight digits after the decimal point by default. An explicit format such as `{1:2F}` uses the specified precision.
+
+More capabilities (`json` / `toml` / `regex` / `sql` / `net` / `linalg` …): see
+[Standard library overview](07-stdlib-overview.md).
+
+---
+
+## 18. Next
+
+| You want | Where |
+| --- | --- |
+| The authoritative grammar | [EBNF grammar reference](../14-grammar-ebnf.md) |
+| More runnable samples | [`example/samples/`](../../example/samples/) |
+| Constructs expected to fail | [`example/samples-error/`](../../example/samples-error/) |
+| Commands and compile options | [Toolchain](09-toolchain.md) |
+
+### Destruction, release and temporary ownership
+
+Use `value.drop()` for explicit release of heap references, arrays and resource values. There is no standalone release statement; structs implementing Drop keep their protocol method. All forms share cleanup and coalescing; runtime release is not idempotent. The compiler coalesces visible drop operations for one lifecycle using control-flow analysis and still rejects use after release; runtime checks report `LEP1205` for cases that cannot be proven statically. Assignment starts a new lifecycle; `const &` still cannot call `drop()`. Reads and writes after release, and reads after move, produce `LEP1205`; a moved binding cannot be written or rebound; a new declaration is required. The default heap reuses physical memory without reusing logical allocation identities, so deletion through an old reference fails without affecting a new object. Release removes the active record immediately, without tombstones or a sweeping API. Fresh string arguments to printing, formatting and file writes are held by owning temporaries until the full expression completes. Ownership transfer clears the source slot, and releasing on one branch does not cancel cleanup on another branch. See [borrow control flow and algorithm validation](11-algorithm-validation.md).
+
+The program entry `main` must return `void`. Function pointers can be array elements: `int64 fn(int64) a[] = new[2];`; assign elements before calling `let callback = a[0]; callback(value);`. Function types compose with arrays, tuples, containers and nested function types. Write an array-returning function type as `(int64[]) fn()` to distinguish it from an array of function pointers.
+
+Prefer return-first syntax: `int64 fn(int64, int64) callback` and `int64 fn(int64 x) { x + 1 }`. Starting with **0.12.0**, the old arrow forms are rejected. Omit the arrow for inferred results: `fn(int64 x) { x + 1 }`. Regenerate generic host glue and rebuild old caches when upgrading.
+
+Within the same block, a variable can be redeclared after its entire value has been moved, including with a different type: `String a="1"; String b=move a; String a="2";`. The declaration allocates independent storage; old references still identify the old object. Every path reaching the declaration must have moved the entire previous value. Moving a field, moving on only some branches, or assigning to the old variable after moving does not permit redeclaration.
+
+For Any type checks and safe extraction, use `isType<T>`, `tryGet<T>`, `tryGetReference<T>` and `tryGetMut<T>`. `nameof` and the box’s `.name()` are not application API; see the [Any, explicit generics and data utilities](23-any-generics-data.md).
+
+An anonymous function returning another function may group its return type: `(int64 fn(int64)) fn(int64 fn(int64) a, int64 fn(int64) b) { int64 fn copy(int64 x) { a(b(x)) } }`. Neither trailing expression has a semicolon: the outer expression returns a closure and the inner expression returns an integer. The returned closure must own `a` and `b` rather than borrow parameters from an invocation that has ended. See the [function and closure examples](../book/en/19-closures.md).
+
+## fn capture modes
+
+External locals are captured by `const&` by default. `fn const(...)` is equivalent. Reads observe later changes in the source, while writes are rejected. `fn mut(...)` captures by `mut&` and writes back to the source. `fn copy(...)` owns mutable independent copies. `fn move(...)` transfers captured values into the closure and forbids reading or writing the old bindings. Declare new bindings before reuse. Copying a closure duplicates owned state and preserves references to borrowed sources. Reference captures must stay within the lifetime of their sources. Owned captures may escape only when their contents live long enough.
+
+Specify each variable's mode in a single list with `fn [mut a, move b, copy c, const d](int64 x) { ... }`. The equivalent grouped form is `fn mut[a] move[b] copy[c] const[d](int64 x) { ... }`. Other external locals used by the closure default to `const&`. One mode after the list can set a different default. In `fn [mut a] copy(int64 x) { ... }`, the closure captures `a` by `mut&` and copies the other captures. For a generic closure, place the list after the type parameters, as in `fn<T> [mut a] copy(T x) { ... }`.
+
+```lepus
+int64 n = 1;
+let read = int64 fn() { n };
+let write = int64 fn mut(int64 x) { n += x; return n; };
+let counter = int64 fn copy[n]() { n += 1; return n; };
+let transferred = int64 fn move[n]() { n += 1; return n; };
+n = 10;
+assert(read() == 10);
+assert(write(1) == 11);
+assert(counter() == 2);
+assert(transferred() == 2);
+```
+
+Duplicate names, unknown variables, parameter conflicts, and mut/move captures of read-only sources are rejected. Listed variables are captured even when unused in the body. Capture applies to the whole variable. Copying or moving a reference does not own its referent or extend its lifetime. Direct global access uses global storage; explicitly list a global for a snapshot. Convert array values to containers or explicit references. File and process handles support move capture but cannot be copied, including through closure copies.
+
+Capturing a variable by reference (implicit `const&` or `fn mut`) and later moving it into another closure is allowed when the borrowing closure is last used before the move. Using a borrowing closure after its source has been moved, destroyed or freed is rejected with `LEP1205`; copying the closure preserves its dependency on that source. A closure escaping a source lifetime that is too short is rejected with `LEP1204`. Use `copy` for an independent snapshot when both closures must remain usable. Copying or moving a reference still does not extend its referent's lifetime. These checks cover borrow sources tracked by the compiler; raw memory and opaque host operations retain their interface contracts.
+
+## Generic closures and specialization
+
+`let f = fn<T>(T value) { value };` declares a closure with type parameters. Calls such as `f(1)` and `f("text")` infer `T` from their arguments; `f<int64>(1)` supplies it explicitly. The concrete implementation determines its return type. Parameters without inference evidence or an explicit default are rejected rather than replaced with Any.
+
+Full and partial specializations use the same closure name. Argument types are determined before selecting the uniquely most specific matching implementation:
+
+```lepus
+let f = fn<T, U>(T first, U second) { 0 };
+f<T, int64> = fn(T first, int64 second) { 1 };
+f<int64, int64> = fn(int64 first, int64 second) { 2 };
+assert(f(true, false) == 0);
+assert(f(true, 3) == 1);
+assert(f(2, 3) == 2);
+```
+
+Specializations are selected at compile time, rather than replaced at run time. Duplicate declarations and ambiguous partial specializations are rejected. Implementations inherit the primary declaration's capture modes and reuse its environment. Calls with different types share the same captured state. Copying the entire closure independently copies owned state while preserving borrowed sources.
+
+A struct may directly declare an `let f = fn<T>(T value) { value };` member and specialize it within the struct. Instances call it as `s.f(1)` or `s.f<String>("text")`. Default initialization resolves captures in the member's declaration scope, preserving isolation from same-named locals in the constructing caller. Existing restrictions on implicit captures of `self` and receiver fields remain applicable.
+
+Both ordinary and generic closure values can serve as a generic type parameter `F`, for example `int64 apply<F>(F f) { return f(3); }`; `apply(callback)` infers `F`. Generic aggregates such as `MyBox<F>` can store closure values. A generic closure retains its declaration identity and capture environment, without erasure to a single ordinary function-pointer signature. Borrow and move rules continue to apply.
+
+### Function-value declarations inside outer generics
+
+Once the outer type or function binds `T`, `T fn(T, int32)` has a concrete return type and parameter signature.
+Both structure fields and local variables support this form:
+
+```lepus
+struct CallbackPair<T> {
+    T fn(T, int32) a;
+    int32 fn(T, int32) b;
+};
+
+int32 useCallbacks<T>(int32 c) {
+    T fn(T, int32) a;
+    int32 fn(T, int32) b;
+    return c;
+}
+```
+
+Assign a valid function or closure before calling a value. Fields can hold closures with `copy` captures;
+copying the aggregate copies their owned environments. An enum can store function values in a variant payload,
+for example `enum Callbacks<T> { Pair(T fn(T, int32) a, int32 fn(T, int32) b) };`.
+Only methods may follow the variant list; shared instance fields are not supported there. Non-generic opcodes
+support fields with concrete function signatures. Generic declarations such as `opcode A<T>` are currently unsupported.
+
+
+## Ranges and the advancement protocol
+
+`for (let item in source)`, `for (item in source)` and explicitly typed bindings share the iteration protocol. `std::core::range(a, b)` excludes the upper endpoint; `std::core::rangeEq(a, b)` includes both endpoints. Either call accepts an explicit `<T>`.
+
+The eight fixed-width integer types and `char` support direct range calculations. `for (uint8 x in std::core::rangeEq<uint8>(0, 255)) { ... }` yields 256 items; `range<uint8>` yields 255. Bounds are evaluated once each, from left to right, and both must fit T, including an exclusive upper endpoint. Foldable integer violations are rejected at compile time; dynamic endpoints are checked before iteration. Reversed ranges are errors. `range(a, a)` is empty; `rangeEq(a, a)` yields one item. A closed maximum endpoint terminates without calculating maximum plus one.
+
+Other value types implement `NextValue<T>`, whose method is `Option<T> nextValue(T end, bool inclusive)`. A range independently owns its starting cursor and endpoint. Each step calls the method on the cursor; the implementation yields the next item, advances its receiver state and detects termination by returning None. Custom advancement supports iteration; match range patterns remain restricted to integers and char.
+
+## Loop value expressions with else
+
+For-in and while can produce values in initializers, assignments, arguments and return positions. An else result is required. `yield value;` exits the entire value expression with a result. Exhaustion, a false condition or a plain break reaches else if no value has been yielded. Continue starts the next iteration. A single-value branch may use `{ value }`; complex branches use `yield value;`.
+
+```lepus
+void main()
+{
+    int64 first = for (let value in range(1, 8))
+    {
+        if (value % 2 == 0)
+        {
+            yield value;
+        }
+    }
+    else { -1 };
+    int64 fallback = while (false) { 1 } else { 7 };
+    assert(first == 2 && fallback == 7);
+}
+```
+
+All reachable results are checked against the receiving type. String, arrays and copyable aggregates keep value semantics. Noncopyable opcode results transfer ownership through newly created values or explicit move. The result is saved before loop-local resources are destroyed.
+
+## Disabling naming checks in a source file
+
+Write `#NoNamingCheck` on its own line. A trailing line comment is allowed. This disables naming warnings for types, functions, methods and modules in that file. Imported files and other warning rules are handled separately.
+
+## Named loop exits
+
+Use `break;` to exit the nearest loop. Prefix a `while`, `for-in`, or statement `loop` with a label, then use `break label;` to exit it. A label is visible inside its loop body and cannot cross a function boundary. Unknown labels and duplicate active labels are errors. When leaving scopes, deferred actions and resource cleanup run from inner to outer. Use `yield value;` when an expression needs a result.
+
+```lepus
+void main() {
+    outer: while (true) {
+        loop { break outer; };
+    }
+    println("done");
+}
+```
+
+```text
+done
+```
+
+## Block expressions and interpolated output
+
+`eprint` and `eprintln` write to the host standard error stream using the same formatting rules as
+`print` and `println`: `{}`, one-based argument indexes, numeric styles and interpolated strings.
+`eprintln` appends one LF. Both return `0` on success and do not append to the runtime standard-output
+result. `eprintln()` writes only a newline. A single `String` expression is written verbatim without
+interpreting its braces or percent signs again.
+
+Files offer `File.print` / `File.println`, `FileStream.print` / `FileStream.println`, and the
+`std::io::filePrint` / `filePrintln` functions, with format strings and variable arguments.
+File functions return the byte count; stream methods return `Result<int64, Error>`. Counts include
+the LF, and closed/read-only errors retain the existing write behavior. File `println` with no text
+writes one LF; it does not automatically flush or close the file.
+
+```lepus
+import std::io;
+
+void main() {
+    eprintln("Task {} failed", 7);
+    FileStream log = FileStream::open("run.log", "wb").take();
+    log.print("count={}", 3).unwrap();
+    log.println(" hex={:X}", 255).unwrap();
+    log.close();
+}
+```
+
+A nonempty statement block can produce a value in an initializer, assignment, argument or return. Every normally completing path must exit using `yield value;`. Ordinary statement blocks retain their behavior; empty `{}` remains a collection literal.
+
+```lepus
+void main() {
+    int32 a = { int32 b = 3; yield b; };
+    a = { int32 b = 4; yield b; };
+    print(f"a={a};");
+    println(f"next={a + 1}");
+}
+```
+
+A value exit (`yield`) selects the nearest result-receiving expression, crossing intervening statement while, for-in and statement-position loop constructs. Nested loop, block, if and match expressions used in initializers, assignments, arguments or returns still receive their own exit values. Plain `break;` exits only the nearest loop and does not produce a result for an enclosing expression. `yield (a, b);` forms one tuple: each element is evaluated once from left to right, with element types constrained by the receiving tuple type. A block expression does not create a loop, so `continue;` searches for an enclosing loop. Results are saved before local resources are cleaned up. Strings and lists retain value semantics, and references to expired locals cannot escape.
+
+For example, a loop can directly complete an enclosing block assignment, while nested assignment blocks receive their own results:
+
+```lepus
+(int64, String) found = {
+    {
+        int64 i = 0;
+        while (i < 10) {
+
+        if (i == 3) { yield (i, "found"); }
+
+            i++;
+        }
+    }
+    yield (-1, "missing");
+};
+int64 a = { int64 b = { yield 1; }; yield b + 1; }; // a == 2
+```
+
+See the [value break sample](../../example/samples/break_values.lep) for nested loops and cleanup checks.
+
+A standalone brace statement remains an ordinary scope even with a trailing semicolon; it does not create a disposable value receiver. A `yield value;` without an enclosing receiving expression is an error. In nested initializers, `yield 5;` completes the inner loop for z and `yield z + 1;` completes the outer loop for y. A final `yield y + 1;` inside a standalone outer block still has no receiver.
+
+`print` and `println` accept a single interpolated string or `String` expression. Braces and percent signs in the resulting text are printed literally. Traditional `println("{}", value)` formatting remains supported; interpolated output does not accept additional format arguments.
+
+A hygienic variadic macro can build a list:
+
+```lepus
+$macro vec(T, ...values) -> {
+    List<T> result;
+    $for (item in values) {
+        { T itemValue = item; result.push(itemValue); }
+    }
+    yield result;
+}
+```
+
+Use `List<int32> values = $vec(int32, 1, 2, 3);` or `values = $vec(int32, 4, 5);`. Ordinary local declarations are hygienic. Each argument is evaluated once, received using the requested type and appended in order with `push`. No elements produces an empty list. See the runnable [block example](../../example/samples/block_expression.lep) and [output example](../../example/samples/print_interpolation.lep).
+
+Use `fn` for anonymous functions: `let add = fn(int32 x) { x + 1 };`. An explicit result type precedes `fn`: `let add = int32 fn(int32 x) { return x + 1; };`. Capture modes and lists use `fn`. `int32 fn(int32)` still denotes a function type.
+
+A `fn` expression can be passed directly to a named function or a function value. Each callback is
+checked against its parameter's function type, which also provides context for omitted parameter
+types. See [`fn_inline_arguments.lep`](../../example/samples/fn_inline_arguments.lep) for a nested
+function result combined with tuple values.
+
+## Moving and cleaning up value exits
+
+Explicit `yield i;` prefers moving a writable local variable declared inside the receiving value expression, equivalent to `yield move i;` for that source. Variables outside that expression remain usable and are copied. Crossing loops does not change this boundary. Direct variables in tuples, including nested tuples, follow the same rule. Const values, read-only sources, reference bindings, fields and indexing retain existing value semantics; use explicit `move value` when a transfer is required. If scope exit callbacks are present, an independent result is conservatively saved so callbacks can still read or modify the source.
+
+Expressions such as `yield i + 1;` and `yield makeText();` are evaluated once and their result temporaries are copied or adopted; the expression itself is not treated as an addressable variable. Compound expressions such as tuples retain existing construction and value-parameter rules before the exit adopts their final result. Ordinary branch tail expressions `{ value }` retain their existing value semantics. Explicitly construct a copy using string concatenation, container copy or a type-provided copying method when needed. To force a move of an external variable, write `yield move external;`; subsequent access follows the existing moved-binding restrictions.
+
+The result is saved before exit callbacks and automatic cleanup. Moving clears the source storage and ends its binding lifetime without invoking close/drop on the source; the final receiver owns cleanup. Types implementing both Closeable and Drop close before dropping. Copies own independent resources, so source and result are cleaned up at their respective lifetime ends. Exits across loops clean up every scope that is left without releasing resources already transferred to the result.
+
+Moving does not extend borrowed lifetimes, including references stored inside aggregates. The [move and cleanup sample](../../example/samples/break_move.lep) checks evaluation counts, raw resource handle identity, external variable copying, destructor counts, cleanup order and native runtime behavior. See [ownership transfer](24-ownership-move.md) for general rules.
+
+## Default value text and string conversion
+
+Every non-void value supports `String toString()` and conversion to String. Numbers display their values; booleans display `true`/`false`. Structs display field values in declaration order as `{value, value}`, List/arrays as `[...]`, Set as `{...}`, Map as `{key: value, ...}`, and tuples as `(...)`. Nested strings are double-quoted and escaped; a top-level string returns its own text. Any displays its payload, or `Any()` when empty. Enums display their variant and payloads. References, functions and opaque resources display `<type>` without dereferencing. Depth and cycle guards bound recursion. This text is not a reversible serialization format.
+
+A user-defined no-argument `String toString()` supplies an implicit String conversion when no dedicated conversion exists. An existing `ImplicitConvert<String>` supplies a missing no-argument toString. If both are explicit, each retains its own behavior. `cast<String>` first chooses `ExplicitConvert<String>`, then implicit conversion or default value text. When only `toString(String style)` exists, the generated no-argument method supplies an empty style. Standard ToString and ImplicitConvert<String> generic constraints recognize the default capability; unrelated user interfaces with the same name do not.
+
+Struct `{}` formatting reuses the no-argument method; styled overloads retain their behavior. Conversion evaluates its source once, preserves ownership, cleans up temporary sources, and works without reflection. Nested user methods must be read-only. Container snapshots isolate callback reentry and mutation, and callback failures preserve their original diagnostics. See the [value-text sample](../../example/samples/value_text.lep).
+
+## Returning control expressions
+
+`return { ... yield value; };`, `return if ...;`, `return match ...;` and `return loop ...;` receive the value in a hidden slot before cleanup and return. All result branches require identical types. Direct owned locals, including const bindings, move on yield; outer variables copy. Nested return, named loop exits, escaping local references and deferred cleanup that still borrows the moved source are rejected. These special return rules extend ordinary value exits. See [declarations and return expressions](29-declaration-sugars.md).
+
+## Named function declarations
+
+Statements accept `int64 add(int64 x) { return x + 1; }` and a local function binding prototype `int64 callback(int64 x);`. The declared result anchors checking. Captures default to const&, with explicit mut, copy or move before the body. Capture state moves into the binding; borrowed captures cannot outlive their sources. This syntax is absent from expression productions. See [named function rules](29-declaration-sugars.md).
+
+## Interfaces generated by member macros
+
+A `-> member` macro can add an interface to its host struct or enum with `$implement Interface;`. The interface can use the macro’s concrete type arguments, and the ordinary interface checker validates the generated methods. See [declaration macros](29-declaration-sugars.md).
+
+## Lifetime contracts `#borrow` / `#static`
+
+Lifetime contracts can be written in a row before a function declaration to state explicitly who borrows from whom. `#borrow(out, in)` means `out` borrows from `in`; the list form `#borrow(out, [in1, in2, in3])` means it borrows from each of them. `#ret` denotes the return value, so `#borrow(#ret, [a, b])` is the same shape as Rust's `fn f<'a, 'b>(a: &'a T, b: &'b T) -> &'a T` — a call site propagates origins only through the declared arguments. `#static(a)` declares that `a` has a `'static` origin, letting it be returned across functions and stored for the long term. Names must be parameters or locals of the same function, and sources of `#ret` must be parameters. See [declaration sugar rules](29-declaration-sugars.md).
+
+`new[n]` uses runtime heap allocation. `new T` allocates an object; `new T(args)` constructs it. Owning values are cleaned up at scope exit; allocated references use `.drop()`. The former `heap T` and `heap T(args)` allocation forms are removed; `heap` is an ordinary identifier.

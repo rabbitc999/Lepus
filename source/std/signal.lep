@@ -1,0 +1,127 @@
+module std::signal;
+
+import std::complex;
+import std::math;
+
+/* 特殊复数乘法参照 LLVM compiler-rt muldc3 的非有限值恢复规则。
+ * Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+ * https://github.com/llvm/llvm-project/blob/main/compiler-rt/lib/builtins/muldc3.c
+ * 本文件将该规则实现为 Lepus；许可证见 licenses/llvm/LICENSE.TXT。 */
+inline float64 __signedUnit(float64 original, bool unit) {
+    uint64 bits=(std::core::__bootFloat64Bits(original) >> 63) << 63;
+    if(unit) { bits=bits | ((uint64)1023 << 52); }
+    return std::core::__bootFloat64FromBits(bits);
+}
+inline Complex<float64> __multiply(Complex<float64> left, Complex<float64> right) {
+    float64 a=left.re; float64 b=left.im; float64 c=right.re; float64 d=right.im;
+    float64 ac=a*c; float64 bd=b*d; float64 ad=a*d; float64 bc=b*c;
+    float64 real=ac-bd; float64 imaginary=ad+bc;
+    if(isNaN(real) && isNaN(imaginary)) {
+        bool recover=false;
+        if(isInf(a) || isInf(b)) {
+            a=__signedUnit(a,isInf(a)); b=__signedUnit(b,isInf(b));
+            if(isNaN(c)) { c=__signedUnit(c,false); }
+            if(isNaN(d)) { d=__signedUnit(d,false); }
+            recover=true;
+        }
+        if(isInf(c) || isInf(d)) {
+            c=__signedUnit(c,isInf(c)); d=__signedUnit(d,isInf(d));
+            if(isNaN(a)) { a=__signedUnit(a,false); }
+            if(isNaN(b)) { b=__signedUnit(b,false); }
+            recover=true;
+        }
+        if(!recover && (isInf(ac) || isInf(bd) || isInf(ad) || isInf(bc))) {
+            if(isNaN(a)) { a=__signedUnit(a,false); }
+            if(isNaN(b)) { b=__signedUnit(b,false); }
+            if(isNaN(c)) { c=__signedUnit(c,false); }
+            if(isNaN(d)) { d=__signedUnit(d,false); }
+            recover=true;
+        }
+        if(recover) {
+            float64 infinity=std::core::__bootFloat64FromBits((uint64)2047 << 52);
+            real=infinity*(a*c-b*d); imaginary=infinity*(a*d+b*c);
+        }
+    }
+    return Complex<float64>::of(real,imaginary);
+}
+
+/* 变换使用独立列表；逆变换除以输入长度，DFT 接受空输入。 */
+inline List<Complex<float64>> __transform(List<Complex<float64>> const& input, bool inverse) {
+    List<Complex<float64>> output;
+    int64 n=input.len();
+    int64 k=0;
+    while(k<n) {
+        Complex<float64> sum=Complex<float64>::of(0.0,0.0);
+        int64 j=0;
+        while(j<n) {
+            float64 direction=-2.0;
+            if(inverse) { direction=2.0; }
+            float64 angle=direction*3.14159265358979323846*(float64)k*(float64)j/(float64)n;
+            Complex<float64> weight=Complex<float64>::of(cos(angle),sin(angle));
+            sum=sum+__multiply(input[j],weight);
+            j++;
+        }
+        if(inverse) { sum.re=sum.re/(float64)n; sum.im=sum.im/(float64)n; }
+        output.push(sum);
+        k++;
+    }
+    return output;
+}
+
+/* 基二变换采用位反转和迭代蝶形；只修改独立的输入副本。 */
+inline List<Complex<float64>> __fast(List<Complex<float64>> input, bool inverse) {
+    int64 n=input.len();
+    if(n<=0 || (n & (n-1))!=0) {
+        if(inverse) { std::core::__runtimeFail("ifft 长度必须是正的 2 的幂"); }
+        else { std::core::__runtimeFail("fft 长度必须是正的 2 的幂"); }
+    }
+    if(inverse) {
+        int64 index=0;
+        while(index<n) { Complex<float64> value=input[index]; value.im=-value.im; input[index]=value; index++; }
+    }
+    int64 i=1;
+    int64 j=0;
+    while(i<n) {
+        int64 bit=n >> 1;
+        while((j & bit)!=0) { j=j ^ bit; bit=bit >> 1; }
+        j=j ^ bit;
+        if(i<j) { Complex<float64> saved=input[i]; input[i]=input[j]; input[j]=saved; }
+        i++;
+    }
+    int64 length=2;
+    while(length<=n) {
+        float64 angle=-2.0*3.14159265358979323846/(float64)length;
+        Complex<float64> step=Complex<float64>::of(cos(angle),sin(angle));
+        int64 start=0;
+        while(start<n) {
+            Complex<float64> twiddle=Complex<float64>::of(1.0,0.0);
+            int64 offset=0;
+            while(offset<length/2) {
+                Complex<float64> even=input[start+offset];
+                Complex<float64> odd=__multiply(input[start+offset+length/2],twiddle);
+                input[start+offset]=even+odd;
+                input[start+offset+length/2]=even-odd;
+                twiddle=__multiply(twiddle,step);
+                offset++;
+            }
+            start=start+length;
+        }
+        if(length==n) { break; }
+        length=length*2;
+    }
+    if(inverse) {
+        float64 scale=1.0/(float64)n;
+        i=0;
+        while(i<n) { Complex<float64> value=input[i]; value.im=-value.im; value=value.scale(scale); input[i]=value; i++; }
+    }
+    return input;
+}
+
+List<Complex<float64>> signalDft(List<Complex<float64>> input) { return __transform(&input,false); }
+List<Complex<float64>> signalIdft(List<Complex<float64>> input) { return __transform(&input,true); }
+List<Complex<float64>> signalFft(List<Complex<float64>> input) { return __fast(input,false); }
+List<Complex<float64>> signalIfft(List<Complex<float64>> input) { return __fast(input,true); }
+List<Complex<float64>> dft(List<Complex<float64>> input) { return signalDft(input); }
+List<Complex<float64>> idft(List<Complex<float64>> input) { return signalIdft(input); }
+List<Complex<float64>> fft(List<Complex<float64>> input) { return signalFft(input); }
+List<Complex<float64>> ifft(List<Complex<float64>> input) { return signalIfft(input); }

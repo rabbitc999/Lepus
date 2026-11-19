@@ -1,0 +1,47 @@
+/** 教务 HTTP 路由，除登录外的所有 API 都先验证当前会话。 */
+module school_api;
+import std::sql;
+import std::text;
+import school_auth;
+import school_data;
+import school_accounts;
+import httpd;
+import api;
+
+/** 分派认证、账号和六类教务记录，业务写入由对应模块再次检查角色和数据范围。 */
+Reply handle(Database mut& database, State mut& state, Request const& request)
+{
+    if (request.path == "/api/auth/login")
+    {
+        if (request.method != "POST") { return errorReply(405, "登录需要 POST"); }
+        return login(&database, &state, request.body);
+    }
+    let user = match (authenticate(&database, &state, &request)) {
+        Value(value) => { value }
+        None => { return errorReply(401, "请登录，会话已失效或账号已更新"); }
+    };
+    if (request.path == "/api/auth/me" && request.method == "GET") { return jsonReply(200, userJson(user)); }
+    if (request.path == "/api/auth/logout" && request.method == "POST")
+    {
+        logout(&state, &request);
+        return jsonReply(200, "{\"ok\":true}");
+    }
+    if (request.path == "/api/auth/password" && request.method == "POST") { return changePassword(&database, user, request.body); }
+    if (!Text::startsWith(request.path, "/api/")) { return errorReply(404, "接口不存在"); }
+    String entity = request.path[5:];
+    int64 id = 0;
+    int64 separator = Text::find(entity, "/");
+    if (separator >= 0)
+    {
+        id = parseId(entity[(separator + 1):]);
+        entity = entity[0:separator];
+        if (id <= 0) { return errorReply(400, "记录编号无效"); }
+    }
+    if (entity == "accounts")
+    {
+        if (request.method == "GET" && id == 0) { return school_accounts::list(&database, user); }
+        return school_accounts::write(&database, user, request.method, id, request.body);
+    }
+    if (request.method == "GET" && id == 0) { return school_data::list(&database, entity, user); }
+    return school_data::write(&database, entity, user, request.method, id, request.body);
+}

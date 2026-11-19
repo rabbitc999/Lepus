@@ -1,0 +1,9 @@
+$macro runaway() -> stmt {
+$loop {
+    $continue;
+}
+}
+
+void main() {
+    $runaway();
+}

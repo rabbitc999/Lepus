@@ -1,0 +1,133 @@
+# 17 当前能力与实现边界
+
+<!-- LANGUAGE NAVIGATION -->
+[English](en/17-capabilities.md) · **简体中文**
+<!-- END LANGUAGE NAVIGATION -->
+
+循环语法使用 `while`、`loop` 与 `for (... in ...)`；`for-in` 和 `while` 支持带 `else` 的值表达式，以 `yield` 产生结果。List 字面量使用 `[a, b, c]`，Set 使用 `{a, b, c}`。区间使用 `std::core::range(a, b)`（左闭右开）和 `rangeEq(a, b)`（闭区间），整数和 char 直接支持，自定义遍历类型实现 `NextValue<T>`；区间 match 仅支持整数和 char，普通自定义值匹配使用 `Equal<T>`。
+
+[文档索引](README.md) · [English](en/17-capabilities.md)
+
+本页统一描述当前检出的实现。程序版本读取根目录 [`VERSION`](../VERSION)，变更历史见
+[`CHANGELOG.md`](../CHANGELOG.md)。功能以权威文法、标准库、构建配置与回归测试为依据；
+历史性能数据保留实际被测版本、配置和时间，不自动代表当前版本或其他平台。
+
+## 语言与资源
+
+标准库失败返回统一使用 `Result<T, Error>`，拥有接口载荷中仍保存具体错误。`IoError`、`ParseError`、`CsvError` 等保留枚举分支、位置和原始消息；文本错误以 `MessageError::from(text)` 构造后装入 Error。通用函数可接收 Error 值、`Error const&` 或使用 `<E: Error>` 约束。自定义 `Result<T, E>` 仍可保留具体 E；当 E 实现 Error 时，`?` 支持向返回 `Result<U, Error>` 的函数传播。
+
+堆对象分配写 `new T`，带构造实参时写 `new T(实参)`。所有权转移写 `move value`，指针与引用自动解引用一层，操作数直接使用变量或引用，不接受额外取地址。
+
+支持[返回控制表达式、语句级具名闭包和成员宏](29-declaration-sugars.md)。隐藏结果绑定保留移动、复制及借用清理。成员宏可通过 `$implement` 声明宿主接口，生成的方法按普通接口、借用及资源规则检查。
+
+泛型闭包支持 `fn<T>`、实参类型推导、完整特化及唯一最具体的偏特化；可以直接作为结构体成员，并作为泛型类型参数 `F` 的值传递或保存。不同类型调用共享同一闭包的捕获状态，复制与借用规则沿用普通闭包。见[语言参考](04-language-reference.md)。
+
+源码与宏通过 `module` / `import` 复用；宏定义登记在定义它的模块里，调用按模块可见性解析，`std::core` 始终可见，也可以写限定名（`$std::core::assert(...)`）直接点名。生成解析器建立宏 AST，语义分析进行卫生替换与静态类型推导，LLVM 代码生成前完成。支持严格有序的三种参数组、类型参数、变长片段、五类完整语法匹配及 ECMAScript 正则。详见[卫生 AST 宏](25-literals-operators-macros.md#编译期卫生-ast-宏)。
+
+可执行程序的入口只支持 `void main`，无参或接收 `List<String>`；正常退出码为 0，panic 仍失败。`struct`、`enum`、`interface` 声明的尾分号可选。
+
+LLVM 构建 动态库通过 `export` 标记普通函数，源码可省略 `main`，全局初始化与清理由 `lepus_init` / `lepus_finish` 承接。可执行程序仍要求入口函数。
+
+| 范围 | 当前能力与约束 |
+| --- | --- |
+| 类型 | 定宽整数、float32/float64、bool、char、String、大数；数组、元组、结构体、带载荷枚举、容器及函数类型 |
+| 抽象 | 重载、泛型单态化、接口约束、关联类型、常量泛型、默认类型参数、接口默认方法和运行期接口分派 |
+| 函数值 | 匿名函数只使用 `fn`；支持内联实参、嵌套高阶函数、const/mut/copy/move 捕获 |
+| 控制流 | match 与守卫、整数单值／区间重叠警告、解构、区间迭代、if 表达式、`yield value;` 块表达式、`yield (a, b);` 元组退出、`break 标签;` 层级循环退出、直接变量默认移动与带值退出穿透无值循环、卫生宏与编译期模板选择 |
+| 错误与清理 | Option、Result、自定义错误传播、`?`、panic、defer、scope(exit)、Drop 与 Closeable；实现 Closeable 的结构体自动不可复制 |
+| 编译器指令 | `#NonCopyable`（opcode 不复制）、`#No<接口>Replace`（关闭该接口全部自动推导）、`#NoRight<接口>`（只关右向）；写在声明前，泛型模板实例化时随之下发 |
+| 所有权 | 普通拥有值赋值和按值传参复制；`move` 转移资源。移动后的原绑定禁止读写或重绑，完整移动后可重新声明同名变量 |
+| 引用 | 非空的只读/可变引用；`Option<T const&>` / `Option<T mut&>` 表示可能没有的引用，None 不构造空引用 |
+| 检查 | 独立的借用来源与控制流检查跟踪局部变量、字段、别名、移动、释放及闭包捕获；调用前检查捕获来源，复制、解构和聚合传播保持关联；允许别名共享，不实行全局独占借用规则 |
+
+语言无 GC，拥有值按作用域确定性清理。引用、资源句柄及含引用的聚合仍受各自契约约束；
+手动 `new` 的存储需要按接口释放。静态检查不覆盖任意原始内存操作、外部宿主行为或所有并发失效。
+字符串下标和普通切片以 UTF-8 字节为单位，切片允许任意字节端点，String 另提供显式 UTF-8 码点方法；编码工具见 `std::utf8`。
+普通字符串字面量按字节内容合并生成期数据，字面量不能直接修改或可变借用；独立 String 值仍按值复制。
+运行时数组形参 `T[]` 复制长度及元素；`T[] &` / `T[] const&` 只读借用，
+`T[] mut&` 可变借用。数组引用保留元素布局、运行时长度及来源生命周期。
+详见[语言参考](04-language-reference.md)、[核心概念](03-core-concepts.md)与[移动规则](24-ownership-move.md)。
+
+明确的 `Any` 目标支持自动装箱，包括泛型实参、字段、返回值及异构 List/Set/Map；精确解包、清空与借用检查沿用值语义。接口引用可直接绑定实现类型引用，无需 Any 中转；视图仍借用原对象。详见 [Any 与接口绑定](23-any-generics-data.md)。
+
+所有非 void 值支持默认 `toString()` 和字符串转换；结构体 `{...}`、List/数组 `[...]`、Set/Map `{...}`、元组 `(...)`，嵌套字符串加引号并转义。用户 `toString` 与 `ImplicitConvert<String>` 互补缺失入口，专用显式转换保持优先；无反射配置同样可用。详见[值文本规则](04-language-reference.md#默认值文本与字符串协议)。
+
+## 执行、优化与部署
+
+`run` 使用 checked 原生构建 编译执行，`build` 默认 unchecked 导出，并支持显式 `--checked`。四元式可单独导出用于分析。
+
+IR 指四元式，四元式不做内部优化，优化全部交给 LLVM；发布构建执行 LLVM O3、全局死代码消除、完整 LTO 和节区回收。可达常量采用稀疏初始化，数组复用运行时清零。LLVM 构建 动态库通过生成的 C ABI 头文件嵌入宿主。
+
+原生调试保留 DWARF 源码行和变量信息，VS Code 使用 GDB/MI 提供断点、单步与变量查看。版本与实际平台以发行记录为准；跨架构编译器不等于该目标已支持 LLVM 构建。详见[LLVM 构建](38-build.md)和[原生调试](43-native-debugging.md)。
+
+## 宿主与反射
+
+Lepus 可通过逐函数 `#abi("C", "库", "符号")` 调用真实 C 原型，也可调用不透明 C 注册表中的宿主入口。
+`#export("符号")` 提供标量及无资源纯值结构体的 C ABI 导出。引用、结构体、数组、可空引用、返回内存释放及有限头文件绑定按 ABI 契约处理，声明必须匹配实际目标签名。
+
+宿主用 `lepus_abi_invoke` 同步调用 Lepus 具名函数、内联函数和捕获闭包，提供参数槽类别并检查返回类别与状态。
+回调上下文只在所属同步调用期间、同一线程有效；拥有字符串、临时缓冲和宿主记录分别使用对应的释放接口。
+需要沿用运行时清理队列的聚合存储使用 `lepus_abi_tracked_temporary`；提前释放会移除登记。
+详见[宿主集成](08-host-integration.md)和[回调示例](../example/native-callbacks/README.md)。
+
+反射支持编译期注解和显式暴露声明的类型化元数据查询。硬实时模式禁用反射。完整范围见[反射说明](19-reflection.md)。
+
+## 标准库、目标宿主与工具
+
+标准库覆盖容器算法、迭代器、数学与数值分析、文本与编码、JSON/TOML/CSV、文件与目录、
+TCP/基础 HTTP、SQL 驱动、隔离线程、有界通道、消息、显式共享值、显式事件和看门狗。
+模块与重载清单以[API 索引](library/README.md)为准，不在总览手工维护模块总数。
+HTTP 接口不包含 TLS；外部数据库需要相应客户端和服务。线程使用 `std::thread::Thread`，支持复制初始参数、取消、状态、完成结果、线程组和固定线程池；跨线程通信有容量与等待预算，事件仅显式接收。
+宿主事件投递器使用弱引用；阻塞宿主调用的取消受其超时约束。详见[并发模型](30-thread-concurrency.md)。
+
+桌面与嵌入式 Linux 共用 `source/ircode/` 运行时核心。目标需具备 C++17 工具链、足够的内存和
+所需系统服务；原生胶水与依赖库必须按目标架构构建。Linux 设备使用普通宿主，
+没有单独的嵌入式部署模式或前端模块禁用配置。内存与指令限制通过通用运行选项设置。
+支持范围见[部署说明](06-deployment.md)。不提供单片机、裸机固件或板级 SDK。
+
+当前安装包提供 Windows x64、Ubuntu x64/ARM64 和 CentOS x64。x86 运行时未通过启动验证，不提供其安装包；原生 LLVM 构建 的宿主布局当前为 x64。链接方式、包格式和架构范围见[安装与多架构构建](39-installation-packages.md)。
+
+统一 CLI 提供工程、检查、格式化、测试、依赖锁定与缓存。LSP 提供诊断、补全、悬停、参数提示
+和跨文件跳转，并提供完整 `let` 类型悬停、可选类型内联提示、多括号宏签名、展开来源导航、
+引用查找及基于唯一绑定的安全重命名；所有权错误可附带关联声明和清理位置。重载或宏模板绑定不明确时
+拒绝重构，详见 [LSP 说明](man/lsp.md)。DAP 提供断点、步进和调用栈，变量查看与表达式求值尚未实现。
+包来源支持本地目录、固定 Git 提交和带摘要的 HTTP/HTTPS 压缩包，仍需持续建设第三方生态。
+功能存在、回归通过与长期生产验证分别描述，不把其中一项当作另外两项的证明。
+
+工具界面仅支持中文、英文，其他系统区域回退英文，不支持的语言选项被拒绝。`man book`、`man keyword` 与 `man skill` 从可执行文件内嵌数据查询书稿、关键字和 AI SKILL；VS Code 包携带同一份 SKILL。
+
+API 手册通过 `lepus man api` 查询，省略 `api` 会给出用法错误；`lepus man macro` 查看内嵌宏帮助。
+
+`opcode T { new = create; drop = destroy; copy = clone; };` 声明不透明胶水对象。
+复制经声明的胶水函数完成；`#NonCopyable` 类型禁止复制，并省略 copy。
+BigInteger 乘法在 Karatsuba 与双素数 NTT 之间按补齐成本选择，平方复用正变换，不保留学校乘法内核。
+除法使用 Knuth 分块长除法与 Burnikel–Ziegler 分治，保持向零截断及余数跟随被除数符号。
+历史测量可从 Git 历史追溯；当前版本性能对比不包含大数负载。
+struct 可以拥有多个 opcode 字段。BigInteger、BigDecimal、File、Process 的记录及操作位于
+标准库胶水，运行时核心只管理通用 NativeRecord 壳及宿主服务表。File、Process 不可复制；
+公开进程类型名为 Process。List、Map、Set 使用参数化 opcode 类型和标准库不透明记录，
+前端不再声明 Container Kind，运行时不再声明集合专用 Kind 或实现集合方法。List 使用 ArrayList；
+内建标量键与实现 Hash<T> 的自定义键使用 HashMap / HashSet，只有 Equal<bool,T> 而没有 Hash<T>
+的自定义键退化为线性查找的 ArrayMap / ArraySet。哈希碰撞通过 Equal 区分。
+Map、Set 的 keyAt、valAt、at、遍历及默认文本均不承诺排序或插入顺序。String 的完整隔离仍在推进。
+
+
+Image 使用可深复制的 opcode，宽高与连续 RGBA 像素由胶水拥有；width()/height() 查询尺寸，pixels() 导出独立列表快照。TcpSocket、TcpListener 使用不可复制的 opcode，作用域退出自动关闭，显式 move 转移所有权，各连接独立保存读状态与错误。线性代数 Vector<T>、Matrix<T> 保留泛型聚合外观，ScalarArray<T> 的 ScalarStorage opcode 保存内建整数与浮点数值，复制缓冲互不影响。字符串拼接、切片、比较、查找及数值转文本由标准胶水实现；内部入口统一使用 __std_ 前缀，运行时保留执行控制、内存安全与闭包等核心机制。
+
+网络异步入口使用非阻塞轮询和 NET_PENDING，未就绪时采用可取消线程睡眠或在专用线程使用同步 I/O，避免忙轮询；connectAsync 首批仅接受数值 IPv4，域名解析保留在同步 connect。sendAsync 返回部分发送字节数并接受 offset；receiveLineAsync 保留未完成行，缓冲上限为 1 MiB。
+
+隔离线程的 `waitFor(thread, millis)` 支持非负毫秒超时，`tryWait(thread)` 提供零超时等待；成功完成并回收返回 `true`，超时返回 `false` 且不取消目标。目标失败仍传播原始诊断；句柄成功回收后不能再次等待。
+
+## 后端组织与 TOML 保存
+
+正常 run／build 把语义检查后的 AST 直接交给 LLVM 代码生成，不经过 Lepus 四元式。四元式导出与兼容输入仍可用于分析和原生生成。LLVM 执行 O3／LTO 优化；静态内置与外置 LLVM 变体共享后端源码。
+
+std::toml 文档根节点保存时保留原文注释。底层 C++ 值模型的等形编辑保留布局；结构编辑保留注释内容并可调整位置。重复解析保存不丢失或重复注释，详见 [TOML 接口](library/std-toml.md)。
+
+精确符号计算由 `std::cas::Expr` 提供，支持字符串 AST、精确有理数四则运算、微积分和节点遍历。`std::math` 支持普通数值、大十进制与符号表达式；高精度函数使用共享十进制后端。算法、裁剪与线程边界见[符号计算与高精度数学](31-symbolic-computation.md)。
+
+标准库的连接和定时源使用独占拥有关系，容器和随机数保持值复制，JSON/TOML 子值独立拥有。String 提供常用文本方法及显式 UTF-8 码点接口；存储语义、快照和边界见[标准库存储、复制与字符串方法](32-opcode-values-strings.md)。
+
+反射提供按名称读取、写入精确类型字段，并为 JSON、TOML、字节序列化和 std::sql 模型注解生成具体类型桥接。动态 SQL 生成与直接参数绑定当前支持 SQLite；其他后端的参数化执行返回明确诊断。详见 [反射序列化与动态 SQL](33-reflection-serialization-sql.md)。
+
+配套书稿包含 29 章、分层习题与参考解答、经典作品改编番外及前端编译与 LLVM 构建 流程图。通用回调与事件接口按各自协议提供。

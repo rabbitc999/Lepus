@@ -1,0 +1,1 @@
+lepus: example/samples-error/tuple_index_oob.lep 第 4 行第 5 列：元组下标超出范围：2

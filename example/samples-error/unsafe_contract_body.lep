@@ -1,0 +1,2 @@
+unsafe int64 raw() { return __rawSize(int64); }
+void main() { unsafe { raw(); } }

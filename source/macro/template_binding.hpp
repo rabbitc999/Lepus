@@ -1,0 +1,120 @@
+#ifndef LEPUS_MACRO_TEMPLATE_BINDING_HPP
+#define LEPUS_MACRO_TEMPLATE_BINDING_HPP
+#include "ast_substitution.hpp"
+#include "regex_matcher.hpp"
+#include <set>
+#include <functional>
+
+namespace lepus_macro
+{
+bool ContainsMacroLet(const Memory::Deque<MNode> &nodes, int root, std::size_t depth = 0);
+
+/**
+ * @brief 解析并核对一个宏重复的片段变量及等长来源。
+ * @param nodes AST 节点池。
+ * @param node 单来源或成组重复节点。
+ * @param inputs 当前层可见的宏实参。
+ * @param variables 接收迭代变量名。
+ * @param arguments 接收各来源的片段编号。
+ * @param error 接收来源或形状错误。
+ * @return 各来源均可迭代时返回真。
+ */
+bool ReadMacroRepetition(const Memory::Deque<MNode> &nodes, const MNode &node, const std::map<std::string, int> &inputs,
+                         std::vector<std::string> &variables, std::vector<const Memory::Vector<int> *> &arguments, std::string &error);
+
+/**
+ * @brief 根据片段类别或原文选择宏分支。
+ * @param nodes AST 节点池。
+ * @param node 匹配或正则分支节点。
+ * @param inputs 当前层可见的宏实参。
+ * @param matcher 用于正则匹配的缓存。
+ * @param error 接收无效形参或模式错误。
+ * @return 选中的模板编号，无匹配时为负数。
+ */
+int SelectMacroBranch(const Memory::Deque<MNode> &nodes, const MNode &node, const std::map<std::string, int> &inputs,
+                      RegexMatcher *matcher, std::string &error);
+/**
+ * @brief 保存已绑定模板及形参身份，供调用展开按身份替换。
+ */
+struct BoundTemplate
+{
+    int root = -1;
+    std::map<std::string, BindingId> parameters;
+    std::map<BindingId, int> iterations;
+};
+
+/**
+ * @brief 按词法作用域绑定宏形参和局部声明，保留原模板。
+ */
+class TemplateBinding
+{
+public:
+    /**
+     * @brief 关联语法节点池及本次编译的卫生解析器。
+     * @param nodes 语法节点池。
+     * @param resolver 维护唯一绑定身份的解析器。
+     * @param types 当前编译的类型池，供类型片段的卫生绑定使用。
+     */
+    TemplateBinding(Memory::Deque<MNode> &nodes, HygieneResolver &resolver, Memory::Vector<std::shared_ptr<MType>> *types = nullptr);
+    /**
+     * @brief 克隆并绑定一个宏定义，将未被局部声明遮蔽的形参引用转为占位。
+     * @param definition 宏定义节点。
+     * @param definitionScope 定义所在的词法作用域。
+     * @param result 成功时接收模板根及形参身份，失败时清空。
+     * @param error 失败原因，成功时清空。
+     * @param inputs 按形参名提供的结构化实参；空时只做普通模板绑定。
+     * @param matcher 本次编译的正则模式缓存。
+     * @param bindBody 是否绑定宏体；登记签名时为假，避免检查未选中分支。
+     * @param prepare 处理元数据控制的回调，接收当前重复层次的实参。
+     * @return 绑定成功返回真；失败回滚本次新建节点。
+     */
+    bool bind(int definition, ScopeId definitionScope, BoundTemplate &result, std::string &error,
+              const std::map<std::string, int> *inputs = nullptr, RegexMatcher *matcher = nullptr, bool bindBody = true,
+              const std::function<bool(int, const std::map<std::string, int> &, std::string &)> &prepare = {});
+
+private:
+    /**
+     * @brief 按节点结构与声明顺序绑定引用，不改写成员名称。
+     * @param id 当前节点，负值表示省略。
+     * @param scope 当前词法作用域。
+     * @param depth 当前遍历深度。
+     */
+    void visit(int id, ScopeId scope, std::size_t depth);
+    /**
+     * @brief 为具名声明分配绑定身份并诊断重复声明。
+     * @param id 声明节点。
+     * @param scope 声明所在作用域。
+     */
+    void declare(int id, ScopeId scope);
+    /**
+     * @brief 为元组及枚举载荷模式建立局部声明身份。
+     * @param id 模式或绑定节点。
+     * @param scope 模式所在词法作用域。
+     * @param depth 当前模式深度。
+     */
+    void bindPattern(int id, ScopeId scope, std::size_t depth);
+    /**
+     * @brief 按当前位置的词法绑定克隆类型树，标记类型片段形参。
+     * @param type 原始类型树。
+     * @param scope 当前词法作用域。
+     * @param context 当前语法上下文。
+     * @param depth 类型深度。
+     * @return 带形参绑定的独立类型树。
+     */
+    std::shared_ptr<MType> bindType(const std::shared_ptr<MType> &type, ScopeId scope, ContextId context, std::size_t depth);
+    Memory::Deque<MNode> &nodes_;
+    HygieneResolver &resolver_;
+    std::set<BindingId> parameters_;
+    std::set<BindingId> typeDeclarations_;
+    std::set<BindingId> memberDeclarations_;
+    std::set<BindingId> patternParameters_;  ///< 当前模板内只允许插入模式位置的形参身份。
+    ScopeId parameterScope_ = 0;
+    const std::map<std::string, int> *inputs_ = nullptr;
+    RegexMatcher *matcher_ = nullptr;
+    BoundTemplate *result_ = nullptr;
+    std::function<bool(int, const std::map<std::string, int> &, std::string &)> prepare_;
+    std::map<std::string, int> iterationInputs_;
+    Memory::Vector<std::shared_ptr<MType>> *types_ = nullptr;
+};
+}  // namespace lepus_macro
+#endif

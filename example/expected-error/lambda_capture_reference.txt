@@ -1,0 +1,1 @@
+lepus: example/samples-error/lambda_capture_reference.lep 第 4 行第 5 列：lambda 的 mut/move 捕获不能借用或移动只读变量：reference

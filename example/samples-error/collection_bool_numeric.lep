@@ -1,0 +1,1 @@
+void main() { std::core::Set<bool> value = {1}; }

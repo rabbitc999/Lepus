@@ -1,0 +1,8 @@
+/* `$define … $end_define` 已改名 `$macro NAME(...) -> { ... }`。 */
+$define TWICE(value)
+((value) * 2)
+$end_define
+
+void main() {
+    std::core::println("{}", TWICE(21));
+}

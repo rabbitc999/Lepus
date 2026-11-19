@@ -1,0 +1,1 @@
+lepus: example/samples-error/raw_slot_borrow_after_relocate.lep 第 8 行：[LEP1205] 借用来源已释放，不能继续访问：*

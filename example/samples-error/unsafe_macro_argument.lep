@@ -1,0 +1,3 @@
+$macro grant(body: block) -> stmt { unsafe { body; } }
+unsafe void raw() {}
+void main() { $grant({ raw(); }); }

@@ -1,0 +1,856 @@
+
+/* ---- Lepus BUILD 运行时（产物自带，可独立运行） ---- */
+#ifdef _WIN32
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#else
+typedef __SIZE_TYPE__ size_t;
+typedef long long int64_t;
+typedef unsigned long long uint64_t;
+typedef int int32_t;
+typedef short int16_t;
+typedef struct LepusFile FILE;
+extern FILE *stdin, *stdout, *stderr;
+extern void *malloc(size_t), *calloc(size_t, size_t), *memcpy(void *, const void *, size_t), *memmove(void *, const void *, size_t), *memset(void *, int, size_t);
+extern void free(void *);
+extern void *realloc(void *, size_t);
+extern void exit(int);
+extern int fflush(FILE *), fprintf(FILE *, const char *, ...), printf(const char *, ...), snprintf(char *, size_t, const char *, ...), sscanf(const char *, const char *, ...), fputc(int, FILE *);
+extern size_t fwrite(const void *, size_t, size_t, FILE *), strlen(const char *);
+extern char *fgets(char *, int, FILE *), *strchr(const char *, int), *strstr(const char *, const char *), *strncat(char *, const char *, size_t);
+extern int memcmp(const void *, const void *, size_t);
+extern int strcmp(const char *, const char *);
+extern int fgetc(FILE *);
+extern int feof(FILE *);
+#define NULL ((void *)0)
+#endif
+extern const unsigned char lepus_data_image[];
+extern const uint64_t lepus_data_size, lepus_heap_size;
+
+typedef int64_t lepus_i64;
+typedef uint64_t lepus_u64;
+
+/**
+ * @brief 取得当前目标平台的 C 标准流，供 LLVM 直接生成的流调用使用。
+ * @param index 零为标准输入，一为标准输出，二为标准错误。
+ * @return 当前平台的 FILE 指针，不经过语言宿主记录或胶水注册表。
+ */
+FILE *lepus_standard_stream(int index)
+{
+    return index == 0 ? stdin : index == 1 ? stdout : stderr;
+}
+
+extern void lepus_host_init(void), lepus_host_finish(void), lepus_host_drop(lepus_i64);
+extern unsigned char *lepus_host_address(lepus_i64, lepus_u64);
+extern lepus_i64 lepus_host_allocate(lepus_u64), lepus_host_function(lepus_i64, int);
+extern lepus_i64 lepus_host_call(const char *, lepus_i64, const lepus_i64 *, const unsigned char *);
+extern void lepus_host_trace(void);
+extern void lepus_host_raise_callback_error(const char *);
+
+/**
+ * @brief 刷新输出、报告运行时错误并终止进程。
+ * @param message 错误或断言消息；句柄值为零时省略消息。
+ */
+void lepus_panic(const char *message)
+{
+#ifdef LEPUS_MCU_RUNTIME
+    extern void lepus_mcu_panic(const char *);
+    lepus_mcu_panic(message);
+    __builtin_unreachable();
+#else
+    lepus_host_raise_callback_error(message);
+    fflush(stdout);
+    fprintf(stderr, "lepus build: %s\n", message);
+    lepus_host_trace();
+    exit(1);
+#endif
+}
+
+/**
+ * @brief 按 运行时 的六十四位槽规则拒绝越界移位。
+ * @param count 移位位数。
+ */
+void lepus_check_shift(lepus_i64 count)
+{
+    if (count < 0 || count >= 64) lepus_panic("移位位数超出整数位宽（有效范围 0..63）");
+}
+
+/**
+ * @brief 在执行浮点除法或取余前保留 运行时 的除零陷阱。
+ * @param divisor 浮点除数。
+ */
+void lepus_check_real_divisor(double divisor)
+{
+    if (divisor == 0.0) lepus_panic("浮点除零");
+}
+
+/**
+ * @brief 使用 运行时 同源的整数除零、溢出和最小负数取余规则。
+ * @param left 被除数。
+ * @param right 除数。
+ * @param unsignedValue 非零时执行无符号除法。
+ * @param remainder 非零时返回余数，否则返回商。
+ * @return 计算得到的六十四位槽值。
+ */
+lepus_i64 lepus_integer_divide(lepus_i64 left, lepus_i64 right, int unsignedValue, int remainder)
+{
+    if (!right) lepus_panic("整数除零");
+    if (unsignedValue)
+        return (lepus_i64)(remainder ? (lepus_u64)left % (lepus_u64)right : (lepus_u64)left / (lepus_u64)right);
+    if (left == (-9223372036854775807LL - 1) && right == -1)
+    {
+        if (remainder) return 0;
+        lepus_panic("整数除法溢出：最小负数除以 -1 的结果超出 int64 范围");
+    }
+    return remainder ? left % right : left / right;
+}
+
+/**
+ * @brief 按编译模块的数据和堆预算创建运行时内存并复制初始化数据。
+ */
+void lepus_init(void)
+{
+    lepus_host_init();
+}
+
+/**
+ * @brief 刷新输出并释放 BUILD 运行时的整块内存。
+ */
+void lepus_finish(void)
+{
+    fflush(stdout);
+    lepus_host_finish();
+}
+
+/* 堆由共享原生服务管理，释放撤销逻辑身份，读取保留存活和范围检查。 */
+/**
+ * @brief 从本次运行的共享堆预算中分配字节。
+ * @param bytes 待复制的源字节或待分配的字节数。
+ * @return 新分配范围的字节偏移。
+ */
+lepus_i64 lepus_alloc(lepus_u64 bytes)
+{
+    return lepus_host_allocate(bytes);
+}
+
+/**
+ * @brief 释放活跃堆块或拥有型对象。
+ * @param address 运行时内存中的字节偏移。
+ */
+void lepus_drop(lepus_i64 address) { lepus_host_drop(address); }
+
+/* 读写：地址是内存块内的偏移 */
+/**
+ * @brief 从运行时偏移读取 i64 标量，使用复制避免未对齐访问。
+ * @param address 运行时内存中的字节偏移。
+ * @return 读取并扩展到入口返回类型的标量值。
+ */
+lepus_i64 lepus_load_i64(lepus_i64 address)
+{
+    lepus_i64 v = 0;
+    memcpy(&v, lepus_host_address(address, 8), 8);
+    return v;
+}
+/**
+ * @brief 将 i64 标量写入运行时偏移，使用复制避免未对齐访问。
+ * @param address 运行时内存中的字节偏移。
+ * @param value 待读取、写入、格式化或输出的值。
+ */
+void lepus_store_i64(lepus_i64 address, lepus_i64 value) { memcpy(lepus_host_address(address, 8), &value, 8); }
+/**
+ * @brief 从运行时偏移读取 f64 标量，使用复制避免未对齐访问。
+ * @param address 运行时内存中的字节偏移。
+ * @return 读取并扩展到入口返回类型的标量值。
+ */
+double lepus_load_f64(lepus_i64 address)
+{
+    lepus_i64 v = lepus_load_i64(address);
+    double d = 0.0;
+    memcpy(&d, &v, 8);
+    return d;
+}
+/**
+ * @brief 将 f64 标量写入运行时偏移，使用复制避免未对齐访问。
+ * @param address 运行时内存中的字节偏移。
+ * @param value 待读取、写入、格式化或输出的值。
+ */
+void lepus_store_f64(lepus_i64 address, double value)
+{
+    lepus_i64 v = 0;
+    memcpy(&v, &value, 8);
+    lepus_store_i64(address, v);
+}
+/**
+ * @brief 从运行时偏移读取 u8 标量，使用复制避免未对齐访问。
+ * @param address 运行时内存中的字节偏移。
+ * @return 读取并扩展到入口返回类型的标量值。
+ */
+lepus_i64 lepus_load_u8(lepus_i64 address) { return (lepus_i64)*lepus_host_address(address, 1); }
+/**
+ * @brief 将 u8 标量写入运行时偏移，使用复制避免未对齐访问。
+ * @param address 运行时内存中的字节偏移。
+ * @param value 待读取、写入、格式化或输出的值。
+ */
+void lepus_store_u8(lepus_i64 address, lepus_i64 value) { *lepus_host_address(address, 1) = (unsigned char)(value & 0xFF); }
+/**
+ * @brief 从运行时偏移读取 i32 标量，使用复制避免未对齐访问。
+ * @param address 运行时内存中的字节偏移。
+ * @return 读取并扩展到入口返回类型的标量值。
+ */
+lepus_i64 lepus_load_i32(lepus_i64 address)
+{
+    int32_t v = 0;
+    memcpy(&v, lepus_host_address(address, 4), 4);
+    return (lepus_i64)v;
+}
+/**
+ * @brief 将 i32 标量写入运行时偏移，使用复制避免未对齐访问。
+ * @param address 运行时内存中的字节偏移。
+ * @param value 待读取、写入、格式化或输出的值。
+ */
+void lepus_store_i32(lepus_i64 address, lepus_i64 value)
+{
+    int32_t v = (int32_t)value;
+    memcpy(lepus_host_address(address, 4), &v, 4);
+}
+/**
+ * @brief 从运行时偏移读取 i16 标量，使用复制避免未对齐访问。
+ * @param address 运行时内存中的字节偏移。
+ * @return 读取并扩展到入口返回类型的标量值。
+ */
+lepus_i64 lepus_load_i16(lepus_i64 address)
+{
+    int16_t v = 0;
+    memcpy(&v, lepus_host_address(address, 2), 2);
+    return (lepus_i64)v;
+}
+/**
+ * @brief 将 i16 标量写入运行时偏移，使用复制避免未对齐访问。
+ * @param address 运行时内存中的字节偏移。
+ * @param value 待读取、写入、格式化或输出的值。
+ */
+void lepus_store_i16(lepus_i64 address, lepus_i64 value)
+{
+    int16_t v = (int16_t)value;
+    memcpy(lepus_host_address(address, 2), &v, 2);
+}
+
+/* 字符串：负一标记、长度、容量、内容地址；同时支持原八字节长度头。 */
+/**
+ * @brief 将指定字节复制到拥有型容量缓冲区，保留嵌入的零字节。
+ * @param bytes 待复制的源字节，不按终止零字节扫描。
+ * @param length 源内容的字节数。
+ * @return 新容量描述符句柄；空字符串也有独立的内联缓冲区。
+ */
+lepus_i64 lepus_string_new(const char *bytes, size_t length)
+{
+    if ((lepus_u64)length > 9223372036854775774ull) lepus_panic("String：结果过长");
+    char *copy = (char *)malloc(length ? length : 1);
+    if (!copy) lepus_panic("复制字符串时内存不足");
+    if (length) memcpy(copy, bytes, length);
+    const int small = length <= 16u;
+    const lepus_i64 at = lepus_alloc(small ? 49u : 32u);
+    const lepus_i64 data = small ? at + 32 : lepus_alloc(length + 1u);
+    const lepus_i64 header[4] = { -1, (lepus_i64)length, small ? 16 : (lepus_i64)length, data };
+    memcpy(lepus_host_address(at, 32), header, 32);
+    if (length != 0u) memcpy(lepus_host_address(data, length), copy, length);
+    *lepus_host_address(data + (lepus_i64)length, 1) = 0;
+    free(copy);
+    return at;
+}
+/* 两种串共存：数据映像里的字面量是 NUL 结尾的裸字节（地址 < lepus_data_size），
+ * 堆上的串可用容量描述符或原长度头，这里先按地址分界再读取布局标记。 */
+/**
+ * @brief 根据初始化数据边界区分堆句柄和数据区地址。
+ * @param address 运行时内存中的字节偏移。
+ * @return 地址位于堆区时返回非零。
+ */
+int lepus_on_heap(lepus_i64 address) { return address >= (lepus_i64)lepus_data_size; }
+/**
+ * @brief 读取堆字符串的长度或计算数据区字面量长度。
+ * @param s 源字符串句柄；零表示空字符串。
+ * @return 字符串的字节长度。
+ */
+lepus_i64 lepus_string_length(lepus_i64 s)
+{
+    if (s == 0) return 0;
+    if (!lepus_on_heap(s)) return (lepus_i64)strlen((const char *)lepus_host_address(s, 1));
+    const lepus_i64 marker = lepus_load_i64(s);
+    return marker == -1 ? lepus_load_i64(s + 8) : marker;
+}
+/**
+ * @brief 取得堆字符串或数据区字面量的字节起点。
+ * @param s 源字符串句柄；零表示空字符串。
+ * @return 指向字符串首字节的宿主指针。
+ */
+const char *lepus_string_bytes(lepus_i64 s)
+{
+    const lepus_i64 data = lepus_on_heap(s) ? (lepus_load_i64(s) == -1 ? lepus_load_i64(s + 24) : s + 8) : s;
+    return (const char *)lepus_host_address(data, 0);
+}
+/**
+ * @brief 复制数据区的零结尾字面量为拥有型字符串。
+ * @param address 运行时内存中的字节偏移。
+ * @return 新构造的字符串句柄；空字符串仍具有有效的长度前缀。
+ */
+lepus_i64 lepus_string_literal(lepus_i64 address)
+{
+    const char *text = (const char *)lepus_host_address(address, 1);
+    return lepus_string_new(text, strlen(text));
+}
+/**
+ * @brief 按实际长度复制字符串句柄对应的全部字节。
+ * @param s 源字符串句柄；零表示空字符串。
+ * @return 新构造的字符串句柄；空字符串仍具有有效的长度前缀。
+ */
+lepus_i64 lepus_string_copy(lepus_i64 s)
+{
+    return s == 0 ? 0 : lepus_string_new(lepus_string_bytes(s), (size_t)lepus_string_length(s));
+}
+/**
+ * @brief 释放字符串拥有的共享堆存储。
+ * @param s 源字符串句柄；零表示空字符串。
+ */
+void lepus_string_drop(lepus_i64 s)
+{
+    if (s && lepus_on_heap(s) && lepus_load_i64(s) == -1)
+    {
+        const lepus_i64 data = lepus_load_i64(s + 24);
+        if (data != s + 32) lepus_host_drop(data);
+    }
+    lepus_host_drop(s);
+}
+
+/* 数组：块头 8 字节是元素个数，返回值指向元素区，块起点 = 返回值 - 8
+ * （四元式里释放数组写的是 drop(a - 8)） */
+/**
+ * @brief 分配含元素数量前缀的数组，返回元素区偏移。
+ * @param length 字节数或数组元素数量。
+ * @param stride 单个数组元素的字节大小。
+ * @return 新数组元素区的字节偏移。
+ */
+lepus_i64 lepus_new_array(lepus_i64 length, lepus_i64 stride)
+{
+    const lepus_i64 count = length < 0 ? 0 : length;
+    const lepus_i64 base = lepus_alloc((lepus_u64)count * (lepus_u64)stride + 8u);
+    memcpy(lepus_host_address(base, 8), &count, 8);
+    return base + 8;
+}
+
+/**
+ * @brief 检查数组下标是否落在零至长度之间，越界时报错退出。
+ * @param index 从零开始的字节或元素下标。
+ * @param limit 数组元素数量，不包含该上界。
+ * @param what 用于错误消息的访问类型。
+ */
+void lepus_bounds(lepus_i64 index, lepus_i64 limit, const char *what)
+{
+    if (index < 0 || index >= limit)
+    {
+        char message[128];
+        snprintf(message, sizeof(message), "%s越界：下标 %lld，长度 %lld", what, (long long)index, (long long)limit);
+        lepus_panic(message);
+    }
+}
+/**
+ * @brief 检查偏移是否为空指针，空指针时报错退出。
+ * @param address 运行时内存中的字节偏移。
+ * @param what 用于错误消息的访问类型。
+ */
+void lepus_null(lepus_i64 address, const char *what)
+{
+    if (address == 0)
+    {
+        char message[128];
+        snprintf(message, sizeof(message), "%s：空指针", what);
+        lepus_panic(message);
+    }
+}
+
+/* 输出：格式串一个个替换。println 的换行已经由前端写进格式串字面量，
+ * 所以这里不需要区分 print 与 println（运行时 那一侧也是这么做的）。
+ * 前端既可能留 `{}`，也可能已经翻成 printf 的 `%d` / `%g` / `%s`，两种都认。 */
+static lepus_i64 lepus_fmt_at = 0;
+static size_t lepus_fmt_pos = 0u;
+/**
+ * @brief 选择本次格式化输出的格式串并重置扫描位置。
+ * @param format 格式串在运行时内存中的偏移。
+ */
+void lepus_fmt_begin(lepus_i64 format)
+{
+    lepus_fmt_at = format;
+    lepus_fmt_pos = 0u;
+}
+
+/* 吐出到下一个占位符之前的普通字符，返回占位符的转换字符：
+ * `'?'` = `{}`（按值的种类自己挑格式）、`'%'` = 转义的百分号、0 = 后面没有了。
+ * 宽度 / 精度 / 标志留在 prefix 里（`%` 开头，不含长度修饰符与转换字符）。 */
+/**
+ * @brief 输出普通字符并解析下一处占位符的转换字符和格式前缀。
+ * @param prefix 接收或提供格式化标志、宽度与精度的文本。
+ * @param prefixSize 格式前缀缓冲区的字节容量。
+ * @return 转换字符；没有剩余占位符时返回零。
+ */
+int lepus_fmt_scan(char *prefix, size_t prefixSize)
+{
+    const char *text = lepus_string_bytes(lepus_fmt_at);
+    size_t at = lepus_fmt_pos;
+    while (text[at] != '\0' && text[at] != '%' && !(text[at] == '{' && text[at + 1u] == '}')) at++;
+    if (at > lepus_fmt_pos)
+    {
+        fwrite(text + lepus_fmt_pos, 1u, at - lepus_fmt_pos, stdout);
+        lepus_fmt_pos = at;
+    }
+    if (text[at] == '\0')
+    {
+        prefix[0] = '\0';
+        return 0;
+    }
+    if (text[at] == '{')
+    {
+        size_t close = at + 1u;
+        while (text[close] != '\0' && text[close] != '}') close++;
+        lepus_fmt_pos = (text[close] == '}') ? close + 1u : close;
+        prefix[0] = '%';
+        prefix[1] = '\0';
+        size_t inner = at + 1u;
+        if (text[inner] == ':') inner++;
+        const size_t last = close;
+        if (last > inner) /* `{:3F}` / `{:x}`：冒号后面就是 printf 的规格，末字符是转换字符 */
+        {
+            size_t n = 1u;
+            for (size_t scan = inner; scan + 1u < last && n + 2u < prefixSize; ++scan) prefix[n++] = text[scan];
+            prefix[n] = '\0';
+            return (int)(unsigned char)text[last - 1u];
+        }
+        return '?'; /* 光秃秃的 `{}`：按值的种类自己挑 */
+    }
+    size_t scan = at + 1u;
+    if (text[scan] == '%')
+    {
+        fputc('%', stdout);
+        lepus_fmt_pos = scan + 1u;
+        prefix[0] = '\0';
+        return '%';
+    }
+    size_t n = 0u;
+    prefix[n++] = '%';
+    while (text[scan] != '\0' && strchr("-+ #0123456789.", text[scan]) != NULL && n + 2u < prefixSize) prefix[n++] = text[scan++];
+    while (text[scan] != '\0' && strchr("hlLqjzt", text[scan]) != NULL) scan++; /* 长度修饰符丢掉，自己按 64 位补 */
+    prefix[n] = '\0';
+    if (text[scan] == '\0')
+    {
+        lepus_fmt_pos = scan;
+        return 0;
+    }
+    lepus_fmt_pos = scan + 1u;
+    return (int)(unsigned char)text[scan];
+}
+
+/* 怎么打印由**格式串里的转换字符**说了算，不看翻译器猜的种类：
+ * `%s` 就把这个 64 位当地址去读串，`%f` / `%g` 就把它按 double 的位模式解释。
+ * 猜错种类（`float64 fromInt = 2` 那条路上的老坑）不会再把 `%.3f` 喂给整数打印。 */
+/**
+ * @brief 按格式转换字符输出整数位模式、浮点值或字符串。
+ * @param conv 占位符指定的转换字符。
+ * @param prefix 接收或提供格式化标志、宽度与精度的文本。
+ * @param bits 待格式化值的六十四位位模式。
+ * @param asFloat 值是否来源于浮点类型。
+ */
+void lepus_fmt_emit(int conv, const char *prefix, lepus_i64 bits, int asFloat)
+{
+    char spec[64], padded[40];
+    if (conv == 's')
+    {
+        if (bits == 0) return;
+        snprintf(spec, sizeof spec, "%s.*s", prefix);
+        printf(spec, (int)lepus_string_length(bits), lepus_string_bytes(bits));
+        return;
+    }
+    if (conv == 'c')
+    {
+        fputc((int)(bits & 0xFF), stdout);
+        return;
+    }
+    if (conv == '?') conv = asFloat ? 'g' : 'd';
+    if (strchr("gGeEfFaA", conv) != NULL)
+    {
+        double value = 0.0;
+        memcpy(&value, &bits, 8);
+        /* 语言的默认精度是三位小数（`native_format.cpp` 里写死的 `.3`）：
+         * `%g` 打 3.625 出来的是 `3.62`，不是 C 默认的 `3.625`。 */
+        snprintf(padded, sizeof padded, "%s", prefix);
+        if (strchr(padded, '.') == NULL) strncat(padded, ".3", sizeof padded - strlen(padded) - 1u);
+        snprintf(spec, sizeof spec, "%s%c", padded, (char)conv);
+        printf(spec, value);
+        return;
+    }
+    if (conv == 'u' || conv == 'x' || conv == 'X' || conv == 'o')
+    {
+        snprintf(spec, sizeof spec, "%sll%c", prefix, (char)conv);
+        printf(spec, (unsigned long long)(lepus_u64)bits);
+        return;
+    }
+    snprintf(spec, sizeof spec, "%slld", prefix);
+    printf(spec, (long long)bits);
+}
+/**
+ * @brief 读取下一个占位符并输出整数。
+ * @param value 待读取、写入、格式化或输出的值。
+ */
+void lepus_fmt_int(lepus_i64 value)
+{
+    char prefix[32];
+    const int conv = lepus_fmt_scan(prefix, sizeof prefix);
+    if (conv == 0 || conv == '%') return;
+    lepus_fmt_emit(conv, prefix, value, 0);
+}
+/**
+ * @brief 复用整数格式化入口输出无符号整数位模式。
+ * @param value 待读取、写入、格式化或输出的值。
+ */
+void lepus_fmt_uint(lepus_i64 value) { lepus_fmt_int(value); }
+/**
+ * @brief 读取下一个占位符并输出字符对应的整数值。
+ * @param value 待读取、写入、格式化或输出的值。
+ */
+void lepus_fmt_char(lepus_i64 value)
+{
+    char prefix[32];
+    const int conv = lepus_fmt_scan(prefix, sizeof prefix);
+    if (conv == 0 || conv == '%') return;
+    lepus_fmt_emit(conv, prefix, value, 0);
+}
+/**
+ * @brief 将浮点位模式交给格式转换器输出。
+ * @param value 待读取、写入、格式化或输出的值。
+ */
+void lepus_fmt_double(double value)
+{
+    char prefix[32];
+    lepus_i64 bits = 0;
+    const int conv = lepus_fmt_scan(prefix, sizeof prefix);
+    if (conv == 0 || conv == '%') return;
+    memcpy(&bits, &value, 8);
+    lepus_fmt_emit(conv, prefix, bits, 1);
+}
+/**
+ * @brief 按实际长度输出字符串，避免读取结尾之外的字节。
+ * @param value 待读取、写入、格式化或输出的值。
+ */
+void lepus_fmt_string(lepus_i64 value)
+{
+    char prefix[32], spec[48];
+    const int conv = lepus_fmt_scan(prefix, sizeof prefix);
+    if (conv == 0 || conv == '%' || value == 0) return;
+    const char *bytes = lepus_string_bytes(value);
+    const int length = (int)lepus_string_length(value);
+    /* 堆串是「8 字节长度 + 字节」，不一定带结尾 0，所以一律按长度打印。 */
+    snprintf(spec, sizeof spec, "%s.*s", prefix);
+    printf(spec, length, bytes);
+}
+/**
+ * @brief 输出格式串剩余字符并还原转义百分号。
+ */
+void lepus_fmt_finish(void)
+{
+    const char *text = lepus_string_bytes(lepus_fmt_at);
+    size_t at = lepus_fmt_pos;
+    /* 没有占位符的格式串也可能带 `%%`，照样要还原成一个 `%`（运行时 那侧也是这个语义）。 */
+    while (text[at] != '\0')
+    {
+        if (text[at] == '%' && text[at + 1u] == '%')
+        {
+            fputc('%', stdout);
+            at += 2u;
+            continue;
+        }
+        fputc(text[at], stdout);
+        at++;
+    }
+    lepus_fmt_pos = at;
+}
+
+/* 字符串比较 / 子串 / 查找：与 运行时 那侧一样按字节做，串是「8 字节长度 + 字节」。 */
+/**
+ * @brief 按字节序比较字符串，再比较公共前缀后的长度。
+ * @param left 左侧源字符串句柄。
+ * @param right 右侧源字符串句柄。
+ * @return 左串较小、相同或较大分别返回 -1、0、1。
+ */
+lepus_i64 lepus_string_cmp(lepus_i64 left, lepus_i64 right)
+{
+    const size_t a = (size_t)(left == 0 ? 0 : lepus_string_length(left));
+    const size_t b = (size_t)(right == 0 ? 0 : lepus_string_length(right));
+    const size_t n = a < b ? a : b;
+    const int order = n == 0u ? 0 : memcmp(lepus_string_bytes(left), lepus_string_bytes(right), n);
+    if (order != 0) return order < 0 ? -1 : 1;
+    return a == b ? 0 : (a < b ? -1 : 1);
+}
+/**
+ * @brief 截断起点和长度后复制指定字节子串。
+ * @param value 待读取、写入、格式化或输出的值。
+ * @param from 源字节偏移或切片起点。
+ * @param count 请求复制的子串字节数。
+ * @return 新构造的字符串句柄；空字符串仍具有有效的长度前缀。
+ */
+lepus_i64 lepus_string_sub(lepus_i64 value, lepus_i64 from, lepus_i64 count)
+{
+    if (value == 0) return lepus_string_new("", 0u);
+    const lepus_i64 length = lepus_string_length(value);
+    lepus_i64 start = from < 0 ? 0 : from;
+    lepus_i64 take = count < 0 ? 0 : count;
+    if (start > length) start = length;
+    if (take > length - start) take = length - start;
+    return lepus_string_new(lepus_string_bytes(value) + start, (size_t)take);
+}
+/**
+ * @brief 查找子串并返回首次匹配的字节位置。
+ * @param value 待读取、写入、格式化或输出的值。
+ * @param needle 待查找的子字符串句柄。
+ * @return 首次匹配的字节下标；未找到时返回 -1。
+ */
+lepus_i64 lepus_string_pos(lepus_i64 value, lepus_i64 needle)
+{
+    if (value == 0 || needle == 0) return -1;
+    const lepus_i64 length = lepus_string_length(value);
+    const lepus_i64 wanted = lepus_string_length(needle);
+    if (wanted == 0) return 0;
+    for (lepus_i64 at = 0; at + wanted <= length; ++at)
+        if (memcmp(lepus_string_bytes(value) + at, lepus_string_bytes(needle), (size_t)wanted) == 0) return at;
+    return -1;
+}
+/**
+ * @brief 从标准输入逐字节读取完整行，仅移除 LF 及其前面的一个 CR。
+ * @return 新字符串句柄；EOF 返回空串，零字节及内存不足终止执行。
+ */
+lepus_i64 lepus_read_line(void)
+{
+    size_t capacity = 256, length = 0;
+    char *buffer = (char *)malloc(capacity);
+    if (!buffer) lepus_panic("读取标准输入时内存不足");
+    int byte;
+    while ((byte = fgetc(stdin)) != -1 && byte != '\n')
+    {
+        if (byte == 0)
+        {
+            free(buffer);
+            lepus_panic("readLine 不接受零字节，String 不能包含内嵌零字节");
+        }
+        if (length == capacity)
+        {
+            if (capacity > (size_t)-1 / 2) lepus_panic("标准输入行过长");
+            capacity *= 2;
+            char *grown = (char *)realloc(buffer, capacity);
+            if (!grown) { free(buffer); lepus_panic("读取标准输入时内存不足"); }
+            buffer = grown;
+        }
+        buffer[length++] = (char)byte;
+    }
+    if (byte == '\n' && length && buffer[length - 1] == '\r') --length;
+    const lepus_i64 result = lepus_string_new(buffer, length);
+    free(buffer);
+    return result;
+}
+
+/**
+ * @brief 调用 libc 将浮点数格式化为固定小数位文本，不处理尾零。
+ * @param value 浮点值。
+ * @param precision 小数位数，负数使用三位。
+ * @return 新字符串句柄；保留原有 255 字节截断规则，格式化失败终止执行。
+ */
+lepus_i64 lepus_string_fixed(double value, lepus_i64 precision)
+{
+    char buffer[256];
+    if (precision < 0) precision = 3;
+    const int written = snprintf(buffer, sizeof(buffer), "%.*f", (int)precision, value);
+    if (written < 0) lepus_panic("浮点数格式化失败");
+    const size_t length = (size_t)written < sizeof(buffer) ? (size_t)written : sizeof(buffer) - 1;
+    return lepus_string_new(buffer, length);
+}
+/**
+ * @brief 读取一行并解析整数或浮点位模式。
+ * @param wantFloat 非零时解析浮点并返回其位模式。
+ * @return 解析的整数或双精度浮点值的原始位模式。
+ */
+lepus_i64 lepus_read_number(int wantFloat)
+{
+    char buffer[256];
+    if (fgets(buffer, (int)sizeof buffer, stdin) == NULL) return 0;
+    if (wantFloat != 0)
+    {
+        double value = 0.0;
+        if (sscanf(buffer, "%lf", &value) != 1) value = 0.0;
+        lepus_i64 bits = 0;
+        double copy = value;
+        memcpy(&bits, &copy, 8);
+        return bits;
+    }
+    long long value = 0;
+    if (sscanf(buffer, "%lld", &value) != 1) value = 0;
+    return (lepus_i64)value;
+}
+
+/**
+ * @brief 查询标准输入在最近一次读取后是否已经到达 EOF。
+ * @return 到达 EOF 返回一，否则返回零。
+ */
+lepus_i64 lepus_stdin_eof(void) { return feof(stdin) != 0; }
+
+/**
+ * @brief 将整数格式化为十进制字符串。
+ * @param value 待读取、写入、格式化或输出的值。
+ * @return 新构造的字符串句柄；空字符串仍具有有效的长度前缀。
+ */
+lepus_i64 lepus_string_of_int(lepus_i64 value)
+{
+    char buffer[32];
+    snprintf(buffer, sizeof(buffer), "%lld", (long long)value);
+    return lepus_string_new(buffer, strlen(buffer));
+}
+/**
+ * @brief 将双精度浮点格式化为字符串。
+ * @param value 待读取、写入、格式化或输出的值。
+ * @return 新构造的字符串句柄；空字符串仍具有有效的长度前缀。
+ */
+lepus_i64 lepus_string_of_double(double value)
+{
+    char buffer[64];
+    snprintf(buffer, sizeof(buffer), "%g", value);
+    return lepus_string_new(buffer, strlen(buffer));
+}
+
+/**
+ * @brief 为 LLVM 生成器提供不含宿主指针参数的下标检查入口。
+ * @param index 从零开始的字节或元素下标。
+ * @param limit 数组元素数量，不包含该上界。
+ */
+void lepus_check(lepus_i64 index, lepus_i64 limit) { lepus_bounds(index, limit, "下标"); }
+/**
+ * @brief 为 LLVM 生成器提供偏移指针检查入口。
+ * @param address 运行时内存中的字节偏移。
+ */
+void lepus_check_pointer(lepus_i64 address) { lepus_null(address, "访问"); }
+/**
+ * @brief 校验绑定的引用；正常路径直接保留逻辑地址或接口身份，不构造宿主实参。
+ * @param address 引用的逻辑地址或接口身份。
+ * @return 非零的原引用；零值按共享运行时的原始诊断终止。
+ */
+lepus_i64 lepus_require_reference(lepus_i64 address)
+{
+    if (address == 0) lepus_panic("引用尚未绑定有效元素；缺省值请使用 Option");
+    return address;
+}
+/**
+ * @brief 输出整数低八位对应的字节。
+ * @param value 待读取、写入、格式化或输出的值。
+ */
+void lepus_put_char(lepus_i64 value) { fputc((int)(value & 255), stdout); }
+/**
+ * @brief 输出语言错误消息后报告 panic 并退出。
+ * @param message 错误或断言消息；句柄值为零时省略消息。
+ */
+void lepus_abort(lepus_i64 message)
+{
+    if (message)
+    {
+        lepus_fmt_begin(message);
+        lepus_fmt_finish();
+    }
+    lepus_panic("panic");
+}
+/**
+ * @brief 条件为零时输出错误消息并终止。
+ * @param condition 断言条件；零表示失败。
+ * @param message 错误或断言消息；句柄值为零时省略消息。
+ */
+void lepus_assert(lepus_i64 condition, lepus_i64 message)
+{
+    if (!condition) lepus_abort(message);
+}
+/**
+ * @brief 在运行时内存中按字节复制允许重叠的范围。
+ * @param to 目标范围的字节偏移。
+ * @param from 源字节偏移或切片起点。
+ * @param size 内存操作的字节数量。
+ * @return 目标范围的字节偏移。
+ */
+lepus_i64 lepus_copy_bytes(lepus_i64 to, lepus_i64 from, lepus_i64 size)
+{
+    memmove(lepus_host_address(to, (lepus_u64)size), lepus_host_address(from, (lepus_u64)size), (size_t)size);
+    return to;
+}
+/**
+ * @brief 将运行时内存范围填充为指定字节。
+ * @param to 目标范围的字节偏移。
+ * @param byte 要写入的字节值，使用低八位。
+ * @param size 内存操作的字节数量。
+ * @return 目标范围的字节偏移。
+ */
+lepus_i64 lepus_set_bytes(lepus_i64 to, lepus_i64 byte, lepus_i64 size)
+{
+    memset(lepus_host_address(to, (lepus_u64)size), (int)byte, (size_t)size);
+    return to;
+}
+/**
+ * @brief 读取字符串指定位置的无符号字节。
+ * @param value 待读取、写入、格式化或输出的值。
+ * @param index 从零开始的字节或元素下标。
+ * @return 指定位置的无符号字节值。
+ */
+lepus_i64 lepus_string_at(lepus_i64 value, lepus_i64 index) { return (unsigned char)lepus_string_bytes(value)[index]; }
+/**
+ * @brief 写入堆字符串指定位置的一个字节。
+ * @param value 待读取、写入、格式化或输出的值。
+ * @param index 从零开始的字节或元素下标。
+ * @param byte 要写入的字节值，使用低八位。
+ */
+void lepus_string_set(lepus_i64 value, lepus_i64 index, lepus_i64 byte) { lepus_store_u8(value + 8 + index, byte); }
+/**
+ * @brief 按长度拼接两个字符串，保留嵌入的零字节。
+ * @param left 左侧源字符串句柄。
+ * @param right 右侧源字符串句柄。
+ * @return 新构造的字符串句柄；空字符串仍具有有效的长度前缀。
+ */
+lepus_i64 lepus_string_concat(lepus_i64 left, lepus_i64 right)
+{
+    const size_t a = (size_t)lepus_string_length(left), b = (size_t)lepus_string_length(right);
+    const lepus_i64 at = lepus_alloc(a + b + 8);
+    lepus_store_i64(at, (lepus_i64)(a + b));
+    memcpy(lepus_host_address(at + 8, a), lepus_string_bytes(left), a);
+    memcpy(lepus_host_address(at + 8 + a, b), lepus_string_bytes(right), b);
+    return at;
+}
+
+/**
+ * @brief 按共享生命周期协议释放一个拥有值。
+ * @param value 活跃句柄或内存地址。
+ */
+void lepus_owned_drop(lepus_i64 value) { lepus_host_drop(value); }
+/**
+ * @brief 解析函数值的原生标签。
+ * @param function 函数地址或闭包句柄。
+ * @return 静态标签地址。
+ */
+lepus_i64 lepus_function_target(lepus_i64 function) { return lepus_host_function(function, 0); }
+/**
+ * @brief 取得函数值的隐藏捕获环境。
+ * @param function 函数地址或闭包句柄。
+ * @return 环境句柄，没有环境时为零。
+ */
+lepus_i64 lepus_function_environment(lepus_i64 function) { return lepus_host_function(function, 1); }
+/**
+ * @brief 比较实际函数标签与生成的原生入口名称。
+ * @param address 静态标签地址。
+ * @param name 完整函数名称。
+ * @return 相同返回一，否则返回零。
+ */
+lepus_i64 lepus_function_match(lepus_i64 address, const char *name)
+{
+    if (address <= 0 || (size_t)address >= lepus_data_size) return 0;
+    const size_t length = strlen(name);
+    if (length >= lepus_data_size - (size_t)address) return 0;
+    return memcmp(lepus_host_address(address, length + 1), name, length + 1) == 0;
+}

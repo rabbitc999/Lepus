@@ -1,0 +1,8 @@
+/* 立即原生执行前检查成员宿主符号；缺少 C 入口登记时拒绝编译。 */
+void main()
+{
+    GlueDemoRect rect;
+    rect.width = 1;
+    rect.height = 2;
+    std::core::println("{}", rect.missing());
+}

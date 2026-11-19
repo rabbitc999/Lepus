@@ -1,0 +1,117 @@
+"""LEPUS 新建应用工程回归：参数、文件保护与生成工程实际运行。"""
+from compiler_path import compiler_path
+from pathlib import Path
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+from project_temp import tempfile
+import tomllib
+import unittest
+ROOT = Path(__file__).resolve().parents[1]
+COMPILER = compiler_path()
+
+class ProjectTests(unittest.TestCase):
+    """使用真实统一工具链验证工程创建。"""
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix='lepus-project-')
+        self.addCleanup(self.temporary.cleanup)
+        self.directory = Path(self.temporary.name)
+
+    def run_cli(self, *arguments, expected=0, cwd=None, env=None):
+        result = subprocess.run([str(COMPILER), *map(str, arguments)], cwd=cwd or self.directory, capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=180, env=env)
+        self.assertEqual(result.returncode, expected, (arguments, result.stdout, result.stderr))
+        return result
+
+    def test_generated_project(self):
+        """验证新建应用的原生运行、测试发现与 BUILD 产物交付。"""
+        env = dict(os.environ, LEPUS_PYTHON='missing-python-for-project-test')
+        self.run_cli('new', 'hello-lepus', env=env)
+        project = self.directory / 'hello-lepus'
+        self.assertEqual({p.relative_to(project).as_posix() for p in project.rglob('*') if p.is_file() and p.relative_to(project).parts[0] != '.git'}, {'lepus.toml', 'src/main.lep', 'tests/test_main.lep', 'README.md', '.gitignore'})
+        if shutil.which('git'):
+            self.assertTrue((project / '.git/HEAD').is_file())
+        config = tomllib.loads((project / 'lepus.toml').read_text(encoding='utf-8'))
+        self.assertEqual(config['package'], {'name': 'hello-lepus', 'version': '0.1.0'})
+        self.assertEqual(config['lepus']['run'], 'run')
+        self.run_cli('--check', 'src/main.lep', cwd=project)
+        output = self.run_cli('run', 'src/main.lep', cwd=project)
+        self.assertEqual(output.stdout, 'Hello, Lepus!\n')
+        self.assertEqual(output.stderr, '')
+        env = dict(os.environ, LEPUS_PYTHON=sys.executable)
+        report = self.run_cli('test', 'tests', '--json', cwd=project, env=env)
+        self.assertEqual(json.loads(report.stdout)['summary'], {'passed': 1, 'failed': 0, 'skipped': 0})
+        self.run_cli('build', 'src/main.lep', '--out', 'build/main', cwd=project)
+        for suffix in ('.quad', '.data.bin', '.layout', '.svmb'):
+            self.assertFalse((project / ('build/main' + suffix)).exists(), suffix)
+        self.assertTrue((project / 'build/main.ll').is_file())
+        product = project / ('build/main.exe' if os.name == 'nt' else 'build/main')
+        result = subprocess.run([str(product)], cwd=project, capture_output=True, text=True, timeout=30)
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (0, 'Hello, Lepus!\n', ''))
+
+    def test_paths_and_names(self):
+        (self.directory / 'my projects').mkdir()
+        self.run_cli('new', 'my projects/hello app/', '--name', 'Hello_2-app')
+        project = self.directory / 'my projects/hello app'
+        config = tomllib.loads((project / 'lepus.toml').read_text(encoding='utf-8'))
+        self.assertEqual(config['package']['name'], 'Hello_2-app')
+        self.run_cli('new', '--name', 'demo', '--', '-demo')
+        self.run_cli('new', self.directory / 'absolute-app')
+        self.run_cli('new', 'absent-parent/app', expected=1)
+        self.assertFalse((self.directory / 'absent-parent').exists())
+
+    def test_existing_targets(self):
+        for kind in ('empty', 'populated', 'file'):
+            with self.subTest(kind=kind):
+                target = self.directory / kind
+                if kind == 'file':
+                    target.write_bytes(b'keep-file')
+                else:
+                    target.mkdir()
+                    if kind == 'populated':
+                        (target / 'lepus.toml').write_bytes(b'keep-config')
+                self.run_cli('new', target, expected=1)
+                if kind == 'file':
+                    self.assertEqual(target.read_bytes(), b'keep-file')
+                else:
+                    self.assertEqual(list(target.iterdir()), [] if kind == 'empty' else [target / 'lepus.toml'])
+                    if kind == 'populated':
+                        self.assertEqual((target / 'lepus.toml').read_bytes(), b'keep-config')
+        self.run_cli('new', '.', '--name', 'demo', expected=1)
+        self.run_cli('new', '..', '--name', 'demo', expected=1)
+
+    def test_invalid_arguments(self):
+        cases = [(), ('app', 'extra'), ('app', '--unknown'), ('app', '--name'), ('app', '--name', 'one', '--name', 'two'), ('app', '--name', ''), ('app', '--name', '2bad'), ('app', '--name', 'bad/name'), ('app', '--name', 'bad"name'), ('bad name',), ('app', '--check')]
+        for arguments in cases:
+            with self.subTest(arguments=arguments):
+                self.run_cli('new', *arguments, expected=2)
+                self.assertEqual(list(self.directory.iterdir()), [])
+        self.run_cli('new', '--help')
+        self.run_cli('new', '-h')
+        self.assertEqual(list(self.directory.iterdir()), [])
+        self.assertIn('new DIR', self.run_cli('help').stdout)
+
+    def test_symlinks(self):
+        source = self.directory / 'source'
+        source.mkdir()
+        link = self.directory / 'link'
+        dangling = self.directory / 'dangling'
+        try:
+            link.symlink_to(source, target_is_directory=True)
+            dangling.symlink_to(self.directory / 'missing', target_is_directory=True)
+        except OSError as error:
+            self.skipTest(f'当前环境无法创建符号链接：{error}')
+        self.run_cli('new', link, expected=1)
+        self.run_cli('new', dangling, expected=1)
+        self.assertTrue(link.is_symlink())
+        self.assertTrue(dangling.is_symlink())
+        self.assertEqual(list(source.iterdir()), [])
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--lepus', type=Path, default=COMPILER)
+    args, remaining = parser.parse_known_args()
+    COMPILER = args.lepus.resolve()
+    unittest.main(argv=[sys.argv[0], *remaining], verbosity=2)

@@ -1,0 +1,32 @@
+import std::big_number;
+import std::json;
+import std::reflect;
+
+@Reflect
+struct Numbers {
+    BigInteger integer;
+    BigDecimal decimal;
+}
+
+$macro CHECK_IDENTITIES<T>() -> stmt {
+$if (($fields<T>())[0].type != BigInteger) {
+$compile_error("unexpected BigInteger identity");
+}
+$if (($fields<T>())[1].type != BigDecimal) {
+$compile_error("unexpected BigDecimal identity");
+}
+}
+
+void main() {
+    $CHECK_IDENTITIES<Numbers>();
+    Numbers values;
+    values.integer = BigInteger("9000000000000000000") + BigInteger(7);
+    values.decimal = BigDecimal("1.25") + BigDecimal("2.50");
+    Option<BigInteger> boxed = Option<BigInteger>::Value(values.integer);
+    uint64 integerId = getTypeId<BigInteger>();
+    assert(integerId != 0 && integerId == getTypeId<BigInteger>());
+    String encoded = serialize<Numbers>(&values).unwrap();
+    Numbers decoded = deserialize<Numbers>(encoded).unwrap();
+    assert(decoded.integer == boxed.unwrap() && decoded.decimal == values.decimal);
+    println("{} {}", decoded.integer, decoded.decimal);
+}

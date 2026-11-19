@@ -1,0 +1,16 @@
+module std::audio;
+
+#abi("C", "./@LIBRARY@", "lepus_audio_open")
+bool open();
+#abi("C", "./@LIBRARY@", "lepus_audio_load")
+int64 load(String path);
+#abi("C", "./@LIBRARY@", "lepus_audio_play")
+bool play(int64 id);
+#abi("C", "./@LIBRARY@", "lepus_audio_stop")
+bool stop(int64 id);
+#abi("C", "./@LIBRARY@", "lepus_audio_is_playing")
+bool isPlaying(int64 id);
+#abi("C", "./@LIBRARY@", "lepus_audio_unload")
+bool unload(int64 id);
+#abi("C", "./@LIBRARY@", "lepus_audio_close")
+void close();
