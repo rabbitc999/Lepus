@@ -4,6 +4,8 @@
 **English** · [简体中文](../README.md)
 <!-- END LANGUAGE NAVIGATION -->
 
+![Lepus jade rabbit logo](../../images/lepus-logo.png)
+
 Start with a four-line program, run it, and change its message. Variables, branches, and functions enter the story when that small program needs them. Later chapters build on what you have already used rather than asking you to learn the whole language at once.
 
 Short examples explain individual statements and show where each result comes from. Larger programs are explained in functional sections: their inputs, work, results, and error paths. Try changing one input before moving on. Predict the result first, then run the program.

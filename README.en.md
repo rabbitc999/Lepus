@@ -4,6 +4,8 @@
 **English** · [简体中文](README.md)
 <!-- END LANGUAGE NAVIGATION -->
 
+![Lepus jade rabbit logo](doc/images/lepus-logo.png)
+
 Lepus is a statically typed language that compiles to native code. Assignment, argument passing and return copy values by default; sharing requires an explicit reference (`T const&` read-only, `T mut&` writable) or a move, and the language has no pointers or address arithmetic. There is no GC: resources are released deterministically when they leave scope.
 
 Name, type, generic, borrow and lifetime checks all run at compile time, and hygienic macros expand during semantic analysis. Any retains concrete type information; generics and inheritance match on concrete types, known calls may be devirtualized or inlined, and copies may be removed when behavior is preserved.
