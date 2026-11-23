@@ -4,7 +4,7 @@
 [English](README.en.md) · **简体中文**
 <!-- END LANGUAGE NAVIGATION -->
 
-![Lepus 玉兔 Logo](doc/images/lepus-logo.png)
+<img src="doc/images/lepus-logo.png" alt="Lepus 玉兔 Logo" width="120" align="right" />
 
 Lepus 是静态类型语言，编译到原生程序。赋值、传参和返回默认复制值，共享要显式取引用（`T const&` 只读、`T mut&` 可写）或移动；语言里没有指针，也没有地址算术。没有 GC，资源在离开作用域时确定性释放。
 

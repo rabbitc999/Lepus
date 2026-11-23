@@ -4,7 +4,7 @@
 **English** · [简体中文](README.md)
 <!-- END LANGUAGE NAVIGATION -->
 
-![Lepus jade rabbit logo](doc/images/lepus-logo.png)
+<img src="doc/images/lepus-logo.png" alt="Lepus jade rabbit logo" width="120" align="right" />
 
 Lepus is a statically typed language that compiles to native code. Assignment, argument passing and return copy values by default; sharing requires an explicit reference (`T const&` read-only, `T mut&` writable) or a move, and the language has no pointers or address arithmetic. There is no GC: resources are released deterministically when they leave scope.
 
