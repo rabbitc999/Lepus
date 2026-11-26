@@ -493,6 +493,64 @@ using SourceConditionalScopes = Memory::Map<int, SourceConditionalLocals>;
  * @param error 接收误用诊断。
  * @return 模板控制结构有效时返回真。
  */
+/**
+ * @brief 检查 `$match` 的类别分支是否穷尽。
+ *
+ * 分支里出现 `_` 即视为穷尽；否则必须覆盖全部六类片段语法，缺少任何一类都会
+ * 让匹配失败的实参静默展开为空模板，因此这里直接报错。
+ * `_` 之后不允许再有分支，否则后面的分支永远不可达。
+ * @param node 待检查的 `$match` 节点。
+ * @param error 接收失败原因。
+ * @return 分支穷尽且顺序合法时返回真。
+ */
+bool CheckMacroMatchExhaustive(const MNode &node, std::string &error)
+{
+    static const char *const names[] = { "expr", "ident", "type", "block", "stmt", "pattern" };
+    constexpr std::size_t count = sizeof(names) / sizeof(names[0]);
+    std::size_t covered = 0;
+    bool wildcard = false;
+    for (const int branchId : N(node.kids[0]).kids)
+    {
+        const auto &branch = N(branchId);
+        if (branch.s.empty())
+        {
+            if (wildcard)
+            {
+                error = "$match 里只能有一个 `_` 兜底分支";
+                return false;
+            }
+            wildcard = true;
+            continue;
+        }
+        if (wildcard)
+        {
+            error = "`_` 兜底分支之后不能再写类别分支：`" + std::string(branch.s.data(), branch.s.size()) + "` 永远不会被选中";
+            return false;
+        }
+        for (std::size_t index = 0; index < count; ++index)
+            if (branch.s == names[index]) covered |= std::size_t{ 1 } << index;
+    }
+    if (wildcard || covered == (std::size_t{ 1 } << count) - 1) return true;
+    std::string missing;
+    for (std::size_t index = 0; index < count; ++index)
+        if (!(covered & (std::size_t{ 1 } << index)))
+        {
+            if (!missing.empty()) missing += "、";
+            missing += names[index];
+        }
+    error = "$match 的类别分支没有穷尽，缺少 " + missing + "；请补齐这些类别，或在末尾添加 `_ => { ... }` 兜底";
+    return false;
+}
+
+/**
+ * @brief 检查宏模板里的静态结构约束。
+ * @param id 子树根节点。
+ * @param depth 当前遍历深度。
+ * @param inLoop 当前是否位于宏循环内。
+ * @param ordered 接收是否存在需要按顺序展开的编译期控制。
+ * @param error 接收失败原因。
+ * @return 静态结构合法时返回真。
+ */
 bool CheckMacroLoopSyntax(int id, std::size_t depth, bool inLoop, bool &ordered, std::string &error)
 {
     if (id < 0 || depth >= 256) return true;
@@ -506,6 +564,7 @@ bool CheckMacroLoopSyntax(int id, std::size_t depth, bool inLoop, bool &ordered,
     }
     if (node.kind == MNode::MacroFor || node.kind == MNode::MacroFieldFor || node.kind == MNode::MacroWhile)
         return CheckMacroLoopSyntax(node.kids[node.kind == MNode::MacroFor ? 0 : 1], depth + 1, true, ordered, error);
+    if (node.kind == MNode::MacroMatch && !CheckMacroMatchExhaustive(node, error)) return false;
     if (node.kind == MNode::Block && !CheckMacroLoopSyntax(static_cast<int>(node.i), depth + 1, inLoop, ordered, error))
         return false;
     for (const int child : node.kids)
@@ -1159,4 +1218,24 @@ bool PrepareMacroControlsWithLocals(int root, const std::map<std::string, int> &
 bool PrepareMacroControls(int root, const std::map<std::string, int> &inputs, std::string &error)
 {
     return PrepareMacroControlsWithLocals(root, inputs, error, nullptr);
+}
+
+/**
+ * @brief 在宏定义处静态核对所有 `$match` 分支是否穷尽。
+ *
+ * 与展开次数无关：只要模板里出现 `$match`，就必须覆盖全部类别或提供 `_` 兜底，
+ * 否则某些实参会在展开期静默产生空模板。
+ * @param root 宏定义节点。
+ * @param error 接收失败原因。
+ * @return 全部 `$match` 穷尽时返回真。
+ */
+bool CheckMacroDefinitionMatches(int root, std::string &error)
+{
+    if (root < 0) return true;
+    const auto &node = N(root);
+    if (node.kind == MNode::MacroMatch && !CheckMacroMatchExhaustive(node, error)) return false;
+    if (node.kind == MNode::Block && !CheckMacroDefinitionMatches(static_cast<int>(node.i), error)) return false;
+    for (const int child : node.kids)
+        if (!CheckMacroDefinitionMatches(child, error)) return false;
+    return true;
 }

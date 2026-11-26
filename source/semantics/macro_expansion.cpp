@@ -707,6 +707,9 @@ bool ExpandAstMacros()
             hasDefinitions = true;
             g_macroSyntaxFiltering = true;
             std::string error;
+            /* 穷尽性属于定义本身的约束，在注册前检查，不受是否被调用影响。 */
+            if (!CheckMacroDefinitionMatches(id, error))
+                return AddDiagnostic(Memory::String(error.data(), error.size()), g_nodes[id].sourceLine, g_nodes[id].sourceColumn), false;
             if (!registry.add(id, 0, error))
                 return AddDiagnostic(Memory::String(error.data(), error.size()), g_nodes[id].sourceLine, g_nodes[id].sourceColumn), false;
         }

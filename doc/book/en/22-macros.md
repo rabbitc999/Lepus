@@ -967,7 +967,7 @@ CLASSIFY checks a complete identifier before a complete expression. name matches
 
 NUMBER fully matches source spelling with an ECMAScript regular expression. The digits 42 remain in the selected template; noSuchFunction() selects 0, so no call to that function is generated. Unselected templates do not enter final semantic checking. This does not permit executing unresolved names.
 
-$match branches are written category => { ... }, tried in source order, with a trailing _ => { ... } fallback; the categories are ident, expr, type, block, stmt and pattern. The same classification also works in a compile-time $if condition, such as $if (value is ident && condition) { ... } $else { ... }, combined with compile-time booleans through &&, || and !. $regex matches the entire spelling, so abc123 does not match [0-9]+.
+$match branches are written category => { ... }, tried in source order, with a trailing _ => { ... } fallback; the branches must be exhaustive (list every category or end with _) or the macro definition is rejected; the categories are ident, expr, type, block, stmt and pattern. The same classification also works in a compile-time $if condition, such as $if (value is ident && condition) { ... } $else { ... }, combined with compile-time booleans through &&, || and !. $regex matches the entire spelling, so abc123 does not match [0-9]+.
 
 ## 22.20 Groups and Nested Forwarding
 

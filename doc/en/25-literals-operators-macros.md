@@ -314,7 +314,7 @@ _ => {
 }
 ```
 
-`$match (value)` tries its branches in order. Each branch is written `category => { ... }`, and a trailing `_ => { ... }` is the fallback. The supported categories are `expr`, `ident`, `type`, `block`, `stmt` and `pattern`. The same generated parser must consume the whole fragment, and the first matching branch wins; an identifier may also be an expression. With no matching branch and no `_` fallback nothing is emitted. Syntax recognition does not imply valid names or types. Only selected output enters final name, type, capture, borrow and resource checks, while all template syntax must be valid.
+`$match (value)` tries its branches in order. Each branch is written `category => { ... }`, and a trailing `_ => { ... }` is the fallback. The supported categories are `expr`, `ident`, `type`, `block`, `stmt` and `pattern`. The same generated parser must consume the whole fragment, and the first matching branch wins; an identifier may also be an expression. Branches must be exhaustive: either list all six categories or end with `_ => { ... }`, otherwise the macro definition is rejected; a category branch after `_` is reported as unreachable. Syntax recognition does not imply valid names or types. Only selected output enters final name, type, capture, borrow and resource checks, while all template syntax must be valid.
 
 The same classification can appear in `$if` conditions, combined with compile-time constants through `&&`, `||` and `!`:
 

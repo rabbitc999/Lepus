@@ -26,8 +26,8 @@ def main():
         ("stmt", choose, "return 0;", 55),
         ("partial_expr", choose, "1 +", 66),
         ('full_ident', '$match (A) {\nident => {\n1\n}\n_ => {\n0\n}\n}', 'a + b', 0),
-        ('branch_order', '$match (A) {\nexpr => {\n1\n}\nident => {\n2\n}\n}', 'missing', 1),
-        ('ident_category', '$match (A) {\nident => {\n1\n}\nexpr => {\n2\n}\n}', 'a + b', 2),
+        ('branch_order', '$match (A) {\nexpr => {\n1\n}\nident => {\n2\n}\n_ => {\n0\n}\n}', 'missing', 1),
+        ('ident_category', '$match (A) {\nident => {\n1\n}\nexpr => {\n2\n}\n_ => {\n0\n}\n}', 'a + b', 2),
         ('inactive_semantics', '$match (A) {\nident => {\n1\n}\n_ => {\nmissingFunction();\nint64 invalid = unknown;\n0\n}\n}', 'anything', 1),
         ('inactive_closure', '$match (A) {\nident => {\n1\n}\n_ => {\nlet unused = fn(int64 x) { missingFunction(); return x; };\n0\n}\n}', 'anything', 1),
         ('if_category', '$if (A is ident) {\n1\n} $elif (A is expr) {\n2\n} $else {\n0\n}', '1', 2),
@@ -58,15 +58,20 @@ def main():
             source = "$macro CHOOSE(A) -> {\n" + body + "\n}\nvoid main() { int64 result = $CHOOSE(" + argument + "); if (result == " + str(expected) + ") { return; } let __boom = 1 / (result - result); }"
             result = execute(name, source)
             assert result.returncode == 0 and not result.stderr, (name, result.returncode, result.stdout, result.stderr)
-        source = '$macro EMIT(A) -> {\n$match (A) {\nstmt => {\nA;\n}\n}\n}\nvoid main() { $EMIT(return;); }'
+        source = '$macro EMIT(A) -> {\n$match (A) {\nstmt => {\nA;\n}\n_ => {\n}\n}\n}\nvoid main() { $EMIT(return;); }'
         result = execute("emit_statement", source)
         assert result.returncode == 0 and not result.stderr, result.stderr
-        source = '$macro EMPTY(A) -> {\n$match (A) {\nstmt => {\nA;\n}\n}\n}\nvoid main() { $EMPTY(1 +); return; }'
+        source = '$macro EMPTY(A) -> {\n$match (A) {\nstmt => {\nA;\n}\n_ => {\n}\n}\n}\nvoid main() { $EMPTY(1 +); return; }'
         result = execute("no_match", source)
         assert result.returncode == 0 and not result.stderr, result.stderr
         result = execute("invalid_regex", '$macro BAD(A) -> {\n$regex (A is "[") {\n1\n} $else {\n0\n}\n}\nvoid main() { let __boom = $BAD(123); }')
         assert result.returncode != 0 and "宏正则模式非法" in result.stderr, result.stderr
-    print(f"宏语法分类与正则分支：{len(cases) + 3} 项 原生回归通过", flush=True)
+        # 穷尽性在定义处检查：缺类别又无兜底，或兜底之后仍有类别分支，都要报错。
+        result = execute("not_exhaustive", '$macro PART(A) -> expr {\n$match (A) {\nident => {\n1\n}\nexpr => {\n2\n}\n}\n}\nvoid main() { let __boom = $PART(1); }')
+        assert result.returncode != 0 and "没有穷尽" in result.stderr, result.stderr
+        result = execute("wildcard_not_last", '$macro PART(A) -> expr {\n$match (A) {\n_ => {\n9\n}\nident => {\n1\n}\n}\n}\nvoid main() { let __boom = $PART(1); }')
+        assert result.returncode != 0 and "永远不会被选中" in result.stderr, result.stderr
+    print(f"宏语法分类与正则分支：{len(cases) + 5} 项 原生回归通过", flush=True)
 
 
 if __name__ == "__main__":

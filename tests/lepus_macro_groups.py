@@ -21,7 +21,7 @@ def main():
         ("empty_groups", '$macro A[](){} -> {\n0\n}\nvoid main() { let __boom = $A[](){}; }', None),
         ("variadic_empty", '$macro ADD(...xs) -> {\n$for (x in xs) {\nx;\n}\n0\n}\nvoid main() { let __boom = $ADD(); }', None),
         ("for_hygiene", '$macro ADD(mut &total, ...xs) -> {\n$for (x in xs) {\nint64 temp = x; total += temp;\n}\n}\nvoid main() { int64 temp = 100; int64 total = 0; $ADD(total, 1, 2, 3); let __boom = total + temp - 106; }', None),
-        ("for_match", '$macro ADD(mut &total, ...xs) -> {\n$for (x in xs) {\n$match (x) {\nexpr => {\ntotal += x;\n}\n}\n}\n}\nvoid main() { int64 total = 0; $ADD(total, 1, 2); let __boom = total - 3; }', None),
+        ("for_match", '$macro ADD(mut &total, ...xs) -> {\n$for (x in xs) {\n$match (x) {\nexpr => {\ntotal += x;\n}\n_ => {\n}\n}\n}\n}\nvoid main() { int64 total = 0; $ADD(total, 1, 2); let __boom = total - 3; }', None),
         ("variadic_not_last", '$macro A(...xs, y) -> {\n0\n}\nvoid main() { return; }', "末尾"),
         ("for_non_variadic", '$macro A(xs) -> {\n$for (x in xs) {\nx;\n}\n}\nvoid main() { $A(1); return; }', "变长"),
         ("source_line", '$macro LINE -> {\n$line\n}\nvoid main() { let __boom = $LINE - 4; }', None),
