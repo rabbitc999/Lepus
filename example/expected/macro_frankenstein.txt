@@ -1,0 +1,25 @@
+sink: amount=10;
+operator: 15
+forge: 2 alpha=5; beta=z;
+tag: neo
+type=Profile methods=[tag ] interfaces=[program::Tagged ]
+deal1: 42
+deal2: 9
+payloads: 3
+oracle1: ident:core
+oracle2: digits:42
+oracle3: expr:1 + core
+oracle4: type:int64
+oracle5: block:{ yield 1; }
+collatz: 111
+countdown: 53
+check: 42
+double: 42
+concat: 21
+badge: default host: portable cpu: wide-cpu
+flag: 0
+located: 1
+=== frankenstein ===
+[trace/program] core = 7
+[trace/program] core + 1 = 8
+[trace/program] $DOUBLE(core) = 14

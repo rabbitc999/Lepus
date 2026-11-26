@@ -1,0 +1,264 @@
+/* macro_frankenstein.lep —— 把卫生 AST 宏的全部机关缝进一份定义：
+ * 四种结果类别、语法分类、正则、变长与成组重复、宏泛型、编译期循环与状态、
+ * 字段/变体/方法/接口元数据、$implement、标识符拼接、构建选项与目标条件。
+ * 目标不是教会你宏，而是把宏的每根神经都接上电，看它还能不能站起来。
+ *
+ * 加 -B ABSURD 重新运行，可以看 $build 条件把 badge 换成 absurd。 */
+
+$replace DOUBLE(x) ((x) + (x))
+
+interface Sink { String sink(); }
+interface Tagged { String tag(); }
+interface Counted { int64 bits(); }
+
+enum Ticket { Single, Double(int64 amount), Triple(int64 amount, String tag) };
+
+/* 模式参数 + 块参数：调用方传入的 pattern 直接进 match，块里可以使用载荷名字。 */
+$macro DEAL(value: value, p: pattern, body: block) -> expr {
+match (value) {
+    p => { yield body; }
+    _ => { yield -1; }
+}
+}
+
+/* 语法分类：ident / type / block / expr 依次判定，expr 分支里再按正则分流。 */
+$macro ORACLE(x) -> expr {
+$match (x is ident) {
+    "ident:" + $stringify(x)
+} $else (is type) {
+    "type:" + $stringify(x)
+} $else (is block) {
+    "block:" + $stringify(x)
+} $else (is expr) {
+$regex (x is "[0-9]+") {
+    "digits:" + $stringify(x)
+} $else {
+    "expr:" + $stringify(x)
+}
+} $else {
+    "other"
+}
+}
+
+/* 纯编译期状态机：$loop + $if + $set + $compile_assert，运行期只剩一个整数常量。 */
+$macro COLLATZ(n) -> expr {
+$let value = n;
+$let steps = 0;
+$loop {
+    $if (value == 1) { $break; }
+    $if (value % 2 == 0) {
+        $set value = value / 2;
+    } $else {
+        $set value = 3 * value + 1;
+    }
+    $set steps = steps + 1;
+    $compile_assert(steps < 400, "collatz diverged");
+}
+steps
+}
+
+/* $while + $continue：跳过 2 的倒数和。 */
+$macro COUNTDOWN(n) -> expr {
+$let index = n;
+$let total = 0;
+$while (index > 0) {
+    $if (index == 2) {
+        $set index = index - 1;
+        $continue;
+    }
+    $set total = total + index;
+    $set index = index - 1;
+}
+total
+}
+
+/* $let + f-string + $compile_assert：编译期算术与常量消息。 */
+$macro CHECK_MATH() -> expr {
+$let answer = 6 * 7;
+$compile_assert(answer == 42, f"expected 42, got {answer}");
+answer
+}
+
+/* 枚举元数据：变体与载荷两层 $for，生成一个返回载荷总数的普通函数。 */
+$macro PAYLOADS<T>(name: ident) -> item {
+int64 name() {
+    $let total = 0;
+    $for (variant in $variants<T>()) {
+        $for (payload in variant.payloads) {
+            $set total = total + 1;
+        }
+    }
+    $compile_assert(total == 3, "ticket should carry three payloads");
+    return total;
+}
+}
+
+/* 成员宏：$implement 两个接口，按字段元数据生成方法，顺手让 + 可用。 */
+$macro SINK<T>(sinkName: ident, addName: ident) -> member {
+$implement Sink;
+$implement Add<int64, int64>;
+String sinkName() {
+    String out = "";
+    $for (field in $fields<T>()) {
+        $if (field.type == int64) {
+            out += field.name + "=" + $member(self, field).toString() + ";";
+        } $elif (field.type == String) {
+            out += field.name + "=\"" + $member(self, field) + "\";";
+        } $else {
+            out += field.name + "=?;";
+        }
+    }
+    return out;
+}
+int64 addName(int64 other) { return self.amount + other; }
+}
+
+/* 成组重复：两个变长组按位配对，同时生成字段、计数方法和描述方法。 */
+$macro FORGE<T>(bitsName: ident, describeName: ident)(...names: ident)[...types: type] -> member {
+$implement Counted;
+$for ((name, fieldType) in (names, types)) {
+    fieldType name;
+}
+int64 bitsName() { return $count(names); }
+String describeName() {
+    String out = "";
+    $for ((name, fieldType) in (names, types)) {
+        out += $stringify(name) + "=" + self.name.toString() + ";";
+    }
+    return out;
+}
+}
+
+/* 方法、接口、类型三类元数据：$methods / $interfaces / $type 全查一遍。 */
+$macro AUDIT<T>(name: ident) -> item {
+void name() {
+    $let methods = "";
+    $for (method in $methods<T>()) {
+        $set methods = methods + method.name + " ";
+    }
+    $let faces = "";
+    $for (face in $interfaces<T>()) {
+        $set faces = faces + face.name + " ";
+    }
+    println("type={} methods=[{}] interfaces=[{}]", ($type<T>()).name, methods, faces);
+}
+}
+
+/* 标识符拼接：$concat 生成的是普通标识符，可以当函数名调用。 */
+$macro CALL(prefix, value) -> expr {
+    ($concat(prefix, _number))(value)
+}
+
+/* 构建选项与目标条件：$build / $system / $cpu 都只能读编译期常量。 */
+$macro BADGE() -> expr {
+$if ($build[ABSURD]) {
+    "absurd"
+} $else {
+    "default"
+}
+}
+
+$macro HOST() -> expr {
+$if ($system == "win" || $system == "linux" || $system == "mac") {
+    "portable"
+} $else {
+    "unknown"
+}
+}
+
+$macro WIDE_CPU() -> expr {
+$if ($cpu == "amd64" || $cpu == "arm64") {
+    "wide-cpu"
+} $else {
+    "other-cpu"
+}
+}
+
+/* 来源常量：$file / $line / $module 在 f-string 里落成运行期字符串。 */
+$macro WHERE(fnName: ident) -> item {
+String fnName() {
+    return f"{$file}:{$line}:{$module}";
+}
+}
+
+/* 编译期插值生成语句。 */
+$macro BANNER(text) -> stmt {
+$let line = f"=== {text} ==="
+println("{}", line);
+}
+
+/* 变长语句宏：$count 做编译期约束，$stringify 保留每个实参的原文。 */
+$macro TRACE(...xs: expr) -> stmt {
+$compile_assert($count(xs) == 3, "trace demo expects three expressions");
+$for (x in xs) {
+    println("[trace/{}] {} = {}", $module, $stringify(x), x);
+}
+}
+
+/* 未选中的 $if 分支连语义检查都不做，$compile_error 不会触发。 */
+$if ($build[NEVER]) {
+    $compile_error("this branch must never be selected");
+}
+
+struct Voucher {
+    int64 amount;
+    $SINK<Voucher>(sink, leftAdd);
+}
+
+struct Gadget {
+    $FORGE<Gadget>(bits, describe)(alpha, beta)[int64, String];
+}
+
+struct Profile : Tagged {
+    int64 id;
+    String name;
+    String tag() { return name; }
+}
+
+$WHERE(where_am_i);
+$PAYLOADS<Ticket>(payloads);
+$AUDIT<Profile>(audit_profile);
+
+int64 triple_number(int64 value) { return value * 3; }
+
+void main() {
+    Voucher voucher;
+    voucher.amount = 10;
+    println("sink: {}", voucher.sink());
+    println("operator: {}", voucher + 5);
+
+    Gadget gadget;
+    gadget.alpha = 5;
+    gadget.beta = "z";
+    println("forge: {} {}", gadget.bits(), gadget.describe());
+
+    Profile profile;
+    profile.id = 1;
+    profile.name = "neo";
+    println("tag: {}", profile.tag());
+    audit_profile();
+
+    println("deal1: {}", $DEAL(Ticket::Double(21), Ticket::Double(amount), { yield amount * 2; }));
+    println("deal2: {}", $DEAL(2, 1 | 2, { yield 9; }));
+    println("payloads: {}", payloads());
+
+    int64 core = 7;
+    println("oracle1: {}", $ORACLE(core));
+    println("oracle2: {}", $ORACLE(42));
+    println("oracle3: {}", $ORACLE(1 + core));
+    println("oracle4: {}", $ORACLE(int64));
+    println("oracle5: {}", $ORACLE({ yield 1; }));
+
+    println("collatz: {}", $COLLATZ(27));
+    println("countdown: {}", $COUNTDOWN(10));
+    println("check: {}", $CHECK_MATH());
+    println("double: {}", $DOUBLE(21));
+    println("concat: {}", $CALL(triple, 7));
+
+    println("badge: {} host: {} cpu: {}", $BADGE(), $HOST(), $WIDE_CPU());
+    println("flag: {}", $build[ABSURD]);
+    println("located: {}", len(where_am_i()) > 0);
+
+    $BANNER("frankenstein");
+    $TRACE(core,core + 1,$DOUBLE(core));
+}
