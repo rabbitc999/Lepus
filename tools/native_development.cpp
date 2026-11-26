@@ -706,6 +706,9 @@ std::vector<Token> lex(const std::string &s, bool trivia = false, bool multiline
             }
             else if (std::isalpha((unsigned char)c) || c == '_' || c == '$')
             {
+                // `$!FLAG` 写出布尔构建标志：`!` 让它在语法层是普通变量名，词法层把
+                // `$!` 与名称切成一个词，着色和悬停都按构建标志处理。
+                if (c == '$' && i < s.size() && s[i] == '!') ++i;
                 while (i < s.size() && (std::isalnum((unsigned char)s[i]) || s[i] == '_' || s[i] == '$'))
                     ++i;
             }
@@ -726,6 +729,15 @@ std::vector<Token> lex(const std::string &s, bool trivia = false, bool multiline
     return out;
 }
 
+/**
+ * @brief 判断词法项是否 `$!名称` 形式的布尔构建标志。
+ * @param word 词法项的原文。
+ * @retval `$!` 后跟合法标识符时为真。
+ */
+bool buildFlag(const std::string &word)
+{
+    return word.size() > 2 && starts(word, "$!") && identifier(word.substr(2));
+}
 /**
  * @brief 查找括号组对应的结束位置。
  * @param t 待扫描的词法项数组。
@@ -1239,7 +1251,10 @@ std::vector<Binding> scanBindings(const std::string &s,
         if ((t[i].word == "struct" || t[i].word == "enum" || t[i].word == "interface" || t[i].word == "opcode") && identifier(t[i + 1].word))
             types.insert(t[i + 1].word);
     for (size_t i = 1; i < t.size(); ++i)
-        if (t[i].word == "<" && identifier(t[i - 1].word))
+    {
+        // `$!FLAG` 整词是一个词法项：紧跟在它后面的名称属于构建标志，不能当作类型或绑定。
+        const bool afterBuildFlag = buildFlag(t[i - 1].word);
+        if (t[i].word == "<" && !afterBuildFlag && identifier(t[i - 1].word))
         {
             const auto end = groupEnd(t, i, "<", ">");
             size_t following = end;
@@ -1252,6 +1267,7 @@ std::vector<Binding> scanBindings(const std::string &s,
             for (size_t j = i + 1; j + 1 < end; ++j)
                 if (identifier(t[j].word) && (t[j - 1].word == "<" || t[j - 1].word == ",")) types.insert(t[j].word);
         }
+    }
     /* 返回类型后置的具名函数 `fn name<类型参数>(形参) [-> 返回类型] { }` 没有前置类型，
      * 上面的类型引导扫描认不出来。只有 fn 后紧跟非关键字标识符、且能找到形参左括号时
      * 才登记函数绑定：这样不会把 `fn (形参) { }` / `fn move(形参) { }` 的 lambda、
@@ -1285,7 +1301,7 @@ std::vector<Binding> scanBindings(const std::string &s,
     {
         if (!types.count(t[i].word) && !(i + 1 < t.size() && t[i + 1].word == "::"))
             continue;
-        if (i && (t[i - 1].word == "struct" || t[i - 1].word == "enum" || t[i - 1].word == "interface" || t[i - 1].word == "opcode" || t[i - 1].word == "."))
+        if (i && (t[i - 1].word == "struct" || t[i - 1].word == "enum" || t[i - 1].word == "interface" || t[i - 1].word == "opcode" || t[i - 1].word == "." || buildFlag(t[i - 1].word)))
             continue;
         size_t j = i + 1;
         while (j + 1 < t.size() && t[j].word == "::")
@@ -3308,6 +3324,47 @@ fs::path lockProject(const fs::path &requested, bool offline, bool refresh,
     return path;
 }
 /**
+ * @brief 判断当前宿主能否完成原生构建，即是否找到 clang 驱动。
+ * @param compilerDirectory 编译器所在目录，也是工程工具链的查找起点。
+ * @return 显式指定的驱动或可执行文件存在时返回真。
+ */
+bool clangAvailable(const fs::path &compilerDirectory)
+{
+    const char *environment = std::getenv("LEPUS_LLVM_CLANG");
+    const fs::path wanted = environment && *environment ? fs::path(environment) : fs::path();
+#ifdef _WIN32
+    const auto executable = [](const fs::path &path) {
+        std::error_code error;
+        return fs::is_regular_file(path, error);
+    };
+    const auto named = [&](const fs::path &directory) { return executable(directory / "clang.exe") || executable(directory / "clang"); };
+#else
+    const auto executable = [](const fs::path &path) {
+        std::error_code error;
+        auto status = fs::status(path, error);
+        return !error && (fs::is_regular_file(status) || fs::is_symlink(status)) && access(path.c_str(), X_OK) == 0;
+    };
+    const auto named = [&](const fs::path &directory) { return executable(directory / "clang"); };
+#endif
+    if (!wanted.empty()) return executable(wanted);
+    if (const char *path = std::getenv("PATH"))
+    {
+        std::string directories(path);
+        std::size_t begin = 0;
+        for (;;)
+        {
+            const auto end = directories.find(static_cast<char>(fs::path::preferred_separator), begin);
+            if (named(fs::path(directories.substr(begin, end == std::string::npos ? std::string::npos : end - begin)))) return true;
+            if (end == std::string::npos) break;
+            begin = end + 1;
+        }
+    }
+    for (const auto *relative : { "build/dependencies/llvm/toolchain/bin", "llvm/bin", "build/dependencies/llvm/static-sdk/bin" })
+        if (named(compilerDirectory / relative))
+            return true;
+    return false;
+}
+/**
  * @brief 执行依赖安装、校验或查询命令。
  * @param argc 命令行参数数量。
  * @param argv 命令行参数指针数组。
@@ -3426,6 +3483,7 @@ int tests(int argc, char **argv, const fs::path &compiler)
         }
         auto begin = std::chrono::steady_clock::now();
         std::string status = "passed", message;
+        bool missing = false;
         try
         {
             auto sidecar = file;
@@ -3457,40 +3515,61 @@ int tests(int argc, char **argv, const fs::path &compiler)
                         double(p->asInt().value_or(int64_t(timeout))));
                 if (!std::isfinite(limit) || limit <= 0)
                     throw std::runtime_error("测试超时必须为正数");
-                int expected = int(field(config, "expected_exit").asInt().value_or(0));
-                std::string first;
-                bool hasFirst = false;
-                for (auto &mode : std::vector<std::string>{ backend })
+                // 当前版本只有 checked 原生执行路径；宿主没有 clang 时无法运行用例，
+                // 改为语义检查并标记跳过，避免把“缺工具链”误报成用例失败。
+                if (!clangAvailable(compiler.parent_path()))
                 {
-                    auto output = temp.path / ("test-" + mode
-#ifdef _WIN32
-                                               + ".exe"
-#endif
-                                  );
-                    std::vector<std::string> command;
-                    command = { compiler.u8string(), "interpret", file.u8string(), "--out", output.u8string(), "--" };
+                    // 语义检查不运行程序；用例的 --timeout 只约束执行，检查保留至少一分钟上限。
+                    const double checkingLimit = std::max(limit, 60.0);
+                    std::vector<std::string> command{ compiler.u8string(), "check", file.u8string() };
                     command.insert(command.end(), arguments.begin(), arguments.end());
-                    auto result = execute(command, fs::current_path(), "", limit);
-                    result.output =
-                        std::regex_replace(result.output, std::regex("\r\n"), "\n");
-                    if (result.code != expected || result.error.find("timed out") != std::string::npos)
-                        throw std::runtime_error(mode + " 退出码 " + std::to_string(result.code) + "：" + result.error);
-                    auto expectedFile = file;
-                    expectedFile.replace_extension(".expected");
-                    if (fs::exists(expectedFile) && result.output != std::regex_replace(read(expectedFile), std::regex("\r\n"), "\n"))
-                        throw std::runtime_error(mode + " 输出不符合 " + expectedFile.u8string() + "：" + result.output);
-                    if (!result.error.empty())
-                        throw std::runtime_error(mode + " 标准错误非空：" + result.error);
-                    if (hasFirst && result.output != first)
-                        throw std::runtime_error("各执行方式输出不同");
-                    first = result.output;
-                    hasFirst = true;
+                    auto result = execute(command, fs::current_path(), "", checkingLimit);
+                    if (result.code != 0)
+                        throw std::runtime_error("check 退出码 " + std::to_string(result.code) + "：" + result.error);
+                    missing = true;
+                }
+                else
+                {
+                    int expected = int(field(config, "expected_exit").asInt().value_or(0));
+                    std::string first;
+                    bool hasFirst = false;
+                    for (auto &mode : std::vector<std::string>{ backend })
+                    {
+                        auto output = temp.path / ("test-" + mode
+#ifdef _WIN32
+                                                   + ".exe"
+#endif
+                                      );
+                        std::vector<std::string> command;
+                        command = { compiler.u8string(), "interpret", file.u8string(), "--out", output.u8string(), "--" };
+                        command.insert(command.end(), arguments.begin(), arguments.end());
+                        auto result = execute(command, fs::current_path(), "", limit);
+                        result.output =
+                            std::regex_replace(result.output, std::regex("\r\n"), "\n");
+                        if (result.code != expected || result.error.find("timed out") != std::string::npos)
+                            throw std::runtime_error(mode + " 退出码 " + std::to_string(result.code) + "：" + result.error);
+                        auto expectedFile = file;
+                        expectedFile.replace_extension(".expected");
+                        if (fs::exists(expectedFile) && result.output != std::regex_replace(read(expectedFile), std::regex("\r\n"), "\n"))
+                            throw std::runtime_error(mode + " 输出不符合 " + expectedFile.u8string() + "：" + result.output);
+                        if (!result.error.empty())
+                            throw std::runtime_error(mode + " 标准错误非空：" + result.error);
+                        if (hasFirst && result.output != first)
+                            throw std::runtime_error("各执行方式输出不同");
+                        first = result.output;
+                        hasFirst = true;
+                    }
                 }
             }
         } catch (const std::exception &e)
         {
             status = "failed";
             message = e.what();
+        }
+        if (missing && status == "passed")
+        {
+            status = "skipped";
+            message = "宿主没有 clang，未运行程序；已完成语义检查";
         }
         int duration = int(std::chrono::duration_cast<std::chrono::milliseconds>(
                                std::chrono::steady_clock::now() - begin)
@@ -3560,6 +3639,11 @@ class Server
     std::mutex stateMutex;
     std::map<std::string, std::shared_ptr<std::atomic<bool>>> requests, diagnostics;
     std::map<std::string, std::string> requestDocuments;
+    /**
+     * @brief 每个已登记请求的序列号与所属文档；编辑只取消登记在该文档序号之前的请求。
+     */
+    std::map<std::string, std::pair<std::string, uint64_t>> requestOrder;
+    uint64_t requestSerial = 0;
     std::array<std::unique_ptr<LspQueue>, 6> queues;
     std::shared_ptr<std::atomic<uint64_t>> revision = std::make_shared<std::atomic<uint64_t>>(0);
     uint64_t snapshotRevision = 0;
@@ -4075,7 +4159,7 @@ class Server
         if (!ephemeralAnalysis && cache->persistent)
         {
             const auto validReport = [&](const J &entry) {
-                if (integer(get(entry, "schema")) != 4 || integer(get(entry, "language"), -1) != language ||
+                if (integer(get(entry, "schema")) != 5 || integer(get(entry, "language"), -1) != language ||
                     str(entry, "input") != input || str(entry, "graph") != analysisGraph ||
                     !get(entry, "dependencies").asObject() || !get(entry, "report").find("diagnostics")) return false;
                 for (const auto &dependency : get(entry, "dependencies").asObject()->members())
@@ -4171,7 +4255,7 @@ class Server
                 }
                 cache->dependencies(u, dependencyUris);
                 if (interrupted()) return J();
-                const auto entry = object({ { "schema", 4 }, { "language", language }, { "input", input }, { "graph", analysisGraph }, { "dependencies", J(std::move(hashes)) }, { "report", report } });
+                const auto entry = object({ { "schema", 5 }, { "language", language }, { "input", input }, { "graph", analysisGraph }, { "dependencies", J(std::move(hashes)) }, { "report", report } });
                 cache->rememberReport(u, entry, textSnapshot);
                 cache->save(saved, entry);
             }
@@ -4264,16 +4348,22 @@ class Server
         const auto &raw = activeUnit ? activeUnit->raw : unit->raw;
         const auto &t = activeUnit ? activeUnit->tokens : unit->tokens;
         std::map<size_t, std::pair<int, int>> classes;
+        // `$!FLAG` 的着色身份与名称无关：同名变量、类型、形参和卫生局部都不得改写它。
+        std::set<size_t> buildFlags;
         std::set<std::string> generic;
         std::set<std::string> known = types;
         known.insert(primitives.begin(), primitives.end());
-        for (size_t i = 0; i + 1 < t.size(); ++i)
+        // 区间按半开 [a, b) 保存，颜色必须落在词法项起点，不能看「偏移是否落在词内」。
+        for (size_t i = 0; i < t.size(); ++i)
         {
+            if (!identifier(t[i].word) && !buildFlag(t[i].word)) continue;
             if (t[i].word == "struct" || t[i].word == "enum" || t[i].word == "interface" || t[i].word == "opcode" || t[i].word == "type")
             {
+                if (i + 1 == t.size()) continue;
                 size_t name = i + 1;
-                if (t[i].word == "type" && t[name].word == "alias" && name + 1 < t.size() && identifier(t[name + 1].word))
+                if (t[i].word == "type" && name + 1 < t.size() && t[name].word == "alias" && identifier(t[name + 1].word))
                     ++name;
+                if (!identifier(t[name].word)) continue;
                 known.insert(t[name].word);
                 classes[t[name].a] = { 1, 1 };
                 if (name + 1 < t.size() && t[name + 1].word == "<")
@@ -4287,11 +4377,11 @@ class Server
                         }
                 }
             }
-            if (t[i + 1].word == "<" && identifier(t[i].word))
+            if (i + 1 < t.size() && t[i + 1].word == "<" && identifier(t[i].word))
             {
                 auto end = groupEnd(t, i + 1, "<", ">");
                 // `fn` 前缀的具名函数没有前置类型，也要把名字后的类型参数当作声明着色。
-                if (end < t.size() && t[end].word == "(" && i &&
+                if (end < t.size() && t[end].word == "(" && i && !buildFlag(t[i - 1].word) &&
                     (known.count(t[i - 1].word) || t[i - 1].word == ")" ||
                      t[i - 1].word == ">" || t[i - 1].word == "fn"))
                 {
@@ -4305,6 +4395,9 @@ class Server
             }
         }
         known.insert(generic.begin(), generic.end());
+        // 先记下构建标志自身的起点，随后遍历原始词法项时直接命中标志身份。
+        for (const auto &token : t)
+            if (buildFlag(token.word)) buildFlags.insert(token.a);
         auto vars = bindings(s, known);
         std::map<std::string, std::vector<const Binding *>> names;
         for (const auto &binding : vars) names[binding.name].push_back(&binding);
@@ -4348,7 +4441,14 @@ class Server
             auto prev = index ? t[index - 1].word : "",
                  next = index + 1 < t.size() ? t[index + 1].word : "";
             const auto macro = macroTokens.find(token.a);
-            if (macro != macroTokens.end() && token.kind != 8 && token.kind != 9)
+            if (buildFlags.count(token.a))
+            {
+                // `$!FLAG` 与 `$system`、`$cpu` 同为编译期常量，着色成只读字面量；
+                // 它优先于同名的宏形参、循环变量和卫生局部，保证标志身份不被遮蔽。
+                kind = 4;
+                mod = 2;
+            }
+            else if (macro != macroTokens.end() && token.kind != 8 && token.kind != 9)
             {
                 kind = macro->second.kind;
                 mod = macro->second.modifiers;
@@ -5094,12 +5194,23 @@ class Server
                     if (function) description += "\n\n退出范围：当前函数 `" + function->name + "`；目标返回类型：`" + function->type + "`";
                     return object({ { "contents", markup(description) }, { "range", range(s, part.a, part.b) } });
                 }
-        auto token =
-            std::find_if(tokens.begin(), tokens.end(), [&](const Token &t) {
-                return t.a <= cursor && cursor <= t.b && (identifier(t.word) || (starts(t.word, "$") && identifier(t.word.substr(1))));
-            });
+        // 词法项按半开区间 [a, b) 保存。光标通常落在词内；光标恰好停在词尾时（编辑器
+        // 常见的位置）仍属于紧邻的那个词，但词首优先，避免相邻两个词都被命中。
+        const auto named = [](const Token &t) {
+            return identifier(t.word) || (starts(t.word, "$") && identifier(t.word.substr(1))) || buildFlag(t.word);
+        };
+        auto token = std::find_if(tokens.begin(), tokens.end(), [&](const Token &t) { return t.a <= cursor && cursor < t.b && named(t); });
+        if (token == tokens.end())
+            token = std::find_if(tokens.begin(), tokens.end(), [&](const Token &t) { return cursor && t.b == cursor && named(t); });
         if (token == tokens.end())
             return J();
+        if (buildFlag(token->word))
+        {
+            // `$!FLAG` 不求值同名宏或变量，悬停直接说明它是布尔构建标志。
+            const std::string description = "```lepus\n" + token->word + " bool\n```\n\n" +
+                LEPUS_TEXT("布尔构建标志：由 `-B 名称` 或工程清单 `build.build_option` 定义，定义过为 true、否则为 false。名称只查找标志、不是同名变量，也不支持点或连字符。");
+            return object({ { "contents", markup(description) }, { "range", range(s, token->a, token->b) } });
+        }
         auto name = expression(s, token->b);
         auto entries = matching(records, name, s, cursor, types);
         auto scope = scopeAt(s, cursor);
@@ -5252,16 +5363,17 @@ class Server
         return total;
     }
     /**
-     * @brief 编辑或关闭文档时取消旧请求，及时释放其排队快照。
+     * @brief 编辑或关闭文档时取消**编辑前**发出的旧请求，及时释放其排队快照。
      * @param u 文档 URI。
+     * @param since 该文档在编辑后的请求序列号；只取消比它更早的请求，编辑后新发起的请求照常处理。
      */
-    void cancelDocumentRequests(const std::string &u)
+    void cancelDocumentRequests(const std::string &u, uint64_t since)
     {
         std::vector<std::shared_ptr<std::atomic<bool>>> flags;
         {
             std::lock_guard<std::mutex> lock(stateMutex);
-            for (const auto &entry : requestDocuments)
-                if (entry.second == u)
+            for (const auto &entry : requestOrder)
+                if (entry.second.first == u && entry.second.second < since)
                 {
                     const auto found = requests.find(entry.first);
                     if (found != requests.end())
@@ -5336,6 +5448,8 @@ class Server
             std::lock_guard<std::mutex> lock(stateMutex);
             requests[key] = cancelled;
             requestDocuments[key] = u;
+            // 每个请求按登记顺序取序号，编辑只取消序号更小的旧请求。
+            requestOrder[key] = { u, ++requestSerial };
             snapshot = documents;
             folders = roots;
             version = revision->load();
@@ -5347,60 +5461,55 @@ class Server
         const auto bytes = snapshotBytes(snapshot);
         queues[lane]->post("", [this, message, id, key, u, cancelled, version, snapshot = std::move(snapshot), folders = std::move(folders)] {
       J response;
+      bool earlyCancelled = false;
       try {
         if (cancelled->load()) throw std::runtime_error("请求已取消");
         Server view(*this, snapshot, folders, version);
         view.requestCancelled=cancelled;
         const auto result = view.request(str(message,"method"),get(message,"params"));
         {
-          std::lock_guard<std::mutex> lock(stateMutex);
-          if (str(message, "method") != "lepus/standardSource")
-          {
-              if (str(message, "method") == "lepus/expandMacro" || str(message, "method") == "lepus/expandTypeAlias" || str(message, "method") == "textDocument/inlayHint" || str(message, "method") == "textDocument/codeAction")
-              {
-                  if (revision->load() != version) cancelled->store(true);
-              }
-              if (u.empty() || str(message, "method") == "textDocument/rename" || str(message, "method") == "textDocument/references")
-              {
-                  if (revision->load() != version) cancelled->store(true);
-              }
-              else
-              {
-                  const auto current = documents.find(u);
-                  const auto previous = snapshot.find(u);
-                  if (current == documents.end() || previous == snapshot.end() || current->second != previous->second) cancelled->store(true);
-                  for (const auto &dependency : view.usedDocuments)
-                  {
-                      const auto before = snapshot.find(dependency);
-                      const auto after = documents.find(dependency);
-                      if (before != snapshot.end())
-                      {
-                          if (after == documents.end() || before->second->first != after->second->first) cancelled->store(true);
-                      }
-                      else if (after != documents.end())
-                      {
-                          try
-                          {
-                              if (cache->source(pathOf(dependency)) != after->second->first) cancelled->store(true);
-                          } catch (...) { cancelled->store(true); }
-                      }
-                  }
-              }
-          }
+            std::lock_guard<std::mutex> lock(stateMutex);
+            if (str(message, "method") != "lepus/standardSource")
+            {
+                if (str(message, "method") == "lepus/expandMacro" || str(message, "method") == "lepus/expandTypeAlias" || str(message, "method") == "textDocument/inlayHint" || str(message, "method") == "textDocument/codeAction")
+                {
+                    if (revision->load() != version) cancelled->store(true);
+                }
+                if (u.empty() || str(message, "method") == "textDocument/rename" || str(message, "method") == "textDocument/references")
+                {
+                    if (revision->load() != version) cancelled->store(true);
+                }
+                else
+                {
+                    const auto current = documents.find(u);
+                    const auto previous = snapshot.find(u);
+                    if (current == documents.end() || previous == snapshot.end() || current->second != previous->second)
+                    {
+                        cancelled->store(true);
+                    }
+                }
+            }
         }
         response = object({{"jsonrpc","2.0"},{"id",id},{"result",result}});
       } catch (const std::exception &e) {
+        earlyCancelled = cancelled->load();
         response = object({{"jsonrpc","2.0"},{"id",id},{"error",object({{"code",-32602},{"message",e.what()}})}});
       }
-      if (cancelled->load()) {
+      // 调度器替换或取消排队项时也会先置位标记再调用收尾；已经算出的结果照常回送，
+      // 只有标记前的早期查询明确失败时才改报取消，避免把有效响应换成 -32800。
+      if (earlyCancelled && cancelled->load()) {
         ++cache->cancelled;
         response = object({{"jsonrpc","2.0"},{"id",id},{"error",object({{"code",-32800},{"message","请求已取消或文档已更新"}})}});
       }
       send(response);
-      std::lock_guard<std::mutex> lock(stateMutex); requests.erase(key); requestDocuments.erase(key); }, cancelled, 0, bytes);
+      std::lock_guard<std::mutex> lock(stateMutex); requests.erase(key); requestDocuments.erase(key); requestOrder.erase(key); }, cancelled, 0, bytes);
     }
     /**
      * @brief 结束会话并收尾异步工作。
+     *
+     * 客户端关闭输入后仍可能有请求正在计算；直接停止队列会把它们的取消标记置位，
+     * 已经算完或即将算完的结果就被改报成取消。这里先让诊断排队任务退出，再给正在
+     * 运行的提示请求留出完成时间，最后才停止队列并丢弃仍未开始的请求。
      */
     void finish()
     {
@@ -5408,15 +5517,16 @@ class Server
             std::lock_guard<std::mutex> lock(stateMutex);
             for (auto &entry : diagnostics) entry.second->store(true);
         }
-        if (queues[5]) queues[5]->stop();
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-        for (size_t i = 0; i < 5; ++i)
+        // 提示通道先排空：已提交的请求按顺序算完并回送结果，不再中途取消。
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+        for (size_t i = 0; i < 6; ++i)
             if (queues[i]) queues[i]->drainUntil(deadline);
         {
             std::lock_guard<std::mutex> lock(stateMutex);
+            // 超时仍未完成的请求才标记取消，保证进程能结束。
             for (auto &entry : requests) entry.second->store(true);
         }
-        for (size_t i = 0; i < 5; ++i)
+        for (size_t i = 0; i < 6; ++i)
             if (queues[i]) queues[i]->stop();
     }
 
@@ -5588,8 +5698,11 @@ public:
                 auto u = str(item, "uri");
                 if (method == "textDocument/didClose")
                 {
+                    uint64_t before = 0;
                     {
                         std::lock_guard<std::mutex> lock(stateMutex);
+                        // 关闭沿用现有语义：该文档尚未完成的请求一律取消。
+                        before = ++requestSerial;
                         documents.erase(u);
                         ++*revision;
                         if (diagnostics.count(u))
@@ -5598,7 +5711,7 @@ public:
                             diagnostics.erase(u);
                         }
                     }
-                    cancelDocumentRequests(u);
+                    cancelDocumentRequests(u, before);
                     notify("textDocument/publishDiagnostics",
                            object({ { "uri", u }, { "diagnostics", A{} } }));
                     cache->forget(u);
@@ -5607,8 +5720,11 @@ public:
                 }
                 else if (method == "textDocument/didOpen" || method == "textDocument/didChange" || method == "textDocument/didSave")
                 {
+                    uint64_t before = 0;
                     {
                         std::lock_guard<std::mutex> lock(stateMutex);
+                        // 先取编辑前序号：编辑后新发出的请求不能被这次编辑的收尾取消。
+                        before = ++requestSerial;
                         if (method == "textDocument/didOpen")
                             documents[u] = std::make_shared<const Document>(str(item, "text"), get(item, "version"));
                         else if (method == "textDocument/didChange")
@@ -5636,7 +5752,7 @@ public:
                             documents[u] = std::make_shared<const Document>(str(params, "text"), documents.count(u) ? documents[u]->second : J());
                         ++*revision;
                     }
-                    if (method != "textDocument/didSave") cancelDocumentRequests(u);
+                    if (method != "textDocument/didSave") cancelDocumentRequests(u, before);
                     if (documents.count(u) && !pathOf(u).empty())
                         scheduleDiagnostics(u, method == "textDocument/didSave" ? 0 : 250);
                     for (const auto &dependent : cache->dependents(u))

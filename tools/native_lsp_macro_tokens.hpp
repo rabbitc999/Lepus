@@ -79,6 +79,8 @@ std::map<size_t, LspMacroToken> lspMacroTokens(const std::string &text, const st
             result[token.a] = { token.b, 7, 0 };
         else if (values.count(word))
             result[token.a] = { token.b, 4, 2 };
+        else if (buildFlag(word))
+            result[token.a] = { token.b, 4, 2 };
         else if (!inside && starts(word, "$") && identifier(word.substr(1)))
             result[token.a] = { token.b, 6, 0 };
         if (!inside) continue;

@@ -274,10 +274,16 @@ void McDocument::setText(std::string text)
         if (!declarationLine[line])
             for (std::size_t at = 0; at < code.size(); ++at)
             {
-                if (code[at] != '$' || at + 1 == code.size() || !nameStart(code[at + 1])) continue;
+                // `$!A` 是布尔构建标志，不是宏调用：跳过 `!`，避免把 A 当成宏名。
+                if (code[at] != '$' || at + 1 == code.size()
+                    || (!nameStart(code[at + 1]) && !(code[at + 1] == '!' && at + 2 < code.size() && nameStart(code[at + 2]))))
+                    continue;
                 const auto begin = at++;
+                if (code[at] == '!') ++at;
                 while (at < code.size() && namePart(code[at])) ++at;
                 const auto name = code.substr(begin + 1, at - begin - 1);
+                // 构建标志与宏定义重名时不报告实参不匹配：`$!A` 只查询标志，不求值宏。
+                if (code[begin + 1] == '!') continue;
                 std::vector<std::size_t> candidates;
                 for (std::size_t index = 0; index < macros_.size(); ++index)
                     if (macros_[index].name == name) candidates.push_back(index);
@@ -430,7 +436,7 @@ std::vector<CompletionItem> McDocument::completion(Position) const
         { "$regex", "keyword", "原文正则完整匹配", "$regex (value is \"[0-9]+\") {\n}" },
         { "$system", "keyword", "目标操作系统名称", "$system" },
         { "$cpu", "keyword", "目标 CPU 架构名称", "$cpu" },
-        { "$build", "keyword", "查询布尔构建标志是否存在", "$build[\"NAME\"]" },
+        { "$!NAME", "keyword", "查询布尔构建标志是否存在（-B 或清单 build_option 定义）", "$!NAME" },
         { "$module", "keyword", "调用处模块名称", "$module" },
     };
     for (const auto &macro : macros_)

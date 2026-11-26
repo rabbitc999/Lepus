@@ -218,7 +218,7 @@ Input checks cover object format, width, architecture and archive-member bounds;
 ```csharp
 void main() {
     println("system={}, cpu={}", $system, $cpu);
-    println("A={}, B={}", $build[A], $build["B"]);
+    println("A={}, B={}", $!A, $!B);
 }
 ```
 
@@ -229,9 +229,9 @@ void main() {
 build_option = ["A", "B"]
 ```
 
-CLI and manifest names form a union. Names are case sensitive; duplicates have no additional effect. `$build[A]` and `$build["A"]` are equivalent: the bare name is a literal flag name, not a variable lookup. Defined names yield `true`, undefined names yield `false`. Values such as `-BA=false`, numbers and strings are unsupported. Names must be nonempty and contain only ASCII letters, digits, underscores, dots or hyphens; quote names containing dots or hyphens.
+CLI and manifest names form a union. Names are case sensitive; duplicates have no additional effect. Boolean build flags are always written `$!NAME`, where the name is the flag itself and is never looked up as a variable. Defined names yield `true`, undefined names yield `false`. Values such as `-BA=false`, numbers and strings are unsupported. Names must be nonempty; `-B` names may contain ASCII letters, digits, underscores, dots or hyphens, while manifest names must also be writable as `$!NAME` and therefore use identifier characters only. There is no `$build[...]` form and `$build` is no longer a built-in name.
 
-Inside macro templates, use `$if ($build[A]) { ... }` or `$if ($system == "win") { ... }` to select code. Ordinary expressions can read the same constants. `$build` accepts a literal name or string, not a computed runtime key. `-I` keeps its module-search-directory meaning.
+Inside macro templates, use `$if ($!A) { ... }` or `$if ($system == "win") { ... }` to select code. Ordinary expressions can read `$!NAME`, `$system` and `$cpu` directly; no computed runtime key is accepted. `-I` keeps its module-search-directory meaning.
 
 
 
@@ -264,8 +264,8 @@ search_paths = ["src"]
 | assembly_sources, assembly_includes | Assembly sources and include paths; an explicitly supplied CLI list replaces the corresponding manifest list |
 | objects, libraries | Extra objects and libraries; an explicitly supplied CLI list replaces the corresponding manifest list |
 | search_paths | Appends module and import lookup paths, resolved from the manifest directory |
-| build_option | Boolean flag names, unioned with -B definitions and queried with $build[name] |
+| build_option | Boolean flag names, unioned with -B definitions and queried as $!NAME |
 
-Bare library names without dots or path separators are resolved by the linker; other paths are relative to the manifest. CPU tuning does not change the target architecture reported by `$cpu`. `$system`, `$cpu` and `$build` become constants during macro expansion; see [Chapter 22](../book/en/22-macros.md).
+Bare library names without dots or path separators are resolved by the linker; other paths are relative to the manifest. CPU tuning does not change the target architecture reported by `$cpu`. `$!NAME`, `$system` and `$cpu` become constants during macro expansion; see [Chapter 22](../book/en/22-macros.md).
 
 The static LLVM variant uses its embedded backend and rejects `--llvm` and `[build] llvm`. External toolchain paths are supported by the external variant. A manifest cannot switch a static compiler to an external backend. Consult the [LLVM build reference](38-build.md) for the complete interface and [Chapter 11](../book/en/11-modules-projects.md) for entry and search rules.

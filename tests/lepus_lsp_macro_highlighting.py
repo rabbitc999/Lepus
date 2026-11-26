@@ -29,7 +29,11 @@ def main():
     println("$for var in A }");
 }
 }
-void main(){int64 A=1;int64 var=2;$example(A)(var);let __boom = A+var;}
+void main(){int64 A=1;int64 var=2;$example(A)(var);let __boom = A+var;
+    $if (!$!A) {
+        println("{}", $!A);
+    }
+}
 '''
     with tempfile.TemporaryDirectory(prefix='lepus-macro-colors-') as folder:
         root = Path(folder)
@@ -70,6 +74,8 @@ void main(){int64 A=1;int64 var=2;$example(A)(var);let __boom = A+var;}
             assert token('A=1', outside)[1:] == ('variable', 1)
             assert token('var=2', outside)[1:] == ('variable', 1)
             assert token('$example', outside)[1] == 'function'
+            # `$!A` 是构建标志，宏参数同名也不能把它着色成参数。
+            assert token('$!A)')[1:] == ('variable', 2)
             assert not (root / 'main.lep').exists()
         finally:
             server.close()

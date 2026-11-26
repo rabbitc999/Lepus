@@ -90,7 +90,21 @@ async function main() {
   for (const line of [1, 2]) {
     assert(!calls[line].some(token => token.scopes.includes('entity.name.function.macro.lepus')));
   }
+  // `$!AAA` 是布尔构建标志：`$!` 是标点，名称着成常量，且不抢 `$macro` 的指令与名称着色。
+  const flags = ['$macro buildFlagOnly() -> {', '$if ($!AAA) {', '"$!AAA" // $!AAA', '}'];
+  const flagTokens = tokenize(flags);
+  const flagAt = (line, name) => flagTokens[line].find(token => {
+    const at = flags[line].indexOf(name);
+    return token.startIndex <= at && at < token.endIndex;
+  }).scopes;
+  assert(flagAt(1, '$!').includes('punctuation.definition.variable.lepus'));
+  assert(flagAt(1, 'AAA').includes('constant.language.build.lepus'));
+  assert(!flagAt(1, 'AAA').includes('entity.name.function.macro.lepus'));
+  assert(flagTokens[1].find(token => token.startIndex <= flags[1].indexOf('$if')).scopes.includes('keyword.control.macro.lepus'));
+  assert(flagTokens[2].find(token => token.startIndex <= flags[2].indexOf('$!AAA')).scopes.includes('string.quoted.double.lepus'));
+  assert(flagTokens[2].find(token => token.startIndex <= flags[2].lastIndexOf('$!AAA')).scopes.includes('comment.line.double-slash.lepus'));
+  assert(flagTokens[0].find(token => token.startIndex <= flags[0].indexOf('buildFlagOnly')).scopes.includes('entity.name.function.macro.lepus'));
   registry.dispose();
-  console.log('真实 TextMate 宏头、独立宏体、两组循环、卫生局部变量、字符串/注释保护与结束恢复高亮通过。');
+  console.log('真实 TextMate 宏头、独立宏体、两组循环、卫生局部变量、字符串/注释保护、结束恢复与 $!构建标志高亮通过。');
 }
 main().catch((error) => { console.error(error); process.exitCode = 1; });

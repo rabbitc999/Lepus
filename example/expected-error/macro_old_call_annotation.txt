@@ -1,1 +1,1 @@
-lepus: example/samples-error/macro_old_call_annotation.lep 第 2 行第 1 列：$build 需要单个字符串或名称下标，例如 $build[DEBUG]
+lepus: example/samples-error/macro_old_call_annotation.lep 第 2 行第 1 列：布尔构建标志需要名称，例如 $!DEBUG

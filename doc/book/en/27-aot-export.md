@@ -59,9 +59,9 @@ search_paths = ["src"]
 | assembly_sources, assembly_includes | Assembly sources and include paths; an explicitly supplied CLI list replaces the corresponding manifest list |
 | objects, libraries | Extra objects and libraries; an explicitly supplied CLI list replaces the corresponding manifest list |
 | search_paths | Appends module and import lookup paths, resolved from the manifest directory |
-| build_option | Boolean flag names, unioned with -B definitions and queried with $build[name] |
+| build_option | Boolean flag names, unioned with -B definitions and queried as $!NAME |
 
-Bare library names without dots or path separators are resolved by the linker; other paths are relative to the manifest. CPU tuning does not change the target architecture reported by `$cpu`. `$system`, `$cpu` and `$build` become constants during macro expansion; see [Chapter 22](22-macros.md).
+Bare library names without dots or path separators are resolved by the linker; other paths are relative to the manifest. CPU tuning does not change the target architecture reported by `$cpu`. `$!NAME`, `$system` and `$cpu` become constants during macro expansion; see [Chapter 22](22-macros.md).
 
 The static LLVM variant uses its embedded backend and rejects `--llvm` and `[build] llvm`. External toolchain paths are supported by the external variant. A manifest cannot switch a static compiler to an external backend. Consult the [LLVM build reference](../../en/38-build.md) for the complete interface and [Chapter 11](11-modules-projects.md) for entry and search rules.
 

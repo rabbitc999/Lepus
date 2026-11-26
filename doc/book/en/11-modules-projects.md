@@ -80,7 +80,7 @@ lepus build
 lepus run -B EXTRA
 ```
 
-The first three use the configured `main`. The last additionally defines `EXTRA`. Query manifest flags `A`, `B` and CLI flag `EXTRA` with `$build[A]`, `$build["B"]` and `$build[EXTRA]`; an undefined name yields `false`. Options express boolean presence only. They cannot carry values or cancel a manifest definition with `false`. Chapter 22 uses them in macro `$if` conditions.
+The first three use the configured `main`. The last additionally defines `EXTRA`. Query manifest flags `A`, `B` and CLI flag `EXTRA` with `$!A`, `$!B` and `$!EXTRA`; an undefined name yields `false`. Options express boolean presence only. They cannot carry values or cancel a manifest definition with `false`. Chapter 22 uses them in macro `$if` conditions.
 
 `search_paths` supplements both module and import lookup; `[lepus] include_paths` and `import_paths` configure them separately. CLI `-I`, `--include-path` and `--import-dir` select directories; `-B` defines boolean flags. Search paths append and flag names form a union. Chapter 27 explains the distinct override rules for targets, outputs and linker inputs.
 

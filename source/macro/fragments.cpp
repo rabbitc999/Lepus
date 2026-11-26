@@ -236,7 +236,10 @@ bool SourceFragments::capture(Memory::String &source, std::string &error, std::s
             while (at < text.size() && identifierChar(text[at])) ++at;
         }
         const auto endName = at;
-        const auto name = shortBuild ? std::string("build") : text.substr(nameBegin, endName - nameBegin);
+        /* `$!NAME` 是布尔构建标志查询的唯一写法：按名称解析标志、不是同名变量。
+         * 本层先改写成编译器内部名 `$__build[NAME]` 再交给语法与语义；`__` 前缀是
+         * 编译器/宿主协议，不作为用户宏，也不再对外提供 `$build` 这种写法。 */
+        const auto name = shortBuild ? std::string("__build") : text.substr(nameBegin, endName - nameBegin);
         if (!shortBuild && text.compare(at, 2, "@!") == 0)
         {
             at += 2;
@@ -307,7 +310,7 @@ bool SourceFragments::capture(Memory::String &source, std::string &error, std::s
             at = next;
         }
         invocations_.push_back(std::move(call));
-        if (shortBuild) output += "$build";
+        if (shortBuild) output += "$__build";
         else output.append(text, start, endName - start);
         if (anchored)
         {

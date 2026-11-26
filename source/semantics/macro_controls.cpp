@@ -7,16 +7,18 @@
 bool ExpandAstMacroEnvironment(int id, Memory::String &error)
 {
     auto &node = g_nodes[id];
-    const bool indexed = node.kind == MNode::Index && node.kids.size() == 2 && N(node.kids[0]).kind == MNode::MacroCall && N(node.kids[0]).s == "build";
+    // `$__build` 只由片段层从 `$!名称` 改写而来，源码里不提供 `$build` 写法。
+    constexpr const char *buildName = "__build";
+    const bool indexed = node.kind == MNode::Index && node.kids.size() == 2 && N(node.kids[0]).kind == MNode::MacroCall && N(node.kids[0]).s == buildName;
     const int callId = indexed ? node.kids[0] : id;
     const auto call = N(callId);
-    if (call.kind != MNode::MacroCall || (call.s != "system" && call.s != "cpu" && call.s != "build")) return false;
-    if (call.kids.size() != 1 || (call.s != "build" && call.kids[0] >= 0))
+    if (call.kind != MNode::MacroCall || (call.s != "system" && call.s != "cpu" && call.s != buildName)) return false;
+    if (call.kids.size() != 1 || (call.s != buildName && call.kids[0] >= 0))
     {
         error = "目标与构建标志内建宏不接受调用参数或泛型参数";
         return true;
     }
-    if (call.s == "build")
+    if (call.s == buildName)
     {
         int keyId = indexed ? node.kids[1] : -1;
         if (!indexed && call.kids[0] >= 0)
@@ -32,19 +34,17 @@ bool ExpandAstMacroEnvironment(int id, Memory::String &error)
                 }
             }
         }
-        if (keyId < 0) { error = "$build 需要单个字符串或名称下标，例如 $build[DEBUG]"; return true; }
+        if (keyId < 0) { error = "布尔构建标志需要名称，例如 $!DEBUG"; return true; }
         const auto key = N(keyId);
-        Memory::String name;
-        if (key.kind == MNode::Var) name = key.s;
-        else if (key.kind == MNode::Str)
+        // 下标按名称解析标志，不是同名变量；名称必须能写成 `$!名称`，因此只接受标识符字符。
+        if (key.kind != MNode::Var) { error = "布尔构建标志只接受名称，例如 $!DEBUG"; return true; }
+        const Memory::String name = key.s;
+        if (name.empty() || !(std::isalpha(static_cast<unsigned char>(name[0])) || name[0] == '_')
+            || !std::all_of(name.begin() + 1, name.end(), [](char c) { return std::isalnum(static_cast<unsigned char>(c)) || c == '_'; }))
         {
-            std::string decoded, problem;
-            if (!lepus_literal::decodeString(std::string_view(key.s.data(), key.s.size()), decoded, problem))
-            { error = Memory::String(problem.c_str()); return true; }
-            name = Memory::String(decoded.data(), decoded.size());
+            error = "布尔构建标志的名称只能用 `$!名称` 能写出的标识符";
+            return true;
         }
-        else { error = "$build 下标只接受字符串字面量或标志名称"; return true; }
-        if (!lepus_build::validBuildOption(name)) { error = "$build 标志名称无效，不支持赋值"; return true; }
         node.kind = MNode::Bool;
         node.i = lepus_build::macroEnvironment().flags.count(name) != 0;
         node.s.clear();

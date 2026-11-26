@@ -169,7 +169,8 @@ def main():
         if isinstance(target, list):
             target = target[0]
         assert target['targetUri'].endswith('/std/math.lep'), target
-        expected_macros = {'$MIN', '$MAX', '$CLAMP', '$Equal', '$Hash', '$Clone', '$Debug'}
+        # std::macro 的公开宏；`__` 前缀的内建辅助宏不进入补全。
+        expected_macros = {'$MIN', '$MAX', '$CLAMP', '$IN_RANGE', '$BOX', '$Equal', '$Hash', '$Clone', '$Debug'}
         assert labels(macro) == expected_macros and len(responses[macro]) == len(expected_macros), responses[macro]
         destination = responses[function]
         if isinstance(destination, list):

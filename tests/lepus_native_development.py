@@ -8,7 +8,16 @@ from project_temp import tempfile
 import shutil
 import sys
 ROOT = Path(__file__).resolve().parents[1]
-COMPILER = compiler_path()
+COMPILER = Path(os.environ.get('LEPUS_TEST_COMPILER', compiler_path())).resolve()
+
+
+def native_runtime_available(compiler):
+    """判断宿主是否有 clang，决定 lepus test 能真正运行程序还是只做语义检查。"""
+    clang = os.environ.get('LEPUS_LLVM_CLANG') or shutil.which('clang')
+    if clang:
+        return Path(clang).is_file()
+    return any((compiler.parent / relative / 'clang.exe').is_file() for relative in
+               ('build/dependencies/llvm/toolchain/bin', 'llvm/bin', 'build/dependencies/llvm/static-sdk/bin'))
 
 def main():
     """禁用解释器并用真实 JSON-RPC 校验全部迁移入口。"""
@@ -43,16 +52,23 @@ def main():
         skipped.write_text('invalid', encoding='utf-8')
         skipped.with_suffix('.test.toml').write_text('skip="测试跳过"\n', encoding='utf-8')
         report = json.loads(run('test', root, '--json').stdout)
-        assert report['summary'] == dict(passed=1, failed=0, skipped=1), report
+        # 没有 clang 时无法构建原生程序，lepus test 只做语义检查并标记跳过。
+        runnable = native_runtime_available(COMPILER)
+        expected_pass = 'passed' if runnable else 'skipped'
+        assert report['summary'] == dict(passed=int(runnable), failed=0, skipped=1 + int(not runnable)), report
+        assert report['tests'][0]['status'] == expected_pass, report
         timed = root / 'test_timeout.lep'
         timed.write_text('void main(){while(true){}}', encoding='utf-8')
-        report = json.loads(run('test', timed, '--timeout', '0.1', '--json', code=1).stdout)
-        assert 'timed out' in report['tests'][0]['message'], report
+        report = json.loads(run('test', timed, '--timeout', '0.1', '--json', code=0 if not runnable else 1).stdout)
+        if runnable:
+            assert 'timed out' in report['tests'][0]['message'], report
+        else:
+            assert report['tests'][0]['status'] == 'skipped', report
         module = root / 'calc.lep'
         module.write_text('module calc;\n/// 整数文档\nint64 add(int64 a,int64 b=1){return a+b;}\n/// 浮点文档\nfloat64 add(float64 a,float64 b){return a+b;}\nstruct Box { /// 字段文档\nint64 value; };\n', encoding='utf-8')
         included = root / 'macros.lep'
         included.write_text('module macros;\n/// 包含宏文档\n$macro TWICE(x) -> {\n((x)+(x))\n}\n', encoding='utf-8')
-        text = 'import calc;\nimport std::math;\nimport macros;\n/// 平方宏文档\n$macro SQUARE(x) -> {\nx*x\n}\n/// 单行宏文档\n$replace PLUS(x,y) x+y\n$macro ANSWER -> {\n3\n}\nvoid main(){\n    String emoji="😀";\n    calc::Box box;\n    box.value;\n    calc::add(1,2);\n    std::math::sqrt(4.0);\n    int64 answer=$SQUARE($TWICE(2))+$PLUS(1,2)+$ANSWER;\n    let __boom = answer;\n}\n'
+        text = 'import calc;\nimport std::math;\nimport macros;\n/// 平方宏文档\n$macro SQUARE(x) -> {\nx*x\n}\n/// 单行宏文档\n$replace PLUS(x,y) x+y\n$macro ANSWER -> {\n3\n}\nvoid main(){\n    String emoji="😀";\n    calc::Box box;\n    box.value;\n    calc::add(1,2);\n    std::math::sqrt(4.0);\n    int64 answer=$SQUARE($TWICE(2))+$PLUS(1,2)+$ANSWER;\n    let enabled = $!FEATURE_A && !$!FEATURE_A;\n    let __boom = answer;\n}\n'
         source.write_text(text, encoding='utf-8')
 
         def position(at):
@@ -77,6 +93,7 @@ def main():
         query(12, 'textDocument/hover', 'sqrt', 2)
         query(14, 'textDocument/hover', '$ANSWER;', 3)
         query(15, 'textDocument/signatureHelp', '$PLUS(1,', len('$PLUS(1,'))
+        query(16, 'textDocument/hover', '$!FEATURE_A &&', 1)
         requests.extend([dict(id=13, method='shutdown'), dict(method='exit')])
         payload = b''
         for request in requests:
@@ -115,6 +132,19 @@ def main():
         assert '$macro ANSWER' in value(14)['contents']['value']
         assert value(15)['activeParameter'] == 1 and 'PLUS' in value(15)['signatures'][0]['label']
         assert value(10)['data'] and any((item['name'] == 'SQUARE' for item in value(11)))
+        flag = '$!FEATURE_A &&'
+        flag_at = text.index(flag)
+        legend = value(1)['capabilities']['semanticTokensProvider']['legend']
+        tokens = {}
+        line = column = 0
+        for offset in range(0, len(value(10)['data']), 5):
+            delta_line, delta_column, length, kind, modifiers = value(10)['data'][offset:offset + 5]
+            line += delta_line
+            column = delta_column if delta_line else column + delta_column
+            tokens[(line, column)] = (length, legend['tokenTypes'][kind], modifiers)
+        point = position(flag_at)
+        assert tokens[(point['line'], point['character'])] == (len('$!FEATURE_A'), 'variable', 2)
+        assert 'build' in value(16)['contents']['value'], value(16)
         assert 'sqrt' in value(12)['contents']['value']
         assert value(9)['format'] == 'json' and value(9)['mappings'], value(9)
     print('原生 LSP、宏提示/展开、格式化、依赖锁定及测试/超时全部通过，无外部 Python。')

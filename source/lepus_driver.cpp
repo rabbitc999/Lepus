@@ -1,4 +1,4 @@
-/* ============================================================
+﻿/* ============================================================
  * 入口：lepus <源文件.lep> [--out 前缀] [--debug]
  *                           [-I 目录] [--raw] [--deps]
  *
@@ -172,7 +172,7 @@ void PrintUsage(std::FILE *out)
              "  --cpu 名称             目标 CPU；也可在 lepus.toml 的 [build] 表配置\n",
              "  --allocator malloc|pool  选择系统 malloc 或内存池；缺省 malloc\n",
              "  --hard-realtime        禁止整个编译单元使用反射\n",
-             "  -B 名称                定义布尔构建标志，可重复；$build[名称] 查询\n",
+             "  -B 名称                定义布尔构建标志，可重复；用 $!名称 查询\n",
              "  --import-dir 目录      追加 import 搜索目录\n",
              "  --include-path 目录    追加模块搜索目录\n",
              "  --incremental          跨次复用模块预处理与完整编译产物\n",

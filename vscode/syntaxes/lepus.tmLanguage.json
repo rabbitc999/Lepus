@@ -113,8 +113,11 @@
           "match": "^\\s*\\$for\\b"
         },
         {
-          "name": "variable.language.lepus",
-          "match": "\\$![A-Za-z_][A-Za-z0-9_]*\\b"
+          "match": "(\\$!)([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "punctuation.definition.variable.lepus" },
+            "2": { "name": "constant.language.build.lepus" }
+          }
         },
         {
           "name": "variable.language.lepus",

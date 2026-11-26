@@ -39,7 +39,7 @@ struct Selected : SelectValue {
 }
 
 $macro OPTION_MATCH() -> expr {
-$let same = $!FEATURE_A == $build[FEATURE_A]
+$let same = $!FEATURE_A
 same
 }
 
@@ -61,6 +61,6 @@ void main() {
     assert(item.value() == expected);
     assert($ACTIVE_LEVEL() == expected);
     assert($OPTION_MATCH());
-    assert($!FEATURE_A == $build["FEATURE_A"]);
+    assert($!FEATURE_A == $!FEATURE_A);
     println("{}", item.value());
 }

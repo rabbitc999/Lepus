@@ -1,1 +1,1 @@
-void main() { println("{}", $build); }
+void main() { println("{}", $build[A]); }

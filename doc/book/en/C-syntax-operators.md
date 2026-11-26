@@ -205,6 +205,6 @@ These forms require sufficient name or type context and preserve type, ownership
 | Else on for and for-in | Loop variables remain visible; empty input uses ordinary value defaults, invalid references cannot be read and borrowed fallback elements need a copyable snapshot | 5 |
 | Standalone loop without a semicolon | Statement, function-end and value-block-end positions; expressions retain the enclosing statement terminator | 5 |
 | Counters scoped by the loop | Avoid blocks used solely to scope counters; retain scopes needed for cleanup and borrow lifetimes | 5, 9 |
-| Target and build-option constants | $system and $cpu describe the target; -B and TOML build_option define boolean presence queried with $build[name] or a string literal | 22 |
+| Target and build-option constants | $system and $cpu describe the target; -B and TOML build_option define boolean presence, written and queried as $!NAME | 22 |
 
 See [Appendix D](D-language-limitations.md) for implementation budgets, conservative analysis and platform boundaries.

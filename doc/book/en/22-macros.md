@@ -910,7 +910,7 @@ $module gives the module name. $file and $line provide source information for di
 ```csharp
 void main() {
     println("system={}, cpu={}", $system, $cpu);
-    println("A={}, B={}", $build[A], $build["B"]);
+    println("A={}, B={}", $!A, $!B);
 }
 ```
 
@@ -921,9 +921,9 @@ void main() {
 build_option = ["A", "B"]
 ```
 
-CLI and manifest names form a union. Names are case sensitive; duplicates have no additional effect. `$build[A]` and `$build["A"]` are equivalent: the bare name is a literal flag name, not a variable lookup. Defined names yield `true`, undefined names yield `false`. Values such as `-BA=false`, numbers and strings are unsupported. Names must be nonempty and contain only ASCII letters, digits, underscores, dots or hyphens; quote names containing dots or hyphens.
+CLI and manifest names form a union. Names are case sensitive; duplicates have no additional effect. Boolean build flags are always written `$!NAME`, where the name is the flag itself and is never looked up as a variable. Defined names yield `true`, undefined names yield `false`. Values such as `-BA=false`, numbers and strings are unsupported. Names must be nonempty; `-B` names may contain ASCII letters, digits, underscores, dots or hyphens, while manifest names must also be writable as `$!NAME` and therefore use identifier characters only. There is no `$build[...]` form and `$build` is no longer a built-in name.
 
-Inside macro templates, use $if ($build[A]) { ... } or $if ($system == "win") { ... } to select code. Ordinary expressions can read the same constants. `$build` accepts a literal name or string, not a computed runtime key. `-I` keeps its module-search-directory meaning.
+Inside macro templates, use $if ($!A) { ... } or $if ($system == "win") { ... } to select code. Ordinary expressions can read `$!NAME`, `$system` and `$cpu` directly; no computed runtime key is accepted. `-I` keeps its module-search-directory meaning.
 
 See [Chapter 11](11-modules-projects.md) for the complete manifest context and [Chapter 27](27-aot-export.md) for target and link settings.
 
@@ -1560,7 +1560,7 @@ At 1, `$break;` ends the expansion loop. The even branch divides the value and u
 
 ### Conditional compilation outside macros
 
-Outside macros, `$if` keeps the first matching branch. An inner condition is evaluated only after its outer branch is selected. `$!A` is shorthand for `$build[A]`, and `-BA` enables A. The four branches define the same function name, with only the selected definition entering semantic checks.
+Outside macros, `$if` keeps the first matching branch. An inner condition is evaluated only after its outer branch is selected. `$!A` is the only spelling for a boolean build flag; `-BA` or the manifest `build_option` list enables A. The four branches define the same function name, with only the selected definition entering semantic checks.
 
 ```lepus
 $if ($!A) {

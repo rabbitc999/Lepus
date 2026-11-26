@@ -11,7 +11,7 @@ J lspMacroSignature(const std::string &text, size_t cursor, const std::vector<Re
     auto tokens = lex(text);
     for (auto token = tokens.rbegin(); token != tokens.rend(); ++token)
     {
-        if (token->a >= cursor || !starts(token->word, "$") || token->word.size() < 2) continue;
+        if (token->a >= cursor || !starts(token->word, "$") || token->word.size() < 2 || buildFlag(token->word)) continue;
         size_t invocation = token->b;
         std::string name = token->word.substr(1);
         for (;;)

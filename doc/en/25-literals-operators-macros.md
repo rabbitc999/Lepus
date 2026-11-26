@@ -655,7 +655,7 @@ void main() {
 ```csharp
 void main() {
     println("system={}, cpu={}", $system, $cpu);
-    println("A={}, B={}", $build[A], $build["B"]);
+    println("A={}, B={}", $!A, $!B);
 }
 ```
 
@@ -666,6 +666,6 @@ void main() {
 build_option = ["A", "B"]
 ```
 
-CLI and manifest names form a union. Names are case sensitive; duplicates have no additional effect. `$!A`, `$build[A]`, and `$build["A"]` are equivalent: the bare name is a literal flag name, not a variable lookup. Defined names yield `true`, undefined names yield `false`. Values such as `-BA=false`, numbers and strings are unsupported. Names must be nonempty and contain only ASCII letters, digits, underscores, dots or hyphens; quote names containing dots or hyphens.
+CLI and manifest names form a union. Names are case sensitive; duplicates have no additional effect. Boolean build flags are always written `$!NAME`, where the name is the flag itself and is never looked up as a variable. Defined names yield `true`, undefined names yield `false`. Values such as `-BA=false`, numbers and strings are unsupported. Names defined with `-B` may contain ASCII letters, digits, underscores, dots or hyphens; manifest names must also be writable as `$!NAME`, so they use identifier characters only. There is no `$build[...]` form and `$build` is no longer a built-in name, so it can be declared as an ordinary macro.
 
-Inside macro templates, use `$if ($build[A]) { ... }` or `$if ($system == "win") { ... }` to select code. Ordinary expressions can read the same constants. `$build` accepts a literal name or string, not a computed runtime key. `-I` keeps its module-search-directory meaning.
+Inside macro templates, use `$if ($!A) { ... }` or `$if ($system == "win") { ... }` to select code. Ordinary expressions can read `$!NAME`, `$system` and `$cpu` directly; no computed runtime key is accepted. `-I` keeps its module-search-directory meaning.

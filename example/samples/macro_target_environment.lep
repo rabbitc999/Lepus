@@ -8,7 +8,7 @@ $system
 }
 }
 $macro FLAG() -> expr {
-$if ($build[FEATURE_A]) {
+$if ($!FEATURE_A) {
 true
 } $else {
 false
@@ -19,8 +19,7 @@ void main() {
     assert($cpu == "amd64" || $cpu == "arm64" || $cpu == "arm32");
     assert($PLATFORM() == $system);
     assert($cpu != "unknown");
-    assert($build[FEATURE_A] == $build["FEATURE_A"]);
-    assert($FLAG() == $build[FEATURE_A]);
-    assert(!$build["undefined.flag"]);
+    assert($FLAG() == $!FEATURE_A);
+    assert(!$!undefined_flag);
     println("target macros ok");
 }
