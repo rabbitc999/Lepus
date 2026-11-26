@@ -934,7 +934,7 @@ See [Chapter 11](11-modules-projects.md) for the complete manifest context and [
 $macro CLASSIFY(value) -> expr {
     $match (value is ident) {
         1
-    } $else (is expr) {
+    } $match_other (expr) {
         2
     } $else {
         0
@@ -963,7 +963,7 @@ CLASSIFY checks a complete identifier before a complete expression. name matches
 
 NUMBER fully matches source spelling with an ECMAScript regular expression. The digits 42 remain in the selected template; noSuchFunction() selects 0, so no call to that function is generated. Unselected templates do not enter final semantic checking. This does not permit executing unresolved names.
 
-$match supports ident, expr, type, block and stmt, and tries $else (is category) { ... } branches in order. $regex matches the entire spelling, so abc123 does not match [0-9]+.
+$match supports ident, expr, type, block and stmt: the first category is written in $match (value is category), further categories follow as chained $match_other (category) blocks, and a trailing $else is the fallback. $regex matches the entire spelling, so abc123 does not match [0-9]+.
 
 ## 22.20 Groups and Nested Forwarding
 

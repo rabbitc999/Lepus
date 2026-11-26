@@ -1090,10 +1090,18 @@ macro_brace_else := %empty { $$ = -1; }
     | MACRO_ELSE LBRACE macro_template RBRACE { $$ = $3; }
     | macro_elif LPAREN expr RPAREN LBRACE macro_template RBRACE macro_brace_else
     { $$ = M_MacroTemplate(M_List1(M_MacroCompileIf($3, $6, $8)), -1); } ;
+/* 类别分支链：首个类别写在 `$match (x is 类别)` 里，后续类别用并联的
+ * `$match_other (类别)`。类别链结束后可以再跟一个 `$else { ... }` 兜底；
+ * 选择按源码顺序进行。`$else (is 类别)` 不再是合法写法。 */
 macro_brace_match_tail := %empty { $$ = M_List(); }
+    | macro_brace_match_categories { $$ = $1; }
     | MACRO_ELSE LBRACE macro_template RBRACE { $$ = M_List1(M_MacroBranch(-1, $3)); }
-    | MACRO_ELSE LPAREN MACRO_IS macro_category RPAREN LBRACE macro_template RBRACE macro_brace_match_tail
-    { $$ = M_MacroBranches(M_MacroBranch($4, $7), $9); } ;
+    | macro_brace_match_categories MACRO_ELSE LBRACE macro_template RBRACE
+    { $$ = M_MacroAppendBranch($1, M_MacroBranch(-1, $4)); } ;
+macro_brace_match_categories := MACRO_MATCH_OTHER LPAREN macro_category RPAREN LBRACE macro_template RBRACE
+    { $$ = M_List1(M_MacroBranch($3, $6)); }
+    | macro_brace_match_categories MACRO_MATCH_OTHER LPAREN macro_category RPAREN LBRACE macro_template RBRACE
+    { $$ = M_MacroAppendBranch($1, M_MacroBranch($4, $7)); } ;
 macro_brace_regex_else := %empty { $$ = -1; }
     | MACRO_ELSE LBRACE macro_template RBRACE { $$ = $3; } ;
 macro_call := MACRO_NAME %prec FN { $$ = M_MacroCall($1, -1); }

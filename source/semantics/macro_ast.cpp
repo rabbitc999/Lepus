@@ -409,6 +409,18 @@ int M_MacroBranches(int branch, int rest)
 }
 
 /**
+ * @brief 把后续分支追加到已有候选列表末尾，保持源码书写顺序。
+ * @param list 已有的候选列表。
+ * @param branch 追加的候选。
+ * @return 追加后的列表（节点原地扩展）。
+ */
+int M_MacroAppendBranch(int list, int branch)
+{
+    M_ListAdd(list, branch);
+    return list;
+}
+
+/**
  * @brief 创建编译期语法匹配节点。
  * @param parameter 宏形参名称。
  * @param branches 已按顺序排列的分支。

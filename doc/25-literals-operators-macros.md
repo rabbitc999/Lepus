@@ -159,7 +159,7 @@ lepus: 运算符 + 有多条声明匹配同一对操作数 A / int64，返回类
 | --- | --- |
 | 条件选择 | `$if (condition) { ... } $elif (condition) { ... } $else { ... }` |
 | 循环 | `$for (field in $fields<T>()) { ... }`, `$while (condition) { ... }`, `$loop { ... }` |
-| 片段分类 | `$match (value is ident) { ... } $else (is expr) { ... } $else { ... }` |
+| 片段分类 | `$match (value is ident) { ... } $match_other (expr) { ... } $else { ... }` |
 | 正则选择 | `$regex (value is "[0-9]+") { ... } $else { ... }` |
 
 成组循环写成 `$for ((a, b) in (left, right)) { ... }`。
@@ -314,13 +314,13 @@ void main() {
 $macro CLASSIFY(value) -> {
 $match (value is ident) {
 1
-} $else (is expr) {
+} $match_other (expr) {
 2
-} $else (is type) {
+} $match_other (type) {
 3
-} $else (is block) {
+} $match_other (block) {
 4
-} $else (is stmt) {
+} $match_other (stmt) {
 5
 } $else {
 0
@@ -328,7 +328,7 @@ $match (value is ident) {
 }
 ```
 
-只支持 `expr`、`ident`、`type`、`block`、`stmt` 五类，使用同一生成解析器完整消费原始片段。按书写顺序选择首个成立分支；`ident` 也可能是 `expr`，因此顺序有意义。语法成立不代表名称存在或类型合法；只有最终展开的节点进入名称、类型、捕获、借用和资源检查。无匹配且无兜底不生成内容。未选分支的模板结构仍须合法。大括号参数组不等于块片段：传入一个完整块写 `$A{{ statements; }}`。
+只支持 `expr`、`ident`、`type`、`block`、`stmt` 五类，使用同一生成解析器完整消费原始片段。首个类别写在 `$match (值 is 类别)` 里，后续类别用并联的 `$match_other (类别)` 依次列出，最后的 `$else { ... }` 是兜底。按书写顺序选择首个成立分支；`ident` 也可能是 `expr`，因此顺序有意义。语法成立不代表名称存在或类型合法；只有最终展开的节点进入名称、类型、捕获、借用和资源检查。无匹配且无兜底不生成内容。未选分支的模板结构仍须合法。大括号参数组不等于块片段：传入一个完整块写 `$A{{ statements; }}`。
 
 ## 正则、原文与来源
 

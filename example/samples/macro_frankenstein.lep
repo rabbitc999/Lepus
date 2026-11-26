@@ -25,11 +25,11 @@ match (value) {
 $macro ORACLE(x) -> expr {
 $match (x is ident) {
     "ident:" + $stringify(x)
-} $else (is type) {
+} $match_other (type) {
     "type:" + $stringify(x)
-} $else (is block) {
+} $match_other (block) {
     "block:" + $stringify(x)
-} $else (is expr) {
+} $match_other (expr) {
 $regex (x is "[0-9]+") {
     "digits:" + $stringify(x)
 } $else {

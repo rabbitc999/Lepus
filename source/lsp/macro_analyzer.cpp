@@ -433,6 +433,7 @@ std::vector<CompletionItem> McDocument::completion(Position) const
         { "$line", "keyword", "当前源码行号（可在 $macro 之外用）", "$line" },
         { "$file", "keyword", "当前源码文件名（可在 $macro 之外用）", "$file" },
         { "$match", "keyword", "完整语法片段匹配", "$match (value is expr) {\n}" },
+        { "$match_other", "keyword", "`$match` 之后的并联类别分支", "$match_other (expr) {\n}" },
         { "$regex", "keyword", "原文正则完整匹配", "$regex (value is \"[0-9]+\") {\n}" },
         { "$system", "keyword", "目标操作系统名称", "$system" },
         { "$cpu", "keyword", "目标 CPU 架构名称", "$cpu" },

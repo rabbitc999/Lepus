@@ -159,7 +159,7 @@ Write a braced definition as $macro NAME(parameters) -> expr { ... }. The result
 | --- | --- |
 | Conditional | `$if (condition) { ... } $elif (condition) { ... } $else { ... }` |
 | Loops | `$for (field in $fields<T>()) { ... }`, `$while (condition) { ... }`, `$loop { ... }` |
-| Syntax matching | `$match (value is ident) { ... } $else (is expr) { ... } $else { ... }` |
+| Syntax matching | `$match (value is ident) { ... } $match_other (expr) { ... } $else { ... }` |
 | Regex matching | `$regex (value is "[0-9]+") { ... } $else { ... }` |
 
 Write a zipped loop as `$for ((a, b) in (left, right)) { ... }`.
@@ -293,13 +293,13 @@ T is int32, U is int16, and the result is 7. Initialization, assignment, functio
 $macro CLASSIFY(value) -> {
 $match (value is ident) {
 1
-} $else (is expr) {
+} $match_other (expr) {
 2
-} $else (is type) {
+} $match_other (type) {
 3
-} $else (is block) {
+} $match_other (block) {
 4
-} $else (is stmt) {
+} $match_other (stmt) {
 5
 } $else {
 0
@@ -307,7 +307,7 @@ $match (value is ident) {
 }
 ```
 
-The five categories are exactly `expr`, `ident`, `type`, `block` and `stmt`. The same generated parser must consume the whole fragment. The first matching branch wins; an identifier may also be an expression. Syntax recognition does not imply valid names or types. Only selected output enters final name, type, capture, borrow and resource checks, while all template syntax must be valid. No match without a fallback emits nothing. A curly argument group is a delimiter rather than an implicit block: pass a complete block as `$A{{ statements; }}`.
+The five categories are exactly `expr`, `ident`, `type`, `block` and `stmt`. The first category is written as `$match (value is category)`; further categories follow as chained `$match_other (category)` blocks, and a trailing `$else { ... }` is the fallback. The same generated parser must consume the whole fragment, and the first matching branch wins; an identifier may also be an expression. Syntax recognition does not imply valid names or types. Only selected output enters final name, type, capture, borrow and resource checks, while all template syntax must be valid. No match without a fallback emits nothing. A curly argument group is a delimiter rather than an implicit block: pass a complete block as `$A{{ statements; }}`.
 
 ## Regular expressions, spelling and origins
 

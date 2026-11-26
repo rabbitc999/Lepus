@@ -2,7 +2,7 @@
 $macro CLASSIFY(value) -> {
 $match (value is ident) {
 1
-} $else (is expr) {
+} $match_other (expr) {
 2
 } $else {
 0

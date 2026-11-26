@@ -212,6 +212,13 @@ int M_MacroBranch(int category, int body);
  */
 int M_MacroBranches(int branch, int rest);
 /**
+ * @brief 把后续分支追加到已有候选列表末尾，保持源代码顺序。
+ * @param list 已有候选列表。
+ * @param branch 追加的候选分支。
+ * @return 追加后的列表。
+ */
+int M_MacroAppendBranch(int list, int branch);
+/**
  * @brief 建立只在编译期执行的语法类别匹配。
  * @param parameter 待匹配参数名。
  * @param branches 有序候选分支。

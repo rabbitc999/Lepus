@@ -19,6 +19,14 @@ def native_runtime_available(compiler):
     return any((compiler.parent / relative / 'clang.exe').is_file() for relative in
                ('build/dependencies/llvm/toolchain/bin', 'llvm/bin', 'build/dependencies/llvm/static-sdk/bin'))
 
+
+def toolchain_directories(compiler):
+    """返回编译器所在目录下可用的 LLVM 工具链目录，供受限 PATH 保留原生构建能力。"""
+    return [str(compiler.parent / relative) for relative in
+            ('build/dependencies/llvm/toolchain/bin', 'llvm/bin', 'build/dependencies/llvm/static-sdk/bin')
+            if (compiler.parent / relative / 'clang.exe').is_file()]
+
+
 def main():
     """禁用解释器并用真实 JSON-RPC 校验全部迁移入口。"""
     with tempfile.TemporaryDirectory(prefix='原生开发工具 ') as directory:
@@ -27,9 +35,11 @@ def main():
         if os.name == 'nt':
             runtime = Path(shutil.which('g++')).parent
             assert not (runtime / 'python.exe').exists()
-            env['PATH'] = os.pathsep.join([str(Path(os.environ['SystemRoot']) / 'System32'), str(runtime)])
+            # 受限 PATH 只保留系统目录、C++ 运行时和已安装的 LLVM 工具链，仍不含 Python。
+            env['PATH'] = os.pathsep.join([str(Path(os.environ['SystemRoot']) / 'System32'), str(runtime),
+                                           *toolchain_directories(COMPILER)])
         else:
-            env['PATH'] = '/usr/bin:/bin'
+            env['PATH'] = os.pathsep.join(['/usr/bin', '/bin', *toolchain_directories(COMPILER)])
         assert shutil.which('python', path=env['PATH']) is None
         assert shutil.which('python3', path=env['PATH']) is None
 

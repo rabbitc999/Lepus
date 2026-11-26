@@ -821,7 +821,7 @@ void main() {
 
 花括号宏定义用 `$macro NAME(...) -> 类别 { ... }` 显式声明结果，或用 `$macro NAME(...) -> { ... }` 沿用隐式结果。`item` 和 `member` 仍需显式声明。控制块写成 `$if (条件) { ... }`、`$for (变量 in 来源) { ... }` 等。
 
-`<T:a>` 从实参静态类型推导；`<T:#res>`（或兼容写法 `<T>`）从外层期望结果类型推导，显式类型优先。`[]`、`()`、`{}` 是严格有序参数组，`...rest` / `..rest` 是末尾变长形参，`$for` 遍历片段列表。`$match (x is expr)` 支持 `expr`、`ident`、`type`、`block`、`stmt`，`$else (is 类别)` 顺序选分支。`$regex (x is "模式")` 使用完整 ECMAScript 正则匹配原文。未选分支不进入最终语义检查。
+`<T:a>` 从实参静态类型推导；`<T:#res>`（或兼容写法 `<T>`）从外层期望结果类型推导，显式类型优先。`[]`、`()`、`{}` 是严格有序参数组，`...rest` / `..rest` 是末尾变长形参，`$for` 遍历片段列表。`$match (x is expr)` 支持 `expr`、`ident`、`type`、`block`、`stmt`，后续类别写并联的 `$match_other (类别)`，最后的 `$else { ... }` 兜底。`$regex (x is "模式")` 使用完整 ECMAScript 正则匹配原文。未选分支不进入最终语义检查。
 
 固定形参和末尾变参支持 value、expr、ident、type、stmt、block、pattern 类别。value 参数在展开体执行前按实参顺序各求值一次，修改的是副本；expr 按放置位置执行，可重复或不执行。引用仅可标注 value；`&n` 只读借用，`mut &n` 可写回来源。显式结果类别为 `-> expr`、`-> stmt`、`-> item`、`-> member`，分别生成表达式、语句、模块声明、类型成员。`$fields<T>()`、`$member`、`$for`、`$if` 与编译期诊断可按具体结构体字段生成操作，完整例子见[宏教程](book/22-预处理与宏.md)。
 

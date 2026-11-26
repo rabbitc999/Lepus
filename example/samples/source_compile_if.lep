@@ -38,8 +38,9 @@ struct Selected : SelectValue {
     }
 }
 
+// 宏模板内复用同一个构建标志：两次读取相等，$let 绑定的是标志值而不是同名变量。
 $macro OPTION_MATCH() -> expr {
-$let same = $!FEATURE_A
+$let same = $!FEATURE_A == $!FEATURE_A
 same
 }
 

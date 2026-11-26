@@ -49,7 +49,7 @@ int main()
     if (generics.size() != 1 || M_ParsedNode(generics[0]).kind != MNode::MacroGeneric || M_ParsedNode(generics[0]).s != "T" || M_ParsedNode(generics[0]).s2 != "a") return 12;
     for (const char *category : { "expr", "ident", "type", "block", "stmt" })
     {
-        const auto source = Memory::String("$macro SELECT(A) -> {\n$match (A is ") + category + ") {\n1\n} $else (is ident) {\n2\n} $else {\n3\n}\n}\nint32 main() { return 0; }\n";
+        const auto source = Memory::String("$macro SELECT(A) -> {\n$match (A is ") + category + ") {\n1\n} $match_other (ident) {\n2\n} $else {\n3\n}\n}\nint32 main() { return 0; }\n";
         if (!parse(source, root)) return 13;
         const auto &definitionNode = M_ParsedNode(M_ParsedNode(root).kids[0]);
         const auto &templateNode = M_ParsedNode(definitionNode.kids[1]);

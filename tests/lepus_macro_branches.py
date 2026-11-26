@@ -15,7 +15,7 @@ def main():
     parser.add_argument("--default", action="store_true", help="使用含标准库的默认编译路径")
     options = parser.parse_args()
     compiler = options.lepus.resolve()
-    choose = '$match (A is ident) {\n11\n} $else (is expr) {\n22\n} $else (is type) {\n33\n} $else (is block) {\n44\n} $else (is stmt) {\n55\n} $else {\n66\n}'
+    choose = '$match (A is ident) {\n11\n} $match_other (expr) {\n22\n} $match_other (type) {\n33\n} $match_other (block) {\n44\n} $match_other (stmt) {\n55\n} $else {\n66\n}'
     cases = [
         ("ident", choose, "notDeclared", 11),
         ("expr", choose, "1 + 2", 22),
@@ -26,7 +26,8 @@ def main():
         ("stmt", choose, "return 0;", 55),
         ("partial_expr", choose, "1 +", 66),
         ("full_ident", '$match (A is ident) {\n1\n} $else {\n0\n}', "a + b", 0),
-        ("branch_order", '$match (A is expr) {\n1\n} $else (is ident) {\n2\n}', "missing", 1),
+        ("branch_order", '$match (A is expr) {\n1\n} $match_other (ident) {\n2\n}', "missing", 1),
+        ("ident_category", '$match (A is ident) {\n1\n} $match_other (expr) {\n2\n}', "a + b", 2),
         ("inactive_semantics", '$match (A is ident) {\n1\n} $else {\nmissingFunction();\nint64 invalid = unknown;\n0\n}', "anything", 1),
         ("inactive_closure", '$match (A is ident) {\n1\n} $else {\nlet unused = fn(int64 x) { missingFunction(); return x; };\n0\n}', "anything", 1),
         ("regex_digits", '$regex (A is "[0-9]+") {\n1\n} $else {\n0\n}', "  123  ", 1),
