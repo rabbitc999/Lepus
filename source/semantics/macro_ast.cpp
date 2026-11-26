@@ -434,6 +434,19 @@ int M_MacroMatch(int parameter, int branches)
 }
 
 /**
+ * @brief 创建 `片段 is 类别` 条件节点。
+ * @param parameter 片段名。
+ * @param category 类别关键字编号。
+ * @return 类别测试节点。
+ */
+int M_MacroCategoryTest(int parameter, int category)
+{
+    const int id = M_New(MNode::MacroCategoryTest, g_names[parameter]);
+    g_nodes[id].s2 = g_names[category];
+    return id;
+}
+
+/**
  * @brief 保存正则分支语法，不在解析阶段执行或展开分支。
  * @param parameter 待匹配参数名。
  * @param pattern 正则字符串的名称池编号。

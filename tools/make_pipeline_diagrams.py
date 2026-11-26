@@ -121,7 +121,7 @@ def aot(english=False):
     arrow(c, ((1300, 270), (1300, 310), (400, 310), (400, 355)))
     arrow(c, ((1300, 310), (1160, 310), (1160, 355)))
     box(c, 40, 355, 720, "4a  Built-In LLVM" if english else "4a  静态内置 LLVM",
-        ["LLVM optimization + x64 object code" if english else "LLVM 优化与 x64 目标代码生成",
+        ["LLVM O3 optimization + target object code" if english else "LLVM O3 优化与目标机器码生成",
          "In-process LLD + embedded CRT assets" if english else "进程内 LLD 与内嵌 CRT 链接资产"], green=True)
     box(c, 800, 355, 720, "4b  External LLVM" if english else "4b  外置 LLVM 工具链",
         ["LLVM clang driver + LLD" if english else "调用 LLVM clang 驱动与 LLD",

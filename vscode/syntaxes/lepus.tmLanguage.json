@@ -106,7 +106,7 @@
         },
         {
           "name": "keyword.control.macro.lepus",
-          "match": "\\$(?:while|loop|break|continue|let|set|if|elif|else_if|implement|match|match_other|regex|else)\\b"
+          "match": "\\$(?:while|loop|break|continue|let|set|if|elif|else_if|implement|match|regex|else)\\b"
         },
         {
           "name": "keyword.control.for.lepus",

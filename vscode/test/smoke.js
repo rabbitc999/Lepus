@@ -111,7 +111,7 @@ function testLepusFolding() {
   check('折叠：缺右花括号也能折到末尾', half.length === 1 && half[0].end === 1);
 
   // 词面要完整，单行开合不折，多余的收尾不炸。
-  const branches = folding.planFoldingRanges(['$macro A(x) -> {', '$match (x is expr) {', '$regex (x is "x") {', '1', '}', '}', '}']);
+  const branches = folding.planFoldingRanges(['$macro A(x) -> {', '$match (x) {', '$regex (x is "x") {', '1', '}', '}', '}']);
   check('折叠：语法与正则分支嵌套', branches.length === 3 && branches[1].end === 5 && branches[2].end === 4);
   check('折叠：$match_if 不是指令', folding.planFoldingRanges(['$match_if kind', 'x', '}']).length === 0);
   check('折叠：同一行开合不折', folding.planFoldingRanges(['$macro A() -> { 1 }']).length === 0);

@@ -234,6 +234,7 @@ struct MNode
         MacroGeneric,         ///< 泛型名称及显式推导来源。
         MacroImplement,       ///< 成员宏请求宿主类型实现的接口，type 保存类型实参。
         MacroMatch,           ///< 编译期语法类别匹配。
+        MacroCategoryTest,    ///< `片段 is 类别`：在 `$if` 条件里做完整语法分类。
         MacroBranch,          ///< 语法匹配的有序候选分支。
         MacroRegex,           ///< 编译期原文正则匹配。
         MacroArgument,        ///< 同一原始实参的六类完整语法候选，保留原文及位置。

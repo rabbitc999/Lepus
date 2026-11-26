@@ -1,11 +1,15 @@
-/* 编译期只检查五类完整语法和 ECMAScript 正则，未选分支不做语义检查。 */
+/* 编译期只检查完整语法类别和 ECMAScript 正则，未选分支不做语义检查。 */
 $macro CLASSIFY(value) -> {
-$match (value is ident) {
+$match (value) {
+ident => {
 1
-} $match_other (expr) {
+}
+expr => {
 2
-} $else {
+}
+_ => {
 0
+}
 }
 }
 $macro NUMBER(value) -> {

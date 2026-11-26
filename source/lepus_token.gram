@@ -17,8 +17,6 @@
 %token MACRO_ITEM "@!macroitem"
 %token MACRO_MEMBER "@!macromember"
 %token MACRO_MATCH "$match"
-/* `$match_other (类别)`：`$match` 之后的并联类别分支；旧的 `$else (is 类别)` 写法已删除。 */
-%token MACRO_MATCH_OTHER "$match_other"
 %token MACRO_ELSE "$else"
 %token MACRO_ELIF "$elif"
 %token MACRO_ELSE_IF "$else_if"

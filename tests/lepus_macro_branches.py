@@ -15,21 +15,23 @@ def main():
     parser.add_argument("--default", action="store_true", help="使用含标准库的默认编译路径")
     options = parser.parse_args()
     compiler = options.lepus.resolve()
-    choose = '$match (A is ident) {\n11\n} $match_other (expr) {\n22\n} $match_other (type) {\n33\n} $match_other (block) {\n44\n} $match_other (stmt) {\n55\n} $else {\n66\n}'
+    choose = '$match (A) {\nident => {\n11\n}\nexpr => {\n22\n}\ntype => {\n33\n}\nblock => {\n44\n}\nstmt => {\n55\n}\n_ => {\n66\n}\n}'
     cases = [
         ("ident", choose, "notDeclared", 11),
         ("expr", choose, "1 + 2", 22),
         ("type", choose, "int64", 33),
         ("unknown_generic_type", choose, "Unknown<int64, int32, int8>", 33),
         ("lowercase_generic_type", choose, "unknown<int64>", 33),
-        ("block", '$match (A is block) {\n44\n} $else {\n0\n}', "{ int64 value = 1; }", 44),
+        ('block', '$match (A) {\nblock => {\n44\n}\n_ => {\n0\n}\n}', '{ int64 value = 1; }', 44),
         ("stmt", choose, "return 0;", 55),
         ("partial_expr", choose, "1 +", 66),
-        ("full_ident", '$match (A is ident) {\n1\n} $else {\n0\n}', "a + b", 0),
-        ("branch_order", '$match (A is expr) {\n1\n} $match_other (ident) {\n2\n}', "missing", 1),
-        ("ident_category", '$match (A is ident) {\n1\n} $match_other (expr) {\n2\n}', "a + b", 2),
-        ("inactive_semantics", '$match (A is ident) {\n1\n} $else {\nmissingFunction();\nint64 invalid = unknown;\n0\n}', "anything", 1),
-        ("inactive_closure", '$match (A is ident) {\n1\n} $else {\nlet unused = fn(int64 x) { missingFunction(); return x; };\n0\n}', "anything", 1),
+        ('full_ident', '$match (A) {\nident => {\n1\n}\n_ => {\n0\n}\n}', 'a + b', 0),
+        ('branch_order', '$match (A) {\nexpr => {\n1\n}\nident => {\n2\n}\n}', 'missing', 1),
+        ('ident_category', '$match (A) {\nident => {\n1\n}\nexpr => {\n2\n}\n}', 'a + b', 2),
+        ('inactive_semantics', '$match (A) {\nident => {\n1\n}\n_ => {\nmissingFunction();\nint64 invalid = unknown;\n0\n}\n}', 'anything', 1),
+        ('inactive_closure', '$match (A) {\nident => {\n1\n}\n_ => {\nlet unused = fn(int64 x) { missingFunction(); return x; };\n0\n}\n}', 'anything', 1),
+        ('if_category', '$if (A is ident) {\n1\n} $elif (A is expr) {\n2\n} $else {\n0\n}', '1', 2),
+        ('if_category_and_flag', '$if (A is ident && false) {\n1\n} $else {\n0\n}', '1', 0),
         ("regex_digits", '$regex (A is "[0-9]+") {\n1\n} $else {\n0\n}', "  123  ", 1),
         ("regex_full", '$regex (A is "[0-9]+") {\n1\n} $else {\n0\n}', "abc123", 0),
         ("regex_quotes", '$regex (A is "[0-9]+") {\n1\n} $else {\n0\n}', '"123"', 0),
@@ -56,10 +58,10 @@ def main():
             source = "$macro CHOOSE(A) -> {\n" + body + "\n}\nvoid main() { int64 result = $CHOOSE(" + argument + "); if (result == " + str(expected) + ") { return; } let __boom = 1 / (result - result); }"
             result = execute(name, source)
             assert result.returncode == 0 and not result.stderr, (name, result.returncode, result.stdout, result.stderr)
-        source = '$macro EMIT(A) -> {\n$match (A is stmt) {\nA;\n}\n}\nvoid main() { $EMIT(return;); }'
+        source = '$macro EMIT(A) -> {\n$match (A) {\nstmt => {\nA;\n}\n}\n}\nvoid main() { $EMIT(return;); }'
         result = execute("emit_statement", source)
         assert result.returncode == 0 and not result.stderr, result.stderr
-        source = '$macro EMPTY(A) -> {\n$match (A is stmt) {\nA;\n}\n}\nvoid main() { $EMPTY(1 +); return; }'
+        source = '$macro EMPTY(A) -> {\n$match (A) {\nstmt => {\nA;\n}\n}\n}\nvoid main() { $EMPTY(1 +); return; }'
         result = execute("no_match", source)
         assert result.returncode == 0 and not result.stderr, result.stderr
         result = execute("invalid_regex", '$macro BAD(A) -> {\n$regex (A is "[") {\n1\n} $else {\n0\n}\n}\nvoid main() { let __boom = $BAD(123); }')

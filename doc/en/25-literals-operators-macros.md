@@ -159,7 +159,7 @@ Write a braced definition as $macro NAME(parameters) -> expr { ... }. The result
 | --- | --- |
 | Conditional | `$if (condition) { ... } $elif (condition) { ... } $else { ... }` |
 | Loops | `$for (field in $fields<T>()) { ... }`, `$while (condition) { ... }`, `$loop { ... }` |
-| Syntax matching | `$match (value is ident) { ... } $match_other (expr) { ... } $else { ... }` |
+| Syntax matching | `$match (value) { ident => { ... } _ => { ... } }`, or `$if (value is ident) { ... } $else { ... }` |
 | Regex matching | `$regex (value is "[0-9]+") { ... } $else { ... }` |
 
 Write a zipped loop as `$for ((a, b) in (left, right)) { ... }`.
@@ -291,23 +291,47 @@ T is int32, U is int16, and the result is 7. Initialization, assignment, functio
 
 ```lepus
 $macro CLASSIFY(value) -> {
-$match (value is ident) {
+$match (value) {
+ident => {
 1
-} $match_other (expr) {
+}
+expr => {
 2
-} $match_other (type) {
+}
+type => {
 3
-} $match_other (block) {
+}
+block => {
 4
-} $match_other (stmt) {
+}
+stmt => {
 5
-} $else {
+}
+_ => {
 0
+}
 }
 }
 ```
 
-The five categories are exactly `expr`, `ident`, `type`, `block` and `stmt`. The first category is written as `$match (value is category)`; further categories follow as chained `$match_other (category)` blocks, and a trailing `$else { ... }` is the fallback. The same generated parser must consume the whole fragment, and the first matching branch wins; an identifier may also be an expression. Syntax recognition does not imply valid names or types. Only selected output enters final name, type, capture, borrow and resource checks, while all template syntax must be valid. No match without a fallback emits nothing. A curly argument group is a delimiter rather than an implicit block: pass a complete block as `$A{{ statements; }}`.
+`$match (value)` tries its branches in order. Each branch is written `category => { ... }`, and a trailing `_ => { ... }` is the fallback. The supported categories are `expr`, `ident`, `type`, `block`, `stmt` and `pattern`. The same generated parser must consume the whole fragment, and the first matching branch wins; an identifier may also be an expression. With no matching branch and no `_` fallback nothing is emitted. Syntax recognition does not imply valid names or types. Only selected output enters final name, type, capture, borrow and resource checks, while all template syntax must be valid.
+
+The same classification can appear in `$if` conditions, combined with compile-time constants through `&&`, `||` and `!`:
+
+```lepus
+$macro ONLY_IDENT(value) -> expr {
+$if (value is ident) {
+1
+} $elif (value is stmt) {
+2
+} $else {
+0
+}
+$if (value is ident && true) { 3 } $else { 4 }
+}
+```
+
+`fragment is category` is evaluated only inside compile-time conditions of a macro template, which makes `is` a classification keyword rather than an ordinary identifier. Every other check matches `$match`. A curly argument group is a delimiter rather than an implicit block: pass a complete block as `$A{{ statements; }}`.
 
 ## Regular expressions, spelling and origins
 

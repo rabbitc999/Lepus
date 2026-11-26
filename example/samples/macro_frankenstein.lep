@@ -23,20 +23,26 @@ match (value) {
 
 /* 语法分类：ident / type / block / expr 依次判定，expr 分支里再按正则分流。 */
 $macro ORACLE(x) -> expr {
-$match (x is ident) {
+$match (x) {
+ident => {
     "ident:" + $stringify(x)
-} $match_other (type) {
+}
+type => {
     "type:" + $stringify(x)
-} $match_other (block) {
+}
+block => {
     "block:" + $stringify(x)
-} $match_other (expr) {
+}
+expr => {
 $regex (x is "[0-9]+") {
     "digits:" + $stringify(x)
 } $else {
     "expr:" + $stringify(x)
 }
-} $else {
+}
+_ => {
     "other"
+}
 }
 }
 

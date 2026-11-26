@@ -226,6 +226,13 @@ int M_MacroAppendBranch(int list, int branch);
  */
 int M_MacroMatch(int parameter, int branches);
 /**
+ * @brief 建立 `片段 is 类别` 条件，作为 `$if` 条件的组成项在宏展开期求值。
+ * @param parameter 片段名。
+ * @param category 类别关键字编号。
+ * @return 类别测试节点。
+ */
+int M_MacroCategoryTest(int parameter, int category);
+/**
  * @brief 建立正则匹配节点并保留尚未解码的语言字符串。
  * @param parameter 待匹配参数名。
  * @param pattern 字符串名称池编号。

@@ -4,12 +4,16 @@ struct Fields {
 }
 
 $macro choose(value)[fallback: expr]{name: expr} -> expr {
-    $match (value is ident) {
-        $regex (value is "a") { name } $else { fallback }
-    } $match_other (expr) {
-        value
-    } $else {
-        fallback
+    $match (value) {
+        ident => {
+            $regex (value is "a") { name } $else { fallback }
+        }
+        expr => {
+            value
+        }
+        _ => {
+            fallback
+        }
     }
 }
 

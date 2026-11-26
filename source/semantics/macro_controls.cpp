@@ -514,6 +514,66 @@ bool CheckMacroLoopSyntax(int id, std::size_t depth, bool inLoop, bool &ordered,
 }
 
 /**
+ * @brief 把 `$if` 条件里的 `片段 is 类别` 折叠成编译期布尔常量。
+ *
+ * 片段实参在展开期保留六类完整语法候选；这里按类别取对应候选是否成立，
+ * 结果替换为 Bool 节点，之后与普通编译期常量一起参与 `&&`、`||`、`!` 求值。
+ * @param id 条件子树根节点。
+ * @param inputs 形参名到实参节点的映射。
+ * @param depth 当前遍历深度。
+ * @param error 接收失败原因。
+ * @return 折叠成功时返回真。
+ */
+bool FoldMacroCategoryTests(int id, const std::map<std::string, int> &inputs, std::size_t depth, std::string &error)
+{
+    if (id < 0) return true;
+    if (depth >= 256)
+    {
+        error = "宏编译期条件嵌套过深";
+        return false;
+    }
+    auto &node = g_nodes[id];
+    if (node.kind == MNode::MacroCategoryTest)
+    {
+        const std::string name(node.s.data(), node.s.size());
+        const auto found = inputs.find(name);
+        if (found == inputs.end())
+        {
+            error = "宏编译期分类引用了不存在的形参：" + name;
+            return false;
+        }
+        const auto &argument = N(found->second);
+        if (argument.kind != MNode::MacroArgument || argument.kids.size() != lepus_macro::FragmentAlternativeCount)
+        {
+            error = "$if 的语法分类只能用在片段实参上：" + name;
+            return false;
+        }
+        const std::string category(node.s2.data(), node.s2.size());
+        const int index = category == "expr"    ? 0 :
+                          category == "ident"   ? 1 :
+                          category == "type"    ? 2 :
+                          category == "block"   ? 3 :
+                          category == "stmt"    ? 4 :
+                          category == "pattern" ? 5 :
+                                                  -1;
+        if (index < 0)
+        {
+            error = "不支持的宏片段分类：" + category;
+            return false;
+        }
+        node.kind = MNode::Bool;
+        node.i = argument.kids[static_cast<std::size_t>(index)] >= 0 ? 1 : 0;
+        node.s.clear();
+        node.s2.clear();
+        node.kids.clear();
+        return true;
+    }
+    for (const int child : node.kids)
+        if (!FoldMacroCategoryTests(child, inputs, depth + 1, error)) return false;
+    return true;
+}
+
+/**
  * @brief 在卫生绑定前处理字段循环、常量分支和编译期诊断，仅构造普通 AST。
  * @param root 已替换泛型类型的独立模板。
  * @param inputs 只读宏实参，条件只允许使用其中的常量表达式。
@@ -929,6 +989,7 @@ bool PrepareMacroControlsWithLocals(int root, const std::map<std::string, int> &
         if (node.kind == MNode::MacroCompileIf)
         {
             if (!visit(node.kids[0], depth + 1, true)) return false;
+            if (!FoldMacroCategoryTests(node.kids[0], activeInputs, depth, error)) return false;
             MConstant value;
             if (!EvaluateConstant(node.kids[0], &value) || value.kind != MConstant::Boolean) return Fail("$if 条件必须是编译期 bool 常量");
             const int selected = node.kids[value.integer ? 1 : 2];

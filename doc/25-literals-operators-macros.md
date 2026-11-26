@@ -159,7 +159,7 @@ lepus: 运算符 + 有多条声明匹配同一对操作数 A / int64，返回类
 | --- | --- |
 | 条件选择 | `$if (condition) { ... } $elif (condition) { ... } $else { ... }` |
 | 循环 | `$for (field in $fields<T>()) { ... }`, `$while (condition) { ... }`, `$loop { ... }` |
-| 片段分类 | `$match (value is ident) { ... } $match_other (expr) { ... } $else { ... }` |
+| 片段分类 | `$match (value) { ident => { ... } _ => { ... } }`，或 `$if (value is ident) { ... } $else { ... }` |
 | 正则选择 | `$regex (value is "[0-9]+") { ... } $else { ... }` |
 
 成组循环写成 `$for ((a, b) in (left, right)) { ... }`。
@@ -308,27 +308,51 @@ void main() {
 
 这里 T 是 int32，U 是 int16，结果是 7。初始化、赋值、函数返回和可确定参数类型的函数实参均可提供结果上下文；推导不执行 a 或 b。`<T>` 保留相同的隐式结果来源语义。显式类型实参优先；缺少结果上下文时使用 `let` 不会自动改从 a 推导。
 
-## 五类完整语法匹配
+## 完整语法匹配
 
 ```lepus
 $macro CLASSIFY(value) -> {
-$match (value is ident) {
+$match (value) {
+ident => {
 1
-} $match_other (expr) {
+}
+expr => {
 2
-} $match_other (type) {
+}
+type => {
 3
-} $match_other (block) {
+}
+block => {
 4
-} $match_other (stmt) {
+}
+stmt => {
 5
-} $else {
+}
+_ => {
 0
+}
 }
 }
 ```
 
-只支持 `expr`、`ident`、`type`、`block`、`stmt` 五类，使用同一生成解析器完整消费原始片段。首个类别写在 `$match (值 is 类别)` 里，后续类别用并联的 `$match_other (类别)` 依次列出，最后的 `$else { ... }` 是兜底。按书写顺序选择首个成立分支；`ident` 也可能是 `expr`，因此顺序有意义。语法成立不代表名称存在或类型合法；只有最终展开的节点进入名称、类型、捕获、借用和资源检查。无匹配且无兜底不生成内容。未选分支的模板结构仍须合法。大括号参数组不等于块片段：传入一个完整块写 `$A{{ statements; }}`。
+`$match (值)` 按分支顺序尝试，分支写成 `类别 => { ... }`，结尾的 `_ => { ... }` 是兜底。支持的类别是 `expr`、`ident`、`type`、`block`、`stmt`、`pattern`，使用同一生成解析器完整消费原始片段。按书写顺序选择首个成立分支；`ident` 也可能是 `expr`，因此顺序有意义。省略分支且没有 `_` 时不生成内容。语法成立不代表名称存在或类型合法；只有最终展开的节点进入名称、类型、捕获、借用和资源检查。未选分支的模板结构仍须合法。
+
+同一种分类也能写进 `$if` 条件，与编译期常量用 `&&`、`||`、`!` 组合：
+
+```lepus
+$macro ONLY_IDENT(value) -> expr {
+$if (value is ident) {
+1
+} $elif (value is stmt) {
+2
+} $else {
+0
+}
+$if (value is ident && true) { 3 } $else { 4 }
+}
+```
+
+`片段 is 类别` 只在宏模板的编译期条件里求值，`is` 因此是分类关键字而不是普通标识符。其余检查与 `$match` 相同。大括号参数组不等于块片段：传入一个完整块写 `$A{{ statements; }}`。
 
 ## 正则、原文与来源
 

@@ -247,7 +247,7 @@ bool SourceFragments::capture(Memory::String &source, std::string &error, std::s
             output.append(text, start, at - start);
             continue;
         }
-        const bool control = name == "macro" || name == "replace" || name == "match" || name == "match_other" || name == "else" || name == "elif" || name == "else_if" || name == "regex" || name == "let" || name == "for"
+        const bool control = name == "macro" || name == "replace" || name == "match" || name == "else" || name == "elif" || name == "else_if" || name == "regex" || name == "let" || name == "for"
             || name == "while" || name == "loop"
             || name == "break" || name == "continue" || name == "set" || name == "if" || name == "implement";
         if (control)

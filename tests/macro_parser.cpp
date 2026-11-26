@@ -47,23 +47,21 @@ int main()
     const auto genericDefinition = M_ParsedNode(M_ParsedNode(root).kids[0]);
     const auto generics = M_ParsedNode(genericDefinition.kids[2]).kids;
     if (generics.size() != 1 || M_ParsedNode(generics[0]).kind != MNode::MacroGeneric || M_ParsedNode(generics[0]).s != "T" || M_ParsedNode(generics[0]).s2 != "a") return 12;
-    for (const char *category : { "expr", "ident", "type", "block", "stmt" })
-    {
-        const auto source = Memory::String("$macro SELECT(A) -> {\n$match (A is ") + category + ") {\n1\n} $match_other (ident) {\n2\n} $else {\n3\n}\n}\nint32 main() { return 0; }\n";
-        if (!parse(source, root)) return 13;
-        const auto &definitionNode = M_ParsedNode(M_ParsedNode(root).kids[0]);
-        const auto &templateNode = M_ParsedNode(definitionNode.kids[1]);
-        const auto &match = M_ParsedNode(M_ParsedNode(templateNode.kids[0]).kids[0]);
-        if (match.kind != MNode::MacroMatch || match.s != "A") return 14;
-        const auto branches = M_ParsedNode(match.kids[0]).kids;
-        if (branches.size() != 3 || M_ParsedNode(branches[0]).s != category || M_ParsedNode(branches[1]).s != "ident" || !M_ParsedNode(branches[2]).s.empty()) return 15;
-    }
+    // `$match` 的分支写成 `类别 => { ... }`，`_ => { ... }` 是兜底。
+    const auto matchSource = Memory::String("$macro SELECT(A) -> {\n$match (A) {\nident => {\n1\n}\nexpr => {\n2\n}\n_ => {\n3\n}\n}\n}\nint32 main() { return 0; }\n");
+    if (!parse(matchSource, root)) return 13;
+    const auto &matchDefinition = M_ParsedNode(M_ParsedNode(root).kids[0]);
+    const auto &matchTemplate = M_ParsedNode(matchDefinition.kids[1]);
+    const auto &match = M_ParsedNode(M_ParsedNode(matchTemplate.kids[0]).kids[0]);
+    if (match.kind != MNode::MacroMatch || match.s != "A") return 14;
+    const auto &matchBranches = M_ParsedNode(match.kids[0]).kids;
+    if (matchBranches.size() != 3 || M_ParsedNode(matchBranches[0]).s != "ident" || M_ParsedNode(matchBranches[1]).s != "expr" || !M_ParsedNode(matchBranches[2]).s.empty()) return 15;
     if (!parse("$macro DIGITS(A) -> {\n$regex (A is \"[0-9]+\") {\n1\n} $else {\n0\n}\n}\nint32 main() { return 0; }\n", root)) return 16;
     const auto &regexDefinition = M_ParsedNode(M_ParsedNode(root).kids[0]);
     const auto &regexTemplate = M_ParsedNode(regexDefinition.kids[1]);
     const auto &regex = M_ParsedNode(M_ParsedNode(regexTemplate.kids[0]).kids[0]);
     if (regex.kind != MNode::MacroRegex || regex.s != "A" || regex.s2 != "[0-9]+" || regex.kids[1] < 0) return 17;
-    Memory::String unknown = "$macro BAD(A) -> {\n$match (A is token) {\n1\n}\n}\n";
+    Memory::String unknown = "$macro BAD(A) -> {\n$match (A) {\ntoken => {\n1\n}\n}\n}\n";
     lepus_macro::markHeaderBoundaries(unknown);
     lepus::Engine unknownCategory;
     if (unknownCategory.runText(unknown, &root) == lepus::Status::Ok) return 18;

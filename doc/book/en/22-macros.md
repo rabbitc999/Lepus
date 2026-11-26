@@ -594,7 +594,7 @@ $count returns capture counts. $compile_assert checks equality during expansion.
 
 `$DOT(2, 3)[4]` must fail during compilation. A selected $compile_error("reason") directly rejects unsupported input, such as a field type that a JSON generator cannot encode.
 
-$if requires a compile-time condition, such as metadata or a capture count. An ordinary runtime function cannot decide template structure. $match (x is ident) classifies complete syntax, and $regex (x is "[0-9]+") matches complete source text. Neither is the runtime match statement or a runtime regex library.
+$if requires a compile-time condition, such as metadata, a capture count or a fragment classification (value is ident). An ordinary runtime function cannot decide template structure. $match (x) { ident => { ... } _ => { ... } } classifies complete syntax, and $regex (x is "[0-9]+") matches complete source text. Neither is the runtime match statement or a runtime regex library.
 
 ## 22.12 Reading Enum Variants and Payloads
 
@@ -932,12 +932,16 @@ See [Chapter 11](11-modules-projects.md) for the complete manifest context and [
 <!-- verify-book -->
 ```lepus
 $macro CLASSIFY(value) -> expr {
-    $match (value is ident) {
-        1
-    } $match_other (expr) {
-        2
-    } $else {
-        0
+    $match (value) {
+        ident => {
+            1
+        }
+        expr => {
+            2
+        }
+        _ => {
+            0
+        }
     }
 }
 $macro NUMBER(value) -> expr {
@@ -963,7 +967,7 @@ CLASSIFY checks a complete identifier before a complete expression. name matches
 
 NUMBER fully matches source spelling with an ECMAScript regular expression. The digits 42 remain in the selected template; noSuchFunction() selects 0, so no call to that function is generated. Unselected templates do not enter final semantic checking. This does not permit executing unresolved names.
 
-$match supports ident, expr, type, block and stmt: the first category is written in $match (value is category), further categories follow as chained $match_other (category) blocks, and a trailing $else is the fallback. $regex matches the entire spelling, so abc123 does not match [0-9]+.
+$match branches are written category => { ... }, tried in source order, with a trailing _ => { ... } fallback; the categories are ident, expr, type, block, stmt and pattern. The same classification also works in a compile-time $if condition, such as $if (value is ident && condition) { ... } $else { ... }, combined with compile-time booleans through &&, || and !. $regex matches the entire spelling, so abc123 does not match [0-9]+.
 
 ## 22.20 Groups and Nested Forwarding
 
