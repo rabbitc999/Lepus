@@ -1,5 +1,5 @@
 {
-  "name": "dsh-lepus",
+  "name": "Lepus AI Assistance",
   "version": "1.0.0",
   "private": true,
   "description": "DeepSeek Harness plugin that registers the Lepus programming skill and tools for writing, checking, running, and building Lepus (.lep) programs.",
