@@ -24,7 +24,7 @@ Changes: [`CHANGELOG.md`](../../CHANGELOG.md).
 
 | Who you are | Start here |
 | --- | --- |
-| Learning step by step | [The Lepus Programming Language](../book/en/README.md): 29 chapters with log search, HTTP file service and a student system |
+| Learning step by step | [The Lepus Programming Language](../book/en/README.md): 30 chapters with log search, HTTP file service, a student system and a Game of Life desktop project |
 | New to Lepus | [5-minute quickstart](01-quickstart.md) |
 | Evaluating deployment | [Current capabilities](17-capabilities.md) → [Cross-platform deployment](06-deployment.md) |
 | Ready to write code | [Language tour](02-language-tour.md) → [Language reference](04-language-reference.md) |
@@ -59,14 +59,12 @@ Changes: [`CHANGELOG.md`](../../CHANGELOG.md).
 | [13](13-projects.md) | Example projects | Anyone who wants to run something | Application and capability examples in the repository: location, commands, verification and prerequisites |
 | [14](../14-grammar-ebnf.md) | EBNF grammar reference | Anyone checking grammar details | Every production and token declaration generated from `source/lepus.gram`; the readable form of the authoritative grammar |
 | [15](../15-artifacts.md) | Build artifacts and intermediates | Anyone wondering where files land | `.lepus/` layout, cleanup rules, what to ship |
-| [16](../16-compact-symbols.md) | Nameless compact symbols | Anyone tracking size and diagnostic privacy | `--compress-symbols` format, tooling and space comparison |
+| [16](../16-compact-symbols.md) | Native artifact symbols | Anyone checking symbol retention and diagnostics | Release-build symbol pruning, then `--debug` symbol and source-line retention |
 | [17](17-capabilities.md) | Current capabilities | Evaluation and integration | Language, runtime, borrowing, reflection, libraries, embedded Linux and tooling contracts |
 | [18](../18-panic-trace.md) | Panic and source lines | Anyone debugging crashes | Failure output, call stack, source location, compact symbol-hiding policy |
 | [19](../19-reflection.md) | Annotations and reflection | Readers using annotations and metadata | Declaration metadata and typed queries |
 | [20](../20-memory-allocator.md) | Memory allocator | Anyone wiring host memory | Pool and capacity stats, allocation range checks, external buffers |
 | [22](22-resource-lifetime.md) | Resource lifetimes and borrow control flow | Runtime contributors | Allocation identities, resource cleanup and coalescing, temporary ownership, closure borrowing |
-
-## More entry points
 
 ## Companion resources
 
@@ -77,6 +75,8 @@ Changes: [`CHANGELOG.md`](../../CHANGELOG.md).
 - [Project README](../../README.en.md) — build, quick usage, debugging, configuration (English;
   [中文版](../../README.md)).
 - [Full grammar reference (EBNF)](../14-grammar-ebnf.md) — the authoritative form of the grammar, generated from [`source/lepus.gram`](../../source/lepus.gram).
+
+## More entry points
 
 - [11 Borrow control flow and algorithm validation](11-algorithm-validation.md): independent dataflow checks, heap structures, DFS/BFS and NOIP2015 brute-force comparisons.
 
@@ -102,8 +102,6 @@ Changes: [`CHANGELOG.md`](../../CHANGELOG.md).
 - [Exact symbolic computation and high precision mathematics](31-symbolic-computation.md)
 - [Standard library ownership and string methods](32-opcode-values-strings.md)
 - [Reflection serialization and dynamic SQL](33-reflection-serialization-sql.md)
-
-The [30-chapter English book](../book/en/README.md) contains technical chapters and appendices. The Chinese edition also includes literary extras and a PDF. Chapter 29 follows the actual school application with architecture and browser screenshots.
 
 - [Compiler safety boundaries and focused regression tests](34-compiler-safety.md)
 

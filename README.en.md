@@ -227,7 +227,7 @@ lepus/
 
 The compiler front end is generated from this repository's `source/lepus.gram` by [HareParse](https://github.com/rabbitc999/HareParse); it emits LLVM IR directly from the checked AST and LLVM builds the native program.
 
-[The HareParse repository](https://github.com/rabbitc999/HareParse) supports generating parsers written in Lepus (the upstream target name is still `--lang chali`) in five modes: **LL(1), SLR(1), LALR(1), LR(1), and IELR(1)**, selected with `--mode ll1`, `slr`, `lalr`, `lr1`, or `ielr`, respectively. The generated `parser.chl` can be run or built with Lepus. This repository's compiler front end uses the C++17 output target with IELR(1), as configured in `gen.sh`.
+[The HareParse repository](https://github.com/rabbitc999/HareParse) generates Lepus-source parsers with `--lang lepus`, producing `parser.lep` plus an analysis report, `RESULT.md`; there is no `chali` target in the HareParse build that `gen.sh` uses. Common modes include **LL(1), SLR(1), LALR(1), LR(1), and IELR(1)**, selected with `--mode ll1`, `slr`, `lalr`, `lr1`, or `ielr`, respectively. The generated `parser.lep` can be run or built with Lepus. This repository's compiler front end uses the C++17 output target with IELR(1), as configured in `gen.sh`.
 
 Type, ownership and runtime rules are defined by the language; supported hosts, export targets and external-library requirements are checked separately. See [current capabilities](doc/en/17-capabilities.md) for implemented features, defaults and platform limits. The current version is in [`VERSION`](VERSION).
 

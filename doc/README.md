@@ -16,7 +16,7 @@ Lepus 通过 LLVM 构建生成原生代码。目标运行时、C ABI 库、链�
 
 接手 Lepus 本身的开发从[维护知识库](knowledge/README.md)开始，查阅源码入口、故障定位路径和发行验收步骤。
 
-编译与运行的图解见 [编译过程](../README.cn.md) 和 [运行过程](../README.cn.md)。
+编译与运行的图解见 [编译过程](../README.cn.md) 和 [运行过程](../README.cn.md#运行过程)。
 
 ---
 
@@ -86,23 +86,25 @@ Lepus 通过 LLVM 构建生成原生代码。目标运行时、C ABI 库、链�
 
 ## 英文文档
 
-[`doc/en/`](en/README.md) 是英文版，与上面各篇一一对应（含项目 README 的英文版，共 14 篇）：
+[`doc/en/`](en/README.md) 是英文版，与上面各篇一一对应（含项目 README 的英文版）：
 
 | 英文版 | 对应这篇中文 |
 | --- | --- |
-| [../README.en.md](../README.cn.md) | [项目 README](../README.cn.md)（构建、快速使用、调试、配置） |
-| [en/README.md](README.md) | [文档入口](README.md) |
-| [en/01-quickstart.md](01-quickstart.md) | [01 快速开始](01-quickstart.md) |
-| [en/02-language-tour.md](02-language-tour.md) | [02 语言速览](02-language-tour.md) |
-| [en/03-core-concepts.md](03-core-concepts.md) | [03 核心概念](03-core-concepts.md) |
-| [en/04-language-reference.md](04-language-reference.md) | [04 语言参考](04-language-reference.md) |
-| [en/05-delivery-security.md](05-delivery-security.md) | [05 交付安全](05-delivery-security.md) |
-| [en/06-deployment.md](06-deployment.md) | [06 跨平台部署](06-deployment.md) |
-| [en/07-stdlib-overview.md](07-stdlib-overview.md) | [07 标准库概览](07-stdlib-overview.md) |
-| [en/08-host-integration.md](08-host-integration.md) | [08 宿主集成与 C ABI](08-host-integration.md) |
-| [en/09-toolchain.md](09-toolchain.md) | [09 工具链使用](09-toolchain.md) |
-| [en/10-roadmap.md](10-roadmap.md) | [10 路线图与生态愿景](10-roadmap.md) |
-| [en/13-projects.md](13-projects.md) | [13 示例项目](13-projects.md) |
+| [README.en.md](../README.en.md) | [项目 README](../README.cn.md)（构建、快速使用、调试、配置） |
+| [en/README.md](en/README.md) | [文档入口](README.md) |
+| [en/01-quickstart.md](en/01-quickstart.md) | [01 快速开始](01-quickstart.md) |
+| [en/02-language-tour.md](en/02-language-tour.md) | [02 语言速览](02-language-tour.md) |
+| [en/03-core-concepts.md](en/03-core-concepts.md) | [03 核心概念](03-core-concepts.md) |
+| [en/04-language-reference.md](en/04-language-reference.md) | [04 语言参考](04-language-reference.md) |
+| [en/05-delivery-security.md](en/05-delivery-security.md) | [05 交付安全](05-delivery-security.md) |
+| [en/06-deployment.md](en/06-deployment.md) | [06 跨平台部署](06-deployment.md) |
+| [en/07-stdlib-overview.md](en/07-stdlib-overview.md) | [07 标准库概览](07-stdlib-overview.md) |
+| [en/08-host-integration.md](en/08-host-integration.md) | [08 宿主集成与 C ABI](08-host-integration.md) |
+| [en/09-toolchain.md](en/09-toolchain.md) | [09 工具链使用](09-toolchain.md) |
+| [en/10-roadmap.md](en/10-roadmap.md) | [10 路线图与生态愿景](10-roadmap.md) |
+| [en/13-projects.md](en/13-projects.md) | [13 示例项目](13-projects.md) |
+
+14 至 22、35 与 36 等底层规格目前只有中文页，没有对应的英文页，各页导航会标明“English（中文原文）”。
 
 说明文字按中英文对应维护，代码及其注释保持一致。书稿提供 [中文 Markdown 与 PDF](book/README.md) 和 [英文技术正文](book/en/README.md)；英文不包含番外，也不生成英文 LaTeX/PDF。底层规格与配套工程是否有英文页，按各页导航核对。
 

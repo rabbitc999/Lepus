@@ -63,7 +63,7 @@ Lepus 五个字母各对应一项语言特性，C 与 L 大写：
 | [17 当前能力](doc/17-capabilities.md) | 评估与集成人员 | 实现能力、默认配置、宿主/目标宿主及工具边界 |
 | [10 路线图](doc/10-roadmap.md) | 贡献者、长期用户 | 短中长期目标与「明确不做的事」 |
 
-**英文版**：[`doc/en/`](doc/en/README.en.md) 维护对应的功能说明；未提供完整译文的底层规格从英文入口链接中文版。
+**英文版**：[`doc/en/`](doc/en/README.md) 维护对应的功能说明；未提供完整译文的底层规格从英文入口链接中文版。
 
 中文版优先维护，中英文共有的代码片段保持一致；标准库目录以 API 索引为准。
 
@@ -208,7 +208,7 @@ lepus/
 
 编译器前端由本仓库的 `source/lepus.gram` 经 [HareParse](https://github.com/rabbitc999/HareParse) 生成，从已检查的 AST 直接生成 LLVM IR，再由 LLVM 构建出原生程序。
 
-[HareParse 仓库](https://github.com/rabbitc999/HareParse) 支持以五种模式生成用 Lepus 编写的解析器（上游目标名仍为 `--lang chali`）：**LL(1)、SLR(1)、LALR(1)、LR(1) 和 IELR(1)**，分别通过 `--mode ll1`、`slr`、`lalr`、`lr1` 或 `ielr` 选择。生成的 `parser.chl` 可以用 Lepus 运行或构建。该仓库的编译器前端使用 C++17 输出目标并采用 IELR(1)，配置见 `gen.sh`。
+[HareParse 仓库](https://github.com/rabbitc999/HareParse) 支持用 `--lang lepus` 生成 Lepus 源码解析器，生成物是 `parser.lep` 与分析报告 `RESULT.md`；`gen.sh` 使用的 HareParse 目标列表里没有 `chali`。常用生成模式包括 **LL(1)、SLR(1)、LALR(1)、LR(1) 和 IELR(1)**，分别通过 `--mode ll1`、`slr`、`lalr`、`lr1` 或 `ielr` 选择。生成的 `parser.lep` 可以用 Lepus 运行或构建。该仓库的编译器前端使用 C++17 输出目标并采用 IELR(1)，配置见 `gen.sh`。
 
 类型、所有权和运行期规则由语言定义；宿主平台、导出目标与外部库要求另行核对。已实现能力、默认配置与平台边界见[能力说明](doc/17-capabilities.md)，版本号以 [`VERSION`](VERSION) 为准。
 
