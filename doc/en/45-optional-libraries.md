@@ -91,7 +91,7 @@ Draw between `beginFrame()` and `endFrame()` or inside the draw callback passed 
 
 `customEvent(name, text, code, value)` owns its text payload. `EventBus` provides `on`, `once`, `off`, synchronous `emit`, and queued `post` / `pump`. One-shot listeners are removed before invocation. Listeners added during dispatch wait for the next dispatch; events posted by queued callbacks wait for the next pump. The queue holds at most 4096 events, a pump processes 256 by default, and recursive dispatch is bounded to depth 64. Check operation results.
 
-See the [custom slider](../../example/desktop-gui/custom.lep) and [Game of Life](../../example/desktop-gui/life.lep). [Book chapter 30](../book/en/30-standard-library-tour.md) contains the complete model, paused left-click toggling, right-button panning, simulation speed control, and actual screenshots.
+See the [custom slider](../../example/desktop-gui/custom.lep) and [Game of Life](../../example/desktop-gui/life.lep). [Book chapter 30](../book/en/30-life-game.md) contains the complete model, paused left-click toggling, right-button panning, simulation speed control, and actual screenshots.
 
 ## XML
 

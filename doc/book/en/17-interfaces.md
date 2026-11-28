@@ -181,12 +181,6 @@ void main() {
 42
 ```
 
-### Summary
-
-Interfaces promise callable behavior rather than a particular field layout. Borrowed implementations still need live sources, and value payloads retain concrete copy and resource semantics. Refine types only when recovery or extra data requires it.
-
-Chapter 18 applies behavior requirements to generic constraints and links implementations to results through associated types. Chapter 14 places interface errors inside Result states.
-
 ## 17.6 Refining Errors Inside Enum Payloads
 
 <!-- verify-book -->
@@ -295,7 +289,7 @@ result: 文件已关闭
 option: 文件已关闭
 ```
 
-The first example matches an IoError held through Error, using both explicit variant/type sugar and an unambiguous shorthand, with Fail(_) as fallback.
+The first example matches an IoError held through Error. The first match writes both the outer label and the payload type as Fail::IoError(e); the second uses the unambiguous shorthand IoError(e). Both keep Fail(_) as fallback.
 
 The second retains the outer variant for multiple payloads, with code and typed error positions. Result<Error,Error> can hold an error object in Ok; payload type alone does not determine success.
 
@@ -306,5 +300,11 @@ The third widens concrete errors through propagation. Option propagation tests V
 Method names, parameters, results, receivers and default bodies can also be queried during compilation. Chapter 22 uses $methods and $interfaces to read these descriptions. Querying an interface describes its requirements; querying an implementation can additionally expose concrete associated-type bindings. A query neither executes a method nor constructs an interface object.
 
 Derived ordinary methods must satisfy the same requirements. Debug requires debug to return String; a method with the same name and a different result cannot substitute for it. Runtime interface dispatch follows the rules in this chapter, while field traversal and method generation happen during compilation.
+
+### Summary
+
+Interfaces promise callable behavior rather than a particular field layout. Borrowed implementations still need live sources, and value payloads retain concrete copy and resource semantics. Refine types only when recovery or extra data requires it.
+
+Chapter 18 applies behavior requirements to generic constraints and links implementations to results through associated types. Chapter 14 places interface errors inside Result states. The language reference documents the complete interface, implementation and dispatch rules.
 
 Next: [Chapter 18](18-generics.md).

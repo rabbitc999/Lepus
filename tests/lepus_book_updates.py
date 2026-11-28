@@ -127,7 +127,7 @@ def main():
             assert len(cases) == chapter.count('<!-- verify-book-error:'), entry['zh']
             for mode, invalid, diagnostic in cases:
                 diagnostic_code = re.fullmatch(r'LEP\d{4}', mode)
-                assert mode in ('check', 'run', 'temp') or diagnostic_code, (entry['zh'], mode)
+                assert mode in ('check', 'run') or diagnostic_code, (entry['zh'], mode)
                 negative_count += 1
                 bad = work/f'chapter-failure-{negative_count}.lep'
                 bad.write_text(invalid, encoding='utf-8')
@@ -138,8 +138,6 @@ def main():
                 assert result.returncode != 0 and diagnostic.strip() in result.stderr, (entry['zh'], result)
                 if diagnostic_code:
                     assert re.search(rf'\b{mode}\b', result.stderr), (entry['zh'], mode, result.stderr)
-                if mode == 'temp':
-                    assert '分支结果类型必须一致' not in result.stderr, result
         assert negative_count > 0
         kong=(ROOT/'doc/book/19-函数值与闭包.md').read_text(encoding='utf-8')
         assert '鲁镇的码栈' in kong and '违约金零头' in kong and not re.search(r'^\[\d+\]',kong,re.M)

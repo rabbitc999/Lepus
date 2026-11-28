@@ -10,7 +10,7 @@ Start with a four-line program, run it, and change its message. Variables, branc
 
 Short examples explain individual statements and show where each result comes from. Larger programs are explained in functional sections: their inputs, work, results, and error paths. Try changing one input before moving on. Predict the result first, then run the program.
 
-The guessing game is an early guided exercise. Chapter 16 builds a log-search command, beginning with a few lines of text and adding files, options, and diagnostics. Chapter 28 develops a local HTTP file server one working step at a time. Chapter 29 follows a request through the existing student-management application, from login and permissions to database operations and responses.
+The guessing game is an early guided exercise. Chapter 16 builds a log-search command, beginning with a few lines of text and adding files, options, and diagnostics. Chapter 28 develops a local HTTP file server one working step at a time. Chapter 29 follows a request through the existing student-management application, from login and permissions to database operations and responses. Chapter 30 builds the final project, Conway's Game of Life, combining collections, closures and events into a desktop program that draws and evolves a sparse board with `std::gui` buttons, a slider and a custom widget. Complete signatures for each library module are in the [standard library reference](../../library/README.md).
 
 Complete examples have a main function and expected output. Interactive examples also specify their input. Fragments explain their required context, and intentionally rejected programs are marked as such. Detailed syntax belongs in appendices and reference pages; the main text explains why a feature is useful and how it combines with earlier ideas.
 
@@ -39,15 +39,15 @@ Complete examples have a main function and expected output. Interactive examples
 | [19](19-closures.md) | Function Values and Closures |
 | [20](20-iterators.md) | Iterators |
 | [21](21-concurrency.md) | Concurrency and Threads |
-| [22](22-macros.md) | Macros |
+| [22](22-macros.md) | Preprocessing and Macros |
 | [23](23-annotations-reflection.md) | Annotations and Reflection |
 | [24](24-compiler-directives.md) | Compiler Directives |
 | [25](25-unsafe.md) | Unsafe Code |
 | [26](26-c-interop.md) | Interoperating with C |
-| [27](27-aot-export.md) | Native Build |
+| [27](27-aot-export.md) | Release Build |
 | [28](28-http-file-server.md) | An HTTP File Server |
 | [29](29-student-management.md) | Student Information Management |
-| [30](30-standard-library-tour.md) | Project: Conway’s Game of Life |
+| [30](30-life-game.md) | Project: Conway’s Game of Life |
 
 See [Appendix A](A-common-errors.md) for common errors, [Appendix B](B-standard-library.md) for library tasks, and [Appendix C](C-syntax-operators.md) for syntax and operators, and [Appendix D](D-language-limitations.md) for language and analysis limits with practical alternatives. [Installation](../../en/39-installation-packages.md) explains how to run the compiler. The Chinese edition also includes the original literary extras and a [PDF](../latex/book.pdf); this English edition contains the technical text.
 

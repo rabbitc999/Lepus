@@ -130,7 +130,7 @@ def prepare(work):
     (work / 'style.css').write_text(STYLE, encoding='utf-8')
     lookup = lambda path: pages[(ROOT / path).resolve()]['file']
     quick_links = [('第一个程序', 'doc/book/01-第一个程序.md'), ('常见语法与完整小程序', 'doc/02-language-tour.md'), ('语言参考', 'doc/04-language-reference.md'), ('数组、元组与容器', 'doc/book/13-容器.md'), ('声明简写', 'doc/29-declaration-sugars.md'), ('常见错误速查', 'doc/book/A-常见错误速查.md')]
-    usage_links = [('字符串与文本', 'doc/book/12-字符串与文本.md'), ('数组、列表与元组', 'doc/book/13-容器.md'), ('错误处理', 'doc/book/14-错误处理.md'), ('迭代器与管线', 'doc/book/20-迭代器.md'), ('文件与命令行：日志检索项目', 'doc/book/16-日志检索工具.md'), ('标准库常用程序', 'doc/book/30-标准库初探.md'), ('GUI', 'doc/library/std-gui.md'), ('音频', 'doc/library/std-audio.md'), ('XML', 'doc/library/std-xml.md'), ('密码学', 'doc/library/std-crypto.md')]
+    usage_links = [('字符串与文本', 'doc/book/12-字符串与文本.md'), ('数组、列表与元组', 'doc/book/13-容器.md'), ('错误处理', 'doc/book/14-错误处理.md'), ('迭代器与管线', 'doc/book/20-迭代器.md'), ('文件与命令行：日志检索项目', 'doc/book/16-日志检索工具.md'), ('生命游戏项目', 'doc/book/30-康威生命游戏.md'), ('GUI', 'doc/library/std-gui.md'), ('音频', 'doc/library/std-audio.md'), ('XML', 'doc/library/std-xml.md'), ('密码学', 'doc/library/std-crypto.md')]
     def link_list(items):
         """将常用入口映射到手册中的实际页面。"""
         return '<ul>' + ''.join('<li><a href="' + lookup(path) + '">' + html.escape(title) + '</a></li>' for title, path in items) + '</ul>'

@@ -159,7 +159,7 @@ Write a braced definition as $macro NAME(parameters) -> expr { ... }. The result
 | --- | --- |
 | Conditional | `$if (condition) { ... } $elif (condition) { ... } $else { ... }` |
 | Loops | `$for (field in $fields<T>()) { ... }`, `$while (condition) { ... }`, `$loop { ... }` |
-| Syntax matching | `$match (value) { ident => { ... } _ => { ... } }`, or `$if (value is ident) { ... } $else { ... }` |
+| Syntax matching | `$match (value is ident) { ... } $else { ... }`, or `$if (value is ident) { ... } $else { ... }` |
 | Regex matching | `$regex (value is "[0-9]+") { ... } $else { ... }` |
 
 Write a zipped loop as `$for ((a, b) in (left, right)) { ... }`.
@@ -291,30 +291,25 @@ T is int32, U is int16, and the result is 7. Initialization, assignment, functio
 
 ```lepus
 $macro CLASSIFY(value) -> {
-$match (value) {
-ident => {
+$match (value is ident) {
 1
-}
-expr => {
+} $else (is expr) {
 2
-}
-type => {
+} $else (is type) {
 3
-}
-block => {
+} $else (is block) {
 4
-}
-stmt => {
+} $else (is stmt) {
 5
-}
-_ => {
+} $else (is pattern) {
+6
+} $else {
 0
-}
 }
 }
 ```
 
-`$match (value)` tries its branches in order. Each branch is written `category => { ... }`, and a trailing `_ => { ... }` is the fallback. The supported categories are `expr`, `ident`, `type`, `block`, `stmt` and `pattern`. The same generated parser must consume the whole fragment, and the first matching branch wins; an identifier may also be an expression. Branches must be exhaustive: either list all six categories or end with `_ => { ... }`, otherwise the macro definition is rejected; a category branch after `_` is reported as unreachable. Syntax recognition does not imply valid names or types. Only selected output enters final name, type, capture, borrow and resource checks, while all template syntax must be valid.
+`$match (value is category)` tries its branches in source order; further branches continue with `$else (is category) { ... }`, and a trailing `$else { ... }` is the fallback. The categories are `expr`, `ident`, `type`, `block`, `stmt` and `pattern`, and the same generated parser must consume the whole fragment. The first matching branch wins; an identifier may also be an expression, so order matters. The final `$else` may be omitted. Syntax recognition does not imply valid names or types. Only selected output enters final name, type, capture, borrow and resource checks, while all template syntax must be valid.
 
 The same classification can appear in `$if` conditions, combined with compile-time constants through `&&`, `||` and `!`:
 

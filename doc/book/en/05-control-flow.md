@@ -190,7 +190,7 @@ void main()
 
 The first for appears on an assignment's right-hand side. It examines zero through nine; the first value greater than five is six. Yield supplies six as the for expression's result and ends the search. Else supplies minus one only when the body has not produced a result.
 
-The while condition is false immediately, so its body never supplies its string. Else supplies the skipped label instead, yielding the shown output. Here loop else completes the path that produced no body result; its execution should be understood from loop-expression semantics, not guessed from an ordinary if.
+The while condition is false immediately, so its body never supplies `运行`. Else supplies its own string, `结束`, instead. The program prints `6 结束`. Here loop else completes the path that produced no body result; its execution should be understood from loop-expression semantics, not guessed from an ordinary if.
 
 
 ## 5.5 Exit levels and cleanup

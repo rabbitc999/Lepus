@@ -1,7 +1,7 @@
 # Chapter 30 Project: Conway’s Game of Life
 
 <!-- LANGUAGE NAVIGATION -->
-**English** · [简体中文](../30-标准库初探.md)
+**English** · [简体中文](../30-康威生命游戏.md)
 <!-- END LANGUAGE NAVIGATION -->
 
 Build a desktop application using `std::gui` buttons, a speed slider, and a custom board widget. The application starts paused. Green squares are live cells.

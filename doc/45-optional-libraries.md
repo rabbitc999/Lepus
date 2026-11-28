@@ -93,7 +93,7 @@ lepus run example/desktop-gui/audio.lep --out build/audio-demo -- path/to/tone.w
 
 `customEvent(name, text, code, value)` 创建拥有自身文本的事件。`EventBus.on`、`once`、`off`、`emit` 提供同步订阅，`post` 与 `pump` 提供有界队列。一次性监听器在调用前注销，回调中新注册的监听器延后到下一次派发；回调新增的排队事件留给下一次 `pump`。队列上限为 4096，默认单次处理 256 项，递归派发深度上限为 64，调用者应检查返回值。
 
-参考[自定义滑块示例](../example/desktop-gui/custom.lep)与[生命游戏项目](../example/desktop-gui/life.lep)。[书稿第 30 章](book/30-标准库初探.md)提供完整模型、暂停左键切换细胞、右键拖动视口及模拟帧率控制，并附实际运行截图。
+参考[自定义滑块示例](../example/desktop-gui/custom.lep)与[生命游戏项目](../example/desktop-gui/life.lep)。[书稿第 30 章](book/30-康威生命游戏.md)提供完整模型、暂停左键切换细胞、右键拖动视口及模拟帧率控制，并附实际运行截图。
 
 ## XML
 

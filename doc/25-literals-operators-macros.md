@@ -159,7 +159,7 @@ lepus: 运算符 + 有多条声明匹配同一对操作数 A / int64，返回类
 | --- | --- |
 | 条件选择 | `$if (condition) { ... } $elif (condition) { ... } $else { ... }` |
 | 循环 | `$for (field in $fields<T>()) { ... }`, `$while (condition) { ... }`, `$loop { ... }` |
-| 片段分类 | `$match (value) { ident => { ... } _ => { ... } }`，或 `$if (value is ident) { ... } $else { ... }` |
+| 片段分类 | `$match (value is ident) { ... } $else { ... }`，或 `$if (value is ident) { ... } $else { ... }` |
 | 正则选择 | `$regex (value is "[0-9]+") { ... } $else { ... }` |
 
 成组循环写成 `$for ((a, b) in (left, right)) { ... }`。
@@ -312,30 +312,25 @@ void main() {
 
 ```lepus
 $macro CLASSIFY(value) -> {
-$match (value) {
-ident => {
+$match (value is ident) {
 1
-}
-expr => {
+} $else (is expr) {
 2
-}
-type => {
+} $else (is type) {
 3
-}
-block => {
+} $else (is block) {
 4
-}
-stmt => {
+} $else (is stmt) {
 5
-}
-_ => {
+} $else (is pattern) {
+6
+} $else {
 0
-}
 }
 }
 ```
 
-`$match (值)` 按分支顺序尝试，分支写成 `类别 => { ... }`，结尾的 `_ => { ... }` 是兜底。支持的类别是 `expr`、`ident`、`type`、`block`、`stmt`、`pattern`，使用同一生成解析器完整消费原始片段。按书写顺序选择首个成立分支；`ident` 也可能是 `expr`，因此顺序有意义。分支必须穷尽：要么列出全部六个类别，要么在末尾写 `_ => { ... }`，否则在宏定义处报错；`_` 之后不能再写类别分支，否则会报告该分支永远不会被选中。语法成立不代表名称存在或类型合法；只有最终展开的节点进入名称、类型、捕获、借用和资源检查。未选分支的模板结构仍须合法。
+`$match (值 is 类别)` 按书写顺序尝试，接 `$else (is 类别) { ... }` 继续，结尾的 `$else { ... }` 是兜底。类别是 `expr`、`ident`、`type`、`block`、`stmt`、`pattern`，使用同一生成解析器完整消费原始片段。首个成立的分支被采用；`ident` 也可能是 `expr`，因此顺序有意义。末尾的 `$else` 可以省略，省掉时按“没有分支成立”继续处理。语法成立不代表名称存在或类型合法；只有最终展开的节点进入名称、类型、捕获、借用和资源检查。未选分支的模板结构仍须合法。
 
 同一种分类也能写进 `$if` 条件，与编译期常量用 `&&`、`||`、`!` 组合：
 
