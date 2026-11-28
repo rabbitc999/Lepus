@@ -13,7 +13,8 @@ import re
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 BOOK = os.path.normpath(os.path.join(HERE, '..', '..'))     # doc/book
-OUT = os.path.join(BOOK, 'latex', 'chapters')
+LATEX = os.path.normpath(os.path.join(HERE, '..'))          # doc/book/latex
+OUT = os.path.join(LATEX, 'chapters')
 REPO_WEB = 'https://github.com/rabbitc999/Lepus'
 
 CHAPTERS = json.loads((Path(BOOK).parents[1] / 'tools/book_chapters.json').read_text(encoding='utf-8'))['chapters']
@@ -119,12 +120,7 @@ class Converter:
     def inline(self, s):
         self.codes = []
         self.links = []
-        image = re.fullmatch(r'!\[([^\]]*)\]\((images/[^)]+)\)', s.strip())
-        if image:
-            path = image.group(2)
-            if '..' in path or not os.path.isfile(os.path.join(BOOK, path)):
-                raise ValueError('无效书稿图片：' + path)
-            return '\\begin{center}\n\\includegraphics[width=\\linewidth,height=0.72\\textheight,keepaspectratio]{../' + path + '}\\par\n\\nopagebreak\n' + esc(image.group(1)) + '\n\\end{center}'
+        s = re.sub(r'!\[([^\]]*)\]\(([^)\s]+)\)', self._stash_image, s)
         # 双反引号代码段先于单反引号处理，否则 ``x`` 会被拆成 `x` 加一对裸反引号。
         s = re.sub(r'``((?:[^`\n]|`(?!`))+?)``', self._stash_code, s)
         s = re.sub(r'`([^`\n]+)`', self._stash_code, s)
@@ -134,7 +130,23 @@ class Converter:
         s = charmap(s)
         s = self._restore_codes(s)
         s = re.sub(r'\x02(\d+)\x03', self._emit_link, s)
+        s = re.sub(r'\x0b(\d+)\x0c', self._emit_image, s)
         return s
+
+    def _stash_image(self, m):
+        """按行内图片语法取图；原先只有整段就是图片时才取，段首徽标于是被当成链接。"""
+        alt, path = m.group(1), m.group(2)
+        # 链接先于图片处理会破坏图片里的相对路径，因此图片必须先单独改写。
+        # 路径相对 doc/book（与图片所在的 Markdown 同级），与 latex/ 无关。
+        source = os.path.normpath(os.path.join(BOOK, path))
+        if not os.path.isfile(source):
+            raise ValueError('无效书稿图片：' + path)
+        self.codes.append('\\includegraphics[width=\\linewidth,height=0.72\\textheight,keepaspectratio]{%s}'
+                          % os.path.relpath(source, LATEX).replace('\\', '/'))
+        return '\u000b%d\u000c' % (len(self.codes) - 1)
+
+    def _emit_image(self, m):
+        return self.codes[int(m.group(1))]
 
     def _stash_code(self, m):
         self.codes.append(m.group(1))
